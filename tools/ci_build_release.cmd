@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0\.."
 
 echo ========================================
-echo   BO3 HLSL Previewer - CI Release Build
+echo   BO3 Shader Studio - CI Release Build
 echo ========================================
 
 where qmake.exe >nul 2>nul
@@ -42,7 +42,25 @@ mkdir build_qt
 mkdir dist
 
 pushd build_qt
-qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release"
+if /I "%BO3_CI_FAST%"=="1" (
+    echo Fast tester build: compiler cache enabled.
+    if defined SCCACHE_PATH (
+        if not exist "%SCCACHE_PATH%" (
+            echo ERROR: SCCACHE_PATH does not point to an existing sccache executable.
+            goto :fail_from_build
+        )
+    ) else (
+        where sccache.exe >nul 2>nul
+        if errorlevel 1 (
+            echo ERROR: Fast CI requested, but sccache.exe was not found.
+            goto :fail_from_build
+        )
+    )
+    qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"
+) else (
+    echo Full build: compiler cache launcher disabled.
+    qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release"
+)
 if errorlevel 1 goto :fail_from_build
 nmake.exe /nologo
 if errorlevel 1 goto :fail_from_build

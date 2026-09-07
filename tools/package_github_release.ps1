@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory=$true)][string]$Repository,
     [string]$DistDir = 'dist',
     [string]$OutputDir = 'release_artifacts',
-    [string]$NotesFile = ''
+    [string]$NotesFile = '',
+    [switch]$UpdateOnly,
+    [switch]$LeanPayload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,7 +67,37 @@ try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
     $payload = Join-Path $staging 'payload'
     New-Item -ItemType Directory -Path $payload -Force | Out-Null
-    Copy-Item -Path (Join-Path $dist '*') -Destination $payload -Recurse -Force
+
+    if ($LeanPayload) {
+        # The updater copies only files present in payload and leaves every other
+        # installed file alone. Automatic tester builds therefore do not need to
+        # resend Qt's ~50 MB runtime for ordinary C++/shader/data fixes.
+        #
+        # Keep all BO3 Shader Studio-owned runtime content in the lean package so
+        # source, sample, preset, template and compatibility edits still update.
+        $leanItems = @(
+            'BO3HLSLPreviewer.exe',
+            'version.json',
+            'bo3_compat',
+            'shaders',
+            'presets',
+            'ui',
+            'export_templates',
+            'tests'
+        )
+        foreach ($item in $leanItems) {
+            $source = Join-Path $dist $item
+            if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination $payload -Recurse -Force
+            }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $payload 'BO3HLSLPreviewer.exe'))) {
+            throw 'Lean tester payload is missing BO3HLSLPreviewer.exe.'
+        }
+    }
+    else {
+        Copy-Item -Path (Join-Path $dist '*') -Destination $payload -Recurse -Force
+    }
 
     $manifest = [ordered]@{
         product = 'BO3 HLSL Previewer'
@@ -77,21 +109,36 @@ try {
         repository = $Repository
         notes = $notes.Trim()
         createdUtc = [DateTime]::UtcNow.ToString('o')
+        payloadKind = if ($LeanPayload) { 'lean-tester' } else { 'full-runtime' }
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'update_manifest.json') -Encoding UTF8
 
-    Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel Optimal
-    Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
+    $updateCompression = if ($LeanPayload) { 'Fastest' } else { 'Optimal' }
+    Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel $updateCompression
+
+    if (-not $UpdateOnly) {
+        Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
+    }
 }
 finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-foreach ($path in @($updatePath, $fullPath)) {
+$hashTargets = @($updatePath)
+if (-not $UpdateOnly) { $hashTargets += $fullPath }
+foreach ($path in $hashTargets) {
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath ($path + '.sha256') -Value ("$hash  " + [IO.Path]::GetFileName($path)) -Encoding ASCII
 }
 
 Set-Content -LiteralPath (Join-Path $out 'release_notes.md') -Value $notes -Encoding UTF8
 Write-Host "Created: $updatePath"
-Write-Host "Created: $fullPath"
+if ($UpdateOnly) {
+    Write-Host 'Automatic tester mode: skipped duplicate full-distribution ZIP.'
+}
+else {
+    Write-Host "Created: $fullPath"
+}
+if ($LeanPayload) {
+    Write-Host 'Automatic tester mode: update ZIP contains only BO3 Shader Studio-owned runtime files; Qt runtime DLLs are not resent.'
+}

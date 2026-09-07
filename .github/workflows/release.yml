@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+    # Documentation-only edits should not compile or publish a tester update.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       version:
@@ -40,6 +45,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # Two commits is enough for the normal one-push-at-a-time workflow.
+          # If GitHub cannot supply the previous commit, the packaging step
+          # conservatively falls back to a full runtime update.
+          fetch-depth: 2
 
       - name: Resolve release metadata
         shell: pwsh
@@ -50,11 +60,15 @@ jobs:
           MANUAL_NOTES: ${{ inputs.notes }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           $sourceVersionPath = Join-Path $env:GITHUB_WORKSPACE 'version.json'
           $sourceVersion = Get-Content -LiteralPath $sourceVersionPath -Raw | ConvertFrom-Json
           $displayVersion = [string]$sourceVersion.displayVersion
           if ([string]::IsNullOrWhiteSpace($displayVersion)) { $displayVersion = '0.1' }
+
+          $fastTester = $false
+          $leanUpdate = $false
 
           if ($env:EVENT_NAME -eq 'workflow_dispatch') {
             if (-not [string]::IsNullOrWhiteSpace($env:MANUAL_DISPLAY_VERSION)) {
@@ -64,13 +78,45 @@ jobs:
             $notes = $env:MANUAL_NOTES
           }
           else {
-            # Every push to main is an automatic tester update.
+            # Pushes to main are automatic tester updates. They use compiler
+            # caching and, when runtime dependencies have not changed, a small
+            # delta-style update payload instead of resending the Qt runtime.
             $channel = 'tester'
+            $fastTester = $true
+            $leanUpdate = $true
             $shortSha = $env:COMMIT_SHA.Substring(0, 7)
             $commitMessage = $env:COMMIT_MESSAGE
             if ([string]::IsNullOrWhiteSpace($commitMessage)) { $commitMessage = 'Automatic tester update.' }
             $firstLine = ($commitMessage -split "`r?`n")[0].Trim()
             $notes = "### What's changed`n$firstLine`n`nBuild: ``$shortSha``"
+
+            # A project-file or release-workflow change can alter which Qt DLLs
+            # are required. In that case keep the fast compiler cache, but ship
+            # a full runtime update for safety. If the diff cannot be resolved,
+            # also choose the safe full payload.
+            $before = $env:BEFORE_SHA
+            $canDiff = -not [string]::IsNullOrWhiteSpace($before) -and $before -notmatch '^0+$'
+            if ($canDiff) {
+              git cat-file -e "$before^{commit}" 2>$null
+              $canDiff = ($LASTEXITCODE -eq 0)
+            }
+            if ($canDiff) {
+              $changed = @(git diff --name-only $before $env:COMMIT_SHA)
+              Write-Host 'Changed files:'
+              $changed | ForEach-Object { Write-Host "  $_" }
+              foreach ($path in $changed) {
+                $normalized = $path.Replace('\','/')
+                if ($normalized -eq 'BO3HLSLPreviewer.pro' -or
+                    $normalized -eq '.github/workflows/release.yml') {
+                  $leanUpdate = $false
+                  break
+                }
+              }
+            }
+            else {
+              Write-Host 'Previous commit is unavailable; using a full runtime update payload for safety.'
+              $leanUpdate = $false
+            }
           }
 
           if ($displayVersion -notmatch '^\d+(?:\.\d+){0,2}$') {
@@ -84,6 +130,8 @@ jobs:
           "RELEASE_VERSION=$updateVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RELEASE_DISPLAY_VERSION=$displayVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_FAST_TESTER=$([int]$fastTester)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_LEAN_UPDATE=$([int]$leanUpdate)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           $notesPath = Join-Path $env:RUNNER_TEMP 'bo3_release_notes.md'
           if ([string]::IsNullOrWhiteSpace($notes)) {
@@ -95,6 +143,8 @@ jobs:
           Write-Host "Visible version: $displayVersion"
           Write-Host "Update channel: $channel"
           Write-Host "Internal ordering version: $updateVersion"
+          Write-Host "Fast tester compile cache: $fastTester"
+          Write-Host "Lean tester update payload: $leanUpdate"
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -104,6 +154,12 @@ jobs:
           target: desktop
           arch: win64_msvc2022_64
           cache: true
+
+      - name: Set up C++ compiler cache
+        if: env.BO3_FAST_TESTER == '1'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: 'v0.15.0'
 
       - name: Stamp GitHub update metadata
         shell: pwsh
@@ -122,8 +178,26 @@ jobs:
 
       - name: Build Windows runtime
         shell: cmd
+        env:
+          BO3_CI_FAST: ${{ env.BO3_FAST_TESTER }}
+          SCCACHE_GHA_ENABLED: 'true'
+          SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
         run: tools\ci_build_release.cmd
 
+      - name: Show compiler-cache statistics
+        if: env.BO3_FAST_TESTER == '1'
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:SCCACHE_PATH) -and (Test-Path -LiteralPath $env:SCCACHE_PATH)) {
+            & $env:SCCACHE_PATH --show-stats
+          }
+          else {
+            sccache --show-stats
+          }
+
+      # Keep all four regression suites on tester updates. The speedup comes
+      # from compiler caching plus much smaller packaging/upload work, rather
+      # than sacrificing validation coverage.
       - name: Run GLSL regression suite
         id: glsl_regression
         continue-on-error: true
@@ -169,17 +243,45 @@ jobs:
             throw ("Regression suites failed: " + (($failed | ForEach-Object { $_.Key }) -join ', '))
           }
 
-      - name: Create update and full distribution packages
+      - name: Create release package
         shell: pwsh
         run: |
-          .\tools\package_github_release.ps1 `
-            -Version $env:RELEASE_VERSION `
-            -DisplayVersion $env:RELEASE_DISPLAY_VERSION `
-            -Channel $env:RELEASE_CHANNEL `
-            -Repository '${{ github.repository }}' `
-            -NotesFile $env:RELEASE_NOTES_FILE
+          if ($env:BO3_FAST_TESTER -eq '1' -and $env:BO3_LEAN_UPDATE -eq '1') {
+            Write-Host 'Creating lean automatic tester update (no duplicate Qt runtime/full distribution ZIP).'
+            .\tools\package_github_release.ps1 `
+              -Version $env:RELEASE_VERSION `
+              -DisplayVersion $env:RELEASE_DISPLAY_VERSION `
+              -Channel $env:RELEASE_CHANNEL `
+              -Repository '${{ github.repository }}' `
+              -NotesFile $env:RELEASE_NOTES_FILE `
+              -UpdateOnly `
+              -LeanPayload
+          }
+          elseif ($env:BO3_FAST_TESTER -eq '1') {
+            Write-Host 'Runtime/build configuration changed; creating a full update payload, but skipping the duplicate fresh-install ZIP.'
+            .\tools\package_github_release.ps1 `
+              -Version $env:RELEASE_VERSION `
+              -DisplayVersion $env:RELEASE_DISPLAY_VERSION `
+              -Channel $env:RELEASE_CHANNEL `
+              -Repository '${{ github.repository }}' `
+              -NotesFile $env:RELEASE_NOTES_FILE `
+              -UpdateOnly
+          }
+          else {
+            Write-Host 'Manual release: creating complete update and fresh-install distributions.'
+            .\tools\package_github_release.ps1 `
+              -Version $env:RELEASE_VERSION `
+              -DisplayVersion $env:RELEASE_DISPLAY_VERSION `
+              -Channel $env:RELEASE_CHANNEL `
+              -Repository '${{ github.repository }}' `
+              -NotesFile $env:RELEASE_NOTES_FILE
+          }
 
+      # Automatic tester releases are already stored as GitHub Release assets,
+      # so uploading a second copy as a workflow artifact only wastes time and
+      # bandwidth. Keep workflow artifacts for deliberate manual/full releases.
       - name: Upload workflow artifacts
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: BO3-Shader-Studio-${{ env.RELEASE_DISPLAY_VERSION }}
