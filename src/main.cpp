@@ -7014,7 +7014,7 @@ float4 ps_main(PixelInput input) : SV_TARGET
                 normalized, rel, {}, "resolvedScene", bo3::PackageConfiguration::Runtime);
             if(runtimeTechset.contains("vs = \"vs_generic\""))
                 return "runtime techset still forces vs_generic for PostFx_GenerateFullscreenQuad vs_main";
-            if(!runtimeTechset.contains(QRegularExpression("vs\s*=\s*VertexShader\s*\(\s*\)")))
+            if(!runtimeTechset.contains(QRegularExpression("vs\\s*=\\s*VertexShader\\s*\\(\\s*\\)")))
                 return "runtime shader-defined fullscreen VS is not selected";
 
             // TOOLSGFX only uses the proven APE vs_generic contract after the
@@ -7775,8 +7775,19 @@ float4 ps_main(MaterialVertex input) : SV_TARGET0
                 return "material HLSL sampler was not emitted as a techset Sampler parameter";
             const bo3::ValidationResult validation = validateGeneratedPackageForBo3(
                 materialSource, techset, relativePath, "lit");
-            return validation.status() == bo3::CompatibilityStatus::Pass
-                ? QString() : validation.toText();
+            if(validation.hasErrors()) return validation.toText();
+            // The generated custom material source is bundled, but the selected
+            // BO3 material technique also inherits stock vs_generic/ps_generic
+            // stages. Their optimized bytecode is not part of this project, so
+            // strict package validation must remain UNKNOWN rather than falsely
+            // claiming the entire technique is proven compatible.
+            if(validation.status() != bo3::CompatibilityStatus::Unknown)
+                return "structured material package with inherited BO3 stock stages was incorrectly claimed fully proven";
+            bool explainedExternalStage = false;
+            for(const bo3::Diagnostic& diagnostic : validation.diagnostics)
+                if(diagnostic.code == "PACKAGE_EXTERNAL_STAGE_SOURCE") explainedExternalStage = true;
+            return explainedExternalStage ? QString()
+                                          : QString("structured material UNKNOWN status did not explain the inherited stock stage");
         });
 
         run("sky export keeps unbundled stock stages unknown", [&]() -> QString

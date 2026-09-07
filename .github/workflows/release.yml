@@ -88,21 +88,54 @@ jobs:
         shell: cmd
         run: tools\ci_build_release.cmd
 
+      # Run every regression suite even when an earlier suite fails. This makes
+      # tester CI report all regressions in one run instead of forcing a
+      # fix/rerun cycle for each suite. The Regression gate below still prevents
+      # broken builds from being packaged or published.
       - name: Run GLSL regression suite
+        id: glsl_regression
+        continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --regression-all
 
       - name: Run Shadertoy regression suite
+        id: shadertoy_regression
+        continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --shadertoy-regression-all
 
       - name: Run PostFX export regression suite
+        id: postfx_regression
+        continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --postfx-export-regression-all
 
       - name: Run BO3 package regression suite
+        id: package_regression
+        continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --bo3-package-regression-all
+
+      - name: Regression gate
+        if: always()
+        shell: pwsh
+        env:
+          GLSL_RESULT: ${{ steps.glsl_regression.outcome }}
+          SHADERTOY_RESULT: ${{ steps.shadertoy_regression.outcome }}
+          POSTFX_RESULT: ${{ steps.postfx_regression.outcome }}
+          PACKAGE_RESULT: ${{ steps.package_regression.outcome }}
+        run: |
+          $results = [ordered]@{
+            GLSL = $env:GLSL_RESULT
+            Shadertoy = $env:SHADERTOY_RESULT
+            PostFX = $env:POSTFX_RESULT
+            'BO3 package' = $env:PACKAGE_RESULT
+          }
+          $results.GetEnumerator() | ForEach-Object { Write-Host ("{0}: {1}" -f $_.Key, $_.Value) }
+          $failed = @($results.GetEnumerator() | Where-Object { $_.Value -ne 'success' })
+          if ($failed.Count -gt 0) {
+            throw ("Regression suites failed: " + (($failed | ForEach-Object { $_.Key }) -join ', '))
+          }
 
       - name: Create update and full distribution packages
         shell: pwsh
