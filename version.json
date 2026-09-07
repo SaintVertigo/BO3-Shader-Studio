@@ -1,0 +1,8 @@
+{
+  "product": "BO3 HLSL Previewer",
+  "version": "0.19.0",
+  "updateFormat": 1,
+  "githubRepository": "__GITHUB_REPOSITORY__",
+  "updateAssetPrefix": "BO3_HLSL_Previewer_Update_",
+  "defaultUpdateChannel": "stable"
+}

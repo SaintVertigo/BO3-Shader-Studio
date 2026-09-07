@@ -1,0 +1,46 @@
+{
+  "info": {
+    "name": "BO3 Previewer Shadertoy Per-Pass iChannel Smoke Test"
+  },
+  "renderpass": [
+    {
+      "type": "common",
+      "name": "Common",
+      "code": "float demoPulse(float x) { return 0.5 + 0.5 * sin(x); }\n"
+    },
+    {
+      "type": "buffer",
+      "name": "Buffer A",
+      "code": "void mainImage(out vec4 fragColor, in vec2 fragCoord) { vec2 uv = fragCoord / iResolution.xy; fragColor = vec4(uv, demoPulse(iTime), 1.0); }\n",
+      "inputs": [
+        { "id": "demo_texture", "channel": 1, "ctype": "texture", "src": "/media/a/demo_texture.png", "sampler": { "filter": "linear", "wrap": "repeat", "vflip": "true", "srgb": "false" } }
+      ],
+      "outputs": [
+        { "id": "bo3_buffer_a", "channel": 0 }
+      ]
+    },
+    {
+      "type": "buffer",
+      "name": "Buffer B",
+      "code": "void mainImage(out vec4 fragColor, in vec2 fragCoord) { vec2 uv = fragCoord / iResolution.xy; vec3 c = texture(iChannel0, uv).rgb; fragColor = vec4(c.bgr, 1.0); }\n",
+      "inputs": [
+        { "id": "bo3_buffer_a", "channel": 0, "ctype": "buffer", "src": "/media/previz/buffer00.png", "sampler": { "filter": "linear", "wrap": "clamp", "vflip": "false", "srgb": "false" } }
+      ],
+      "outputs": [
+        { "id": "bo3_buffer_b", "channel": 0 }
+      ]
+    },
+    {
+      "type": "image",
+      "name": "Image",
+      "code": "void mainImage(out vec4 fragColor, in vec2 fragCoord) { vec2 uv = fragCoord / iResolution.xy; vec3 c = texture(iChannel0, uv).rgb; c *= 0.75 + 0.25 * demoPulse(iTime); fragColor = vec4(c, 1.0); }\n",
+      "inputs": [
+        { "id": "bo3_buffer_b", "channel": 0, "ctype": "buffer", "src": "/media/previz/buffer01.png", "sampler": { "filter": "linear", "wrap": "clamp", "vflip": "false", "srgb": "false" } },
+        { "id": "demo_cube", "channel": 2, "ctype": "cubemap", "src": "/media/a/demo_cube.png", "sampler": { "filter": "linear", "wrap": "clamp", "vflip": "false", "srgb": "true" } }
+      ],
+      "outputs": [
+        { "id": "bo3_image", "channel": 0 }
+      ]
+    }
+  ]
+}

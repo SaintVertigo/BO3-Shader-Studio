@@ -1,0 +1,72 @@
+#include "lit_base_shaders"
+#include "lit_decal_base.inc"
+#include "emissive_base"
+#include "scroll_base"
+#include "flicker_base"
+#include "reveal_base"
+
+Globals()
+{
+    category = "Decal"
+    renderFlags = RenderFlags()
+    {
+#if MTL_TYPE_VOL_DECAL == "1"
+        isVolDecal = true
+#endif
+        isEmissive = true
+        isDecal = true
+        noBspCollision = true
+        useRevealMap = true
+    }
+    availablePrefixes = "mc/ mcs/ wc/ / vd/"
+}
+
+Sampler("colorSampler")
+{
+    tile = "tile both"
+    filter = "linear (mip linear)"
+    tweak = Tweak()
+    {
+        category = "Texture"
+        title = "Color sampler"
+    }
+}
+
+Texture("emissiveMask")
+{
+    image = Image(<transRevealMap, $white_reveal>)
+    semantic = "revealMap"
+}
+
+Texture("distortionMap")
+{
+    image = Image(<normalMap, $normal>)
+    semantic = "normalMap"
+}
+
+Texture("colorMap") : "emissiveMap"
+{
+}
+
+Color("colorTint") : "emissiveTint1"
+{
+}
+
+float2("rotateUVs").tweak = Tweak("Mask Motion", "Rotation, Spin Rate", "10")
+
+Technique("unlit") : "base lit decal unlit"
+{
+    defines = "USE_COLOR_TINT"
+}
+
+Technique("lit")
+{
+    state = "add + depth + decal"
+    source = "decal_emissive_mask.hlsl"
+    defines = "USE_COLOR_TINT", "USE_SCROLL_ROTATE_UVS", "USE_EMISSIVE_FLICKER"
+    vs = "vs_generic"
+    ps = PixelShader() : "ps_generic"
+    {
+        source = "decal_emissive_reveal_ps.hlsl"
+    }
+}

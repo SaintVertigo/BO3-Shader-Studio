@@ -1,0 +1,24 @@
+{
+  "info": {
+    "name": "BO3 Previewer Shadertoy Texture Thumbnail Smoke Test"
+  },
+  "renderpass": [
+    {
+      "type": "image",
+      "name": "Image",
+      "code": "void mainImage(out vec4 fragColor, in vec2 fragCoord) { vec2 uv = fragCoord / iResolution.xy; fragColor = texture(iChannel0, uv); }\n",
+      "inputs": [
+        {
+          "id": "shadertoy_ascii_font",
+          "channel": 0,
+          "ctype": "texture",
+          "src": "/media/a/08b42b43ae9d3c0605da11d0eac86618ea888e62cdd9518ee8b9097488b31560.png",
+          "sampler": { "filter": "linear", "wrap": "clamp", "vflip": "false", "srgb": "false" }
+        }
+      ],
+      "outputs": [
+        { "id": "bo3_image", "channel": 0 }
+      ]
+    }
+  ]
+}

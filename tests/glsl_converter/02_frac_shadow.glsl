@@ -1,0 +1,1 @@
+vec2 random2(vec2 p){return fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453);} void mainImage(out vec4 fragColor,in vec2 fragCoord){vec2 uv=fragCoord/iResolution.xy; vec2 cell=floor(uv*4.0); vec2 frac=fract(uv*4.0); fragColor=vec4(random2(cell)+frac,0.0,1.0);}

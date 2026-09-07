@@ -1,0 +1,61 @@
+#include "lit_base_shaders"
+
+Globals()
+{
+    category = "2d"
+    renderFlags = RenderFlags()
+    {
+        isEmissive = true
+    }
+    availablePrefixes = "mc/ mcs/ wc/"
+}
+
+Sampler("bilinearClampler")
+{
+    tile = "no tile"
+    filter = "linear (mip none)"
+}
+
+Texture("frameBuffer")
+{
+    semantic = "2d"
+}
+
+float4("tint")
+{
+    tweak = Tweak()
+    {
+        category = "Color"
+        title = "Tint"
+        order = "10"
+    }
+}
+
+Technique("base fullscreen")
+{
+    state = "replace + nocull"
+    source = "package_fixture.hlsl"
+    defines = "BASE"
+    vs = VertexShader()
+    {
+    }
+    ps = PixelShader()
+    {
+    }
+}
+
+Technique("lit", "unlit") : "base fullscreen"
+{
+    defines += "CHILD"
+    ps = PixelShader() : "ps_generic"
+    {
+#if TOOLSGFX == "1"
+        frameBuffer = Texture()
+        {
+            image = Image("$white_diffuse")
+        }
+#else
+        frameBuffer = CodeTexture("resolvedScene")
+#endif
+    }
+}

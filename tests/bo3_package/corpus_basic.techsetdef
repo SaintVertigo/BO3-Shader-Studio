@@ -1,0 +1,37 @@
+#include "lit_base_basic"
+
+Globals()
+{
+    category = "Geometry"
+    renderFlags = "lit deferred opaque"
+    availablePrefixes = "mc/ mcs/ wc/"
+}
+
+Technique("build shadowmap depth") : "build shadowmap depth base"
+{
+}
+
+#if TETRAHEDRON_OMNI_SHADOWS == "1"
+Technique("build shadowmap depth planes") : "build shadowmap depth planes base"
+{
+}
+#endif
+
+Technique("gbuffer")
+{
+    defines = "BASE_TEXTURES", "USE_COLOR_TINT"
+    state = "gbuffer opaque"
+    vs = VertexShader()
+    {
+        source = "gbuffer_lit_vs_semi-reversed.hlsl"
+    }
+    ps = PixelShader()
+    {
+        source = "gbuffer_lit_ps_semi-reversed.hlsl"
+    }
+}
+
+Technique("gbuffer motion vector") : "gbuffer"
+{
+    defines += "GENERATE_MOTION_VECTOR"
+}

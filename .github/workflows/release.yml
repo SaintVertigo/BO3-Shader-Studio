@@ -1,0 +1,134 @@
+name: Build and Release BO3 HLSL Previewer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (example: 0.20.0-test.1 or 0.20.0)'
+        required: true
+        type: string
+      channel:
+        description: 'Update channel'
+        required: true
+        default: tester
+        type: choice
+        options:
+          - tester
+          - stable
+      notes:
+        description: 'Release notes (optional)'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        shell: pwsh
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+          MANUAL_CHANNEL: ${{ inputs.channel }}
+          MANUAL_NOTES: ${{ inputs.notes }}
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $version = $env:MANUAL_VERSION.Trim()
+            $channel = $env:MANUAL_CHANNEL.Trim().ToLowerInvariant()
+            $notes = $env:MANUAL_NOTES
+          } else {
+            $version = '${{ github.ref_name }}'
+            if ($version.StartsWith('v')) { $version = $version.Substring(1) }
+            $channel = if ($version.Contains('-')) { 'tester' } else { 'stable' }
+            $notes = ''
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw "Invalid release version: $version"
+          }
+          if ($channel -notin @('stable','tester')) { throw "Invalid channel: $channel" }
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $notesPath = Join-Path $env:RUNNER_TEMP 'bo3_release_notes.md'
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = "BO3 HLSL Previewer $version`n`nAutomated $channel build."
+          }
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding UTF8
+          "RELEASE_NOTES_FILE=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Stamp GitHub update metadata
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:GITHUB_WORKSPACE 'version.json'
+          $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+          $json.version = $env:RELEASE_VERSION
+          $json.githubRepository = '${{ github.repository }}'
+          $json.updateAssetPrefix = 'BO3_HLSL_Previewer_Update_'
+          $json.defaultUpdateChannel = $env:RELEASE_CHANNEL
+          $json | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+
+      - name: Build Windows runtime
+        shell: cmd
+        run: tools\ci_build_release.cmd
+
+      - name: Run GLSL regression suite
+        shell: cmd
+        run: dist\BO3HLSLPreviewer.exe --regression-all
+
+      - name: Run Shadertoy regression suite
+        shell: cmd
+        run: dist\BO3HLSLPreviewer.exe --shadertoy-regression-all
+
+      - name: Run PostFX export regression suite
+        shell: cmd
+        run: dist\BO3HLSLPreviewer.exe --postfx-export-regression-all
+
+      - name: Run BO3 package regression suite
+        shell: cmd
+        run: dist\BO3HLSLPreviewer.exe --bo3-package-regression-all
+
+      - name: Create update and full distribution packages
+        shell: pwsh
+        run: |
+          .\tools\package_github_release.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -Channel $env:RELEASE_CHANNEL `
+            -Repository '${{ github.repository }}' `
+            -NotesFile $env:RELEASE_NOTES_FILE
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BO3-HLSL-Previewer-${{ env.RELEASE_VERSION }}
+          path: release_artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          $assets = Get-ChildItem -LiteralPath release_artifacts -File | Where-Object { $_.Name -ne 'release_notes.md' } | ForEach-Object { $_.FullName }
+          $args = @('release','create',$tag,'--title',"BO3 HLSL Previewer $env:RELEASE_VERSION",'--notes-file',(Join-Path $PWD 'release_artifacts\release_notes.md'),'--target','${{ github.sha }}')
+          if ($env:RELEASE_CHANNEL -eq 'tester') { $args += '--prerelease' }
+          $args += $assets
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }

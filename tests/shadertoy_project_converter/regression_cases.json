@@ -1,0 +1,276 @@
+{
+  "description": "Focused semantic regressions for Shadertoy project channel analysis and standalone handling.",
+  "cases": [
+    {
+      "name": "01_assigned_channel_unused",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "photo.jpg"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "effectiveContains": "Ignored", "fetch": false}],
+        "expectPassUnchanged": true
+      }]
+    },
+    {
+      "name": "02_direct_texture_sample_is_used",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "albedo.jpg"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "directRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "03_sampler_helper_argument_is_used",
+      "variants": [{
+        "pass": "vec4 readInput(sampler2D s, vec2 uv) { return texture(s, uv); }\nvoid mainImage(out vec4 c, in vec2 p) { c = readInput(iChannel1, p); }",
+        "bindings": [{"channel": 1, "kind": "texture2d", "source": "art.png"}],
+        "expectChannels": [{"channel": 1, "usage": "Used", "indirectRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "04_reachable_common_helper_counts",
+      "common": "vec4 commonRead(vec2 uv) { return texture(iChannel2, uv); }",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = commonRead(p); }",
+        "bindings": [{"channel": 2, "kind": "cubemap", "source": "sky.dds"}],
+        "expectChannels": [{"channel": 2, "usage": "Used", "directRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "05_unreachable_common_helper_does_not_count",
+      "common": "vec4 unusedCommonRead(vec2 uv) { return texture(iChannel2, uv); }",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(p, 0.0, 1.0); }",
+        "bindings": [{"channel": 2, "kind": "texture2d", "source": "unused.jpg"}],
+        "expectChannels": [{"channel": 2, "usage": "Assigned / Unused", "effectiveContains": "Ignored", "fetch": false}]
+      }]
+    },
+    {
+      "name": "06_usage_is_independent_per_render_pass",
+      "variants": [
+        {
+          "label": "Image",
+          "passIndex": 1,
+          "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(0.0); }",
+          "bindings": [{"channel": 0, "kind": "texture2d", "source": "detail.png"}],
+          "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "fetch": false}]
+        },
+        {
+          "label": "Buffer A",
+          "passIndex": 2,
+          "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+          "bindings": [{"channel": 0, "kind": "texture2d", "source": "detail.png"}],
+          "expectChannels": [{"channel": 0, "usage": "Used", "fetch": true}]
+        }
+      ]
+    },
+    {
+      "name": "07_comment_reference_is_ignored",
+      "variants": [{
+        "pass": "// texture(iChannel0, vec2(0.0))\nvoid mainImage(out vec4 c, in vec2 p) { /* iChannel0 */ c = vec4(1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "comment.png"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "fetch": false}]
+      }]
+    },
+    {
+      "name": "08_function_macro_sample_is_detected",
+      "common": "#define READ_CHANNEL(s, uv) texture(s, uv)",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = READ_CHANNEL(iChannel3, p); }",
+        "bindings": [{"channel": 3, "kind": "texture2d", "source": "macro-art.jpg"}],
+        "expectChannels": [{"channel": 3, "usage": "Used", "directRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "09_unused_binding_does_not_auto_download",
+      "variants": [{
+        "pass": "uniform sampler2D iChannel0;\nvoid mainImage(out vec4 c, in vec2 p) { c = vec4(p, 0.0, 1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "large-photo.jpg"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "fetch": false}]
+      }]
+    },
+    {
+      "name": "10_keyboard_input_neutralizes_at_sample",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, vec2(0.1, 0.5)); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 0, "kind": "keyboard"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "Neutralized", "fetch": false}],
+        "expectPassContains": ["vec4(0.0)"],
+        "expectPassNotContains": ["texture(iChannel0"]
+      }]
+    },
+    {
+      "name": "11_audio_input_neutralizes_at_sample",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = textureLod(iChannel1, p, 0.0); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 1, "kind": "audio"}],
+        "expectChannels": [{"channel": 1, "usage": "Used", "effectiveContains": "Neutralized"}],
+        "expectPassContains": ["vec4(0.0)"],
+        "expectPassNotContains": ["textureLod(iChannel1"]
+      }]
+    },
+    {
+      "name": "12_generic_noise_image_becomes_procedural",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p * 0.25); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "textures/blue_noise_256.png"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "Procedural", "fetch": false}],
+        "expectPassContains": ["bo3_standalone_noise_sample", "bo3_standalone_hash12"],
+        "expectPassNotContains": ["texture(iChannel0"]
+      }]
+    },
+    {
+      "name": "13_important_image_is_preserved_by_auto",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "artist-painted-clouds.jpg"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "Preserved", "fetch": true}],
+        "expectPassUnchanged": true
+      }]
+    },
+    {
+      "name": "14_custom_preserve_forces_later_fetch",
+      "variants": [{
+        "projectMode": "custom",
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "reference.png", "requestedMode": "preserve"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "15_custom_neutral_rewrites_direct_sample",
+      "variants": [{
+        "projectMode": "custom",
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "photo.jpg", "requestedMode": "neutral"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "Neutralized", "fetch": false}],
+        "expectPassContains": ["vec4(0.0)"],
+        "expectPassNotContains": ["texture(iChannel0"]
+      }]
+    },
+    {
+      "name": "16_common_has_no_independent_channel_model",
+      "common": "vec4 commonMetadataOnly() { return texture(iChannel0, vec2(0.0)); }",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(0.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "common-metadata.jpg"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "fetch": false}],
+        "expectCommonUnchanged": true
+      }]
+    },
+    {
+      "name": "17_custom_settings_are_independent_per_pass",
+      "variants": [
+        {
+          "label": "Image neutral",
+          "projectMode": "custom",
+          "passIndex": 1,
+          "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+          "bindings": [{"channel": 0, "kind": "texture2d", "source": "same.jpg", "requestedMode": "neutral"}],
+          "expectChannels": [{"channel": 0, "effectiveContains": "Neutralized"}],
+          "expectPassContains": ["vec4(0.0)"]
+        },
+        {
+          "label": "Buffer preserve",
+          "projectMode": "custom",
+          "passIndex": 2,
+          "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+          "bindings": [{"channel": 0, "kind": "texture2d", "source": "same.jpg", "requestedMode": "preserve"}],
+          "expectChannels": [{"channel": 0, "effectiveContains": "Preserved"}],
+          "expectPassUnchanged": true
+        }
+      ]
+    },
+    {
+      "name": "18_no_channel_shader_is_unchanged_in_standalone_mode",
+      "variants": [{
+        "pass": "float curve(float x) { return x * x; }\nvoid mainImage(out vec4 c, in vec2 p) { c = vec4(curve(p.x)); }",
+        "expectPassUnchanged": true,
+        "expectCommonUnchanged": true
+      }]
+    },
+    {
+      "name": "19_uncertain_token_paste_macro_is_preserved",
+      "common": "#define MAYBE_SAMPLE(s, uv) texture(s ## Suffix, uv)",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = MAYBE_SAMPLE(iChannel0, p); }",
+        "bindings": [{"channel": 0, "kind": "keyboard"}],
+        "expectChannels": [{"channel": 0, "usage": "Possibly Used", "effectiveContains": "Preserved", "warningContains": "macro"}],
+        "expectPassUnchanged": true,
+        "expectCommonUnchanged": true
+      }]
+    },
+    {
+      "name": "20_cubemap_is_conservatively_preserved",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel2, vec3(p, 1.0)); }",
+        "bindings": [{"channel": 2, "kind": "cubemap", "source": "environment.dds"}],
+        "expectChannels": [{"channel": 2, "usage": "Used", "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "21_feedback_buffer_is_not_flattened",
+      "variants": [{
+        "passIndex": 2,
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(iChannel0, p); }",
+        "bindings": [{"channel": 0, "kind": "buffer_a", "bufferPassIndex": 2}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "feedback", "warningContains": "previous-frame"}],
+        "expectPassUnchanged": true
+      }]
+    },
+    {
+      "name": "22_remove_is_rejected_while_referenced",
+      "variants": [{
+        "projectMode": "custom",
+        "pass": "void mainImage(out vec4 c, in vec2 p) { sampler2D s = iChannel0; c = vec4(1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "photo.jpg", "requestedMode": "remove"}],
+        "expectChannels": [{"channel": 0, "usage": "Referenced", "effectiveContains": "Preserved", "warningContains": "rejected"}],
+        "expectPassUnchanged": true
+      }]
+    },
+    {
+      "name": "23_remove_is_safe_for_unused_binding",
+      "variants": [{
+        "projectMode": "custom",
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }",
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "unused.jpg", "requestedMode": "remove"}],
+        "expectChannels": [{"channel": 0, "usage": "Assigned / Unused", "effectiveContains": "Removed", "fetch": false}],
+        "expectPassUnchanged": true
+      }]
+    },
+    {
+      "name": "24_texture_size_is_a_real_channel_use",
+      "variants": [{
+        "projectMode": "custom",
+        "pass": "void mainImage(out vec4 c, in vec2 p) { ivec2 s = textureSize(iChannel0, 0); c = vec4(vec2(s), 0.0, 1.0); }",
+        "validateFxc": true,
+        "bindings": [{"channel": 0, "kind": "texture2d", "source": "photo.jpg", "requestedMode": "neutral"}],
+        "expectChannels": [{"channel": 0, "usage": "Used", "effectiveContains": "Neutralized"}],
+        "expectPassContains": ["ivec2(1)"],
+        "expectPassNotContains": ["textureSize(iChannel0"]
+      }]
+    },
+    {
+      "name": "25_macro_call_reaches_common_helper_transitively",
+      "common": "vec4 commonMacroRead(vec2 uv) { return texture(iChannel3, uv); }\n#define CALL_COMMON(uv) commonMacroRead(uv)",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = CALL_COMMON(p); }",
+        "bindings": [{"channel": 3, "kind": "texture2d", "source": "transitive.jpg"}],
+        "expectChannels": [{"channel": 3, "usage": "Used", "directRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    },
+    {
+      "name": "26_object_macro_sampler_alias_is_resolved",
+      "common": "#define PROJECT_SOURCE iChannel1",
+      "variants": [{
+        "pass": "void mainImage(out vec4 c, in vec2 p) { c = texture(PROJECT_SOURCE, p); }",
+        "bindings": [{"channel": 1, "kind": "texture2d", "source": "alias-photo.jpg"}],
+        "expectChannels": [{"channel": 1, "usage": "Used", "directRead": true, "effectiveContains": "Preserved", "fetch": true}]
+      }]
+    }
+  ]
+}

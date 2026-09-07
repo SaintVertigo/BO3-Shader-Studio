@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "generated_for": "BO3 HLSL Previewer package-parity work",
+  "corpus": {
+    "archive_path": "C:/Users/ryant/Desktop/BO3-Shader-Research-main(2).zip",
+    "archive_sha256": "3231F8CF314F0D6C595E890D06A24B2DF9920541731C084213658665D9088B13",
+    "archive_bytes": 372491598,
+    "file_count": 51675,
+    "entry_count_including_directories": 53659,
+    "working_copy": "build_qt/BO3-Shader-Research-main",
+    "working_copy_matches_archive_file_count": true,
+    "extensions": {
+      ".asm": 26022,
+      ".hlsl": 25630,
+      ".techsetdef": 6,
+      ".md": 6,
+      ".gdt": 3,
+      ".png": 2,
+      ".py": 2,
+      ".map": 1,
+      ".tiff": 1
+    }
+  },
+  "evidence_limits": {
+    "unique_authored_techsets": 3,
+    "authored_techset_copies": 6,
+    "note": "All authored techsets are example packages. decompiled/techsetdef contains decompiled HLSL and ASM grouped by techset family, not literal techset source definitions.",
+    "policy": "Parser behavior may be derived from authored examples. Runtime binding and interface behavior may be derived from optimized ASM reflection tables. Category, render-state, and inheritance rules not present in authored techsets remain unsupported or warnings rather than guessed."
+  },
+  "authored_examples": [
+    {
+      "name": "basic",
+      "category": "Geometry",
+      "includes": ["lit_base_basic"],
+      "globals": {
+        "render_flags": "lit deferred opaque",
+        "available_prefixes": "mc/ mcs/ wc/"
+      },
+      "techniques": [
+        {"names": ["build shadowmap depth"], "base": "build shadowmap depth base"},
+        {"names": ["build shadowmap depth planes"], "base": "build shadowmap depth planes base", "condition": "TETRAHEDRON_OMNI_SHADOWS == 1"},
+        {"names": ["build shadowmap depth layered"], "base": "build shadowmap depth layered base"},
+        {"names": ["unlit"], "state": "replace + depth", "source": "techsetdef_unlit_simple.hlsl", "defines": ["USE_COLOR_TINT"], "vs": "vs_generic", "ps": "ps_generic"},
+        {"names": ["gbuffer"], "state": "gbuffer opaque", "defines": ["BASE_TEXTURES", "USE_COLOR_TINT"], "vs_source": "gbuffer_lit_vs_semi-reversed.hlsl", "ps_source": "gbuffer_lit_ps_semi-reversed.hlsl"},
+        {"names": ["gbuffer motion vector"], "base": "gbuffer", "defines_append": ["GENERATE_MOTION_VECTOR"]},
+        {"names": ["debug color texel"], "state": "replace + depth", "source": "ToolsGfx/debug_texeldensity.hlsl", "vs": "vs_generic", "ps_base": "ps_generic", "ps_defines": ["DEBUG_COLOR_TEXELS"]}
+      ],
+      "runtime_toolsgfx_layout": "The techset and both custom HLSL files are duplicated byte-for-byte under stable and stable_toolsgfx roots."
+    },
+    {
+      "name": "decal_emissive_reveal",
+      "category": "Decal",
+      "includes": ["lit_base_shaders", "lit_decal_base.inc", "emissive_base", "scroll_base", "flicker_base", "reveal_base"],
+      "globals": {
+        "render_flags_form": "RenderFlags object",
+        "render_flags": ["isVolDecal conditional on MTL_TYPE_VOL_DECAL", "isEmissive", "isDecal", "noBspCollision", "useRevealMap"],
+        "available_prefixes": "mc/ mcs/ wc/ / vd/"
+      },
+      "resource_patterns": [
+        "Sampler with tile, filter, and nested Tweak metadata",
+        "Texture with Image placeholder/default, semantic, and nested Tweak metadata",
+        "Texture alias/inheritance: Texture(\"colorMap\") : \"emissiveMap\"",
+        "Color alias/inheritance: Color(\"colorTint\") : \"emissiveTint1\"",
+        "float1/float2 constants with component assignments and nested Tweak metadata",
+        "inline tweak property assignment on float/Bool declarations"
+      ],
+      "techniques": [
+        {"names": ["unlit"], "base": "base lit decal unlit", "defines": ["USE_COLOR_TINT"]},
+        {"names": ["lit"], "state": "add + depth + decal", "source": "decal_emissive_mask.hlsl", "defines": ["USE_COLOR_TINT", "USE_SCROLL_ROTATE_UVS", "USE_EMISSIVE_FLICKER"], "vs": "vs_generic", "ps_base": "ps_generic", "ps_source": "decal_emissive_reveal_ps.hlsl"},
+        {"names": ["debug color texel"], "state": "blend + depth + decal", "source": "ToolsGfx/debug_texeldensity.hlsl", "vs": "vs_generic", "ps_base": "ps_generic", "ps_defines": ["DEBUG_COLOR_TEXELS"]}
+      ],
+      "runtime_toolsgfx_layout": "The techset and custom PS are duplicated byte-for-byte under stable and stable_toolsgfx roots."
+    },
+    {
+      "name": "endportal",
+      "category": "Specialty",
+      "includes": ["lit_base_shaders", "shadowmap_technique_base"],
+      "globals": {
+        "render_flags_form": "RenderFlags object",
+        "render_flags": ["isEmissive", "isOpaque", "castsShadows=false", "requiresPrepass", "isOccluder"],
+        "available_prefixes": "mc/ mcs/ wc/"
+      },
+      "toolsgfx": {
+        "top_level_editor_parameters": "TOOLSGFX == 1 adds fallback Texture, float, Bool, and Color parameters used by the stock editor shader.",
+        "lit_ps_source": "specialty/emissive_objective.hlsl",
+        "custom_runtime_ps_present_in_toolsgfx_tree": false
+      },
+      "runtime": {
+        "lit_ps_source": "endportal_ps.hlsl",
+        "custom_runtime_ps_root": "share/raw/shaders_stable",
+        "custom_resources": ["colorSampler", "endSky", "endPortal", "portalAnimSpeed"]
+      },
+      "resource_patterns": [
+        "uint1, float1, Bool, Color, Sampler, and Texture declarations",
+        "Texture ref=true and Image(<register-style-token, default-asset>)",
+        "semantic, usage, component/value, and Tweak metadata",
+        "shader-local Texture override inside PixelShader",
+        "TOOLSGFX source selection inside PixelShader"
+      ],
+      "techniques": [
+        {"names": ["depth prepass"], "state": "depthPrepass", "source": "techsetdef_prepass.hlsl", "vs": "vs_generic", "ps": "ps_generic"},
+        {"names": ["depth prepass motion vector"], "base": "depth prepass", "defines_append": ["GENERATE_MOTION_VECTOR"]},
+        {"names": ["build shadowmap depth"], "base": "build shadowmap depth base"},
+        {"names": ["build shadowmap depth planes"], "base": "build shadowmap depth planes base", "condition": "TETRAHEDRON_OMNI_SHADOWS == 1"},
+        {"names": ["build shadowmap depth layered"], "base": "build shadowmap depth layered base"},
+        {"names": ["unlit"], "state": "blend + depth", "source": "techsetdef_unlit_simple.hlsl", "defines": ["USE_EMISSIVE"], "vs": "vs_generic", "ps_base": "ps_generic", "ps_texture_override": "colorMap"},
+        {"names": ["lit"], "state": "replace + depth", "defines": ["BASE_TEXTURES", "USE_COLOR_TINT", "USE_SCROLL_ROTATE_UVS", "USE_EMISSIVE_FLICKER"], "vs_base": "vs_generic", "vs_source": "specialty/emissive_objective.hlsl", "ps_base": "ps_generic", "ps_source_toolsgfx": "specialty/emissive_objective.hlsl", "ps_source_runtime": "endportal_ps.hlsl"},
+        {"names": ["oit"], "base": "lit", "state": "fallback + depth + rez", "defines_append": ["USE_OIT"]},
+        {"names": ["debug color texel"], "state": "blend + depth", "source": "ToolsGfx/debug_texeldensity.hlsl", "vs": "vs_generic", "ps_base": "ps_generic", "ps_defines": ["DEBUG_COLOR_TEXELS"]}
+      ],
+      "runtime_toolsgfx_layout": "The techset is duplicated byte-for-byte across roots. TOOLSGFX preprocessing, not file divergence, selects editor behavior. Only the runtime stable root contains endportal_ps.hlsl."
+    }
+  ],
+  "syntax_observed": {
+    "preprocessor": ["#include", "#if NAME == \"1\"", "#if NAME != \"1\"", "#else", "#endif"],
+    "declarations": ["Globals", "Sampler", "Texture", "Color", "Bool", "uint1", "float1", "float2", "Tweak", "Technique", "VertexShader", "PixelShader", "RenderFlags", "Image"],
+    "inheritance": ["declaration : base-name", "Technique : base-technique", "VertexShader : generic-base", "PixelShader : generic-base"],
+    "aliases": "Technique(\"lit\", \"unlit\") syntax is required by generated packages although it is not present in the three authored corpus examples; all listed names must resolve to one technique body.",
+    "assignment": ["field = value", "defines = comma-list", "defines += comma-list", "declaration.property = value", "shader-local resource = Texture()/CodeTexture()"],
+    "source_precedence": "Observed patterns require stage-local source to override technique source; otherwise stage source inherits technique source. A stage with a named generic base inherits that base before applying local fields."
+  },
+  "compiled_shader_findings": {
+    "coverage_by_major_family_hlsl_files": {
+      "gbuffer": 8352,
+      "lit": 7728,
+      "specialty": 2466,
+      "effect": 1766,
+      "techsetdef": 944,
+      "deferred": 855,
+      "water": 624,
+      "postfx": 614,
+      "sky": 60,
+      "shell": 12,
+      "compositefx": 4,
+      "2d": 4
+    },
+    "postfx_top_binding_occurrences": [
+      ["PerSceneConsts", "cbuffer", "cb1", 542],
+      ["modelInstanceBuffer", "texture-buffer", "t4", 280],
+      ["boneMatrixBuffer", "texture-buffer", "t5", 280],
+      ["$Globals", "cbuffer", "cb0", 226],
+      ["GenericsCBuffer", "cbuffer", "cb3", 220],
+      ["frameBuffer", "texture2d", "t0", 172],
+      ["bilinearClampler", "sampler", "s1", 80],
+      ["PostFxCBuffer", "cbuffer", "cb8", 78],
+      ["samp0", "sampler", "s0", 66],
+      ["bilinearSampler", "sampler", "s1", 62],
+      ["codeTexture0", "texture2d", "multiple", 60],
+      ["resolvedScene", "texture2d", "t0", 14]
+    ],
+    "interface_samples": [
+      {"family": "postfx/2d/out/of/bounds", "vs_outputs": ["SV_POSITION0.xyzw", "TEXCOORD0.xy"], "ps_inputs": ["SV_POSITION0", "TEXCOORD0.xy"], "ps_outputs": ["SV_TARGET0.xyzw"], "ps_bindings": ["frameBuffer:t0", "staticTexture:t6", "lookupTexture:t7", "trilinearSampler:s1", "$Globals:b0", "PerSceneConsts:b1"]},
+      {"family": "compositefx", "vs_outputs": ["SV_POSITION0.xyzw", "TEXCOORD0.xy"], "ps_inputs": ["SV_POSITION0", "TEXCOORD0.xy"], "ps_outputs": ["SV_TARGET0.xyzw"], "ps_bindings": ["colorMap:t0", "normalMap:t6", "clampSamplerState:s1", "PostFxCBuffer:b8"]},
+      {"family": "techsetdef/resolve", "vs_inputs": ["SV_VertexID0"], "vs_outputs": ["SV_POSITION0.xyzw", "TEXCOORD0.xy"], "ps_inputs": ["SV_POSITION0", "TEXCOORD0.xy"], "ps_bindings": ["colorMapSampler:t0", "pointClamp:s1"]},
+      {"family": "shell/shock/flashed", "vs_outputs": ["SV_POSITION0.xyzw", "COLOR0.xyzw", "TEXCOORD0.xy"], "ps_inputs": ["SV_POSITION0", "COLOR0.xyzw", "TEXCOORD0.xy"], "ps_bindings": ["colorMapSampler:t0", "samp0:s0"]},
+      {"family": "sky/latlong/parallax/hdr", "ps_inputs": ["SV_POSITION0", "TEXCOORD0.xyz", "TEXCOORD1.xyz"], "ps_bindings": ["colorMap:t0", "colorSampler:s1", "$Globals:b0", "PerSceneConsts:b1", "LightingGlobals:b2"]},
+      {"family": "gbuffer/backlit/emblem", "vs_outputs": ["SV_POSITION0", "COLOR1", "TEXCOORD0", "TEXCOORD1", "TEXCOORD2", "TEXCOORD3"], "ps_inputs": ["SV_POSITION0", "COLOR1", "TEXCOORD0", "TEXCOORD1", "TEXCOORD2", "TEXCOORD3", "SV_IsFrontFace0"], "ps_outputs": ["SV_TARGET0", "SV_TARGET1", "SV_TARGET2"], "ps_bindings": ["colorMap:t0", "normalMap:t6", "thicknessMap:t7", "codeEmblemTexture4:t9", "colorSampler:s1", "normalSampler:s2", "$Globals:b0", "PerSceneConsts:b1"]}
+    ],
+    "conclusions": [
+      "Optimized bytecode contains the authoritative live resource and signature interface; source declarations alone over-report optimized-out resources.",
+      "A resource name does not imply one global slot: colorMap and CodeTexture-style names appear at different t-slots across compiled variants.",
+      "Fullscreen/post-processing families do not share one universal interface or resource template.",
+      "VS/PS semantic matching must compare semantic name, index, component mask, and scalar kind while treating system-value semantics appropriately.",
+      "Texture dimensions include 2D, arrays, 3D, cube/cube arrays, structured buffers, and multisampled resources; unsupported dimensions must not be silently treated as Texture2D."
+    ]
+  },
+  "source_path_findings": {
+    "examples_install_root": "Each example is documented as copied into the BO3 root directory.",
+    "shader_roots": ["share/raw/shaders_stable", "share/raw/shaders_stable_toolsgfx"],
+    "techset_roots": ["share/raw/techsetdefs_stable/<category>", "share/raw/techsetdefs_stable_toolsgfx/<category>"],
+    "custom_shader_paths_observed": ["root-level custom .hlsl", "stock subpaths such as specialty/emissive_objective.hlsl", "ToolsGfx/debug_texeldensity.hlsl"],
+    "known_previewer_finding": "A custom PostFX shader using stock postfx includes failed under shaders_stable/_custom and succeeded at shaders_stable root. This remains a proven generated-package validation rule, not a universal ban on subfolders.",
+    "runtime_toolsgfx_rule": "Stable and stable_toolsgfx are separate package roots. Identical techset source may resolve differently under TOOLSGFX, and custom HLSL may be duplicated, omitted, or replaced by a stock editor source."
+  },
+  "render_state_findings": {
+    "observed_tokens": ["replace", "blend", "add", "depth", "nocull", "decal", "gbuffer", "opaque", "depthPrepass", "fallback", "rez"],
+    "observed_compositions": ["replace + depth", "gbuffer opaque", "add + depth + decal", "blend + depth + decal", "depthPrepass", "blend + depth", "fallback + depth + rez", "replace + nocull"],
+    "confidence": "Token presence and inheritance are proven. Exact D3D blend/depth/cull mappings are not present in the archive and must remain Unknown until separately proven."
+  },
+  "required_architecture": {
+    "models": ["BO3ShaderPackage", "TechsetModel", "TechniqueModel", "ShaderStageModel", "ResourceBindingModel", "CompiledShaderInterface", "PackageResolution", "PackageValidationResult"],
+    "single_sources_of_truth": ["one parser for preview/validation/export", "one compiled reflection representation for VS and PS", "one resolver parameterized by Runtime or TOOLSGFX", "one structured serializer for generated techsets"],
+    "validation_order": ["preprocess techset configuration", "resolve technique aliases and inheritance", "resolve technique/stage source and defines", "compile actual VS and PS", "reflect optimized bytecode", "validate stage resources against resolved techset", "validate VS output against PS input", "interpret render-state support", "validate source/include layout", "decide package status and preview availability"],
+    "status_policy": {
+      "hlsl_compile": ["PASS", "FAIL"],
+      "bo3_package": ["PASS", "WARNING", "FAIL", "UNKNOWN"],
+      "preview": ["AVAILABLE", "SUPPRESSED"]
+    }
+  },
+  "current_previewer_gaps_at_audit": [
+    "PostFX package validation is a main.cpp-local source-regex check rather than a parsed package model.",
+    "Runtime reflection checks only selected PS resource names and does not expose a reusable VS/PS interface model.",
+    "Techsets are generated by concatenating strings and are not parsed or resolved for preview.",
+    "Technique aliases, inheritance, defines append, stage inheritance, source override, and shader-local bindings are not resolved as a package.",
+    "TOOLSGFX/runtime preview contexts exist, but techset conditional resolution does not drive them.",
+    "No unified compiled cbuffer/constant/signature/resource representation is shared by preview and export.",
+    "No package-level VS output to PS input validation gates preview.",
+    "Material and sky export are not yet validated through the same package pipeline."
+  ],
+  "unsupported_or_uncertain_after_audit": [
+    "Universal techset grammar beyond the observed subset",
+    "External include contents and inheritance bases not shipped in the corpus",
+    "Exact BO3 severity for techset parameters optimized out of a compiled stage",
+    "Exact engine CodeTexture name/type registry beyond names evidenced by authored examples or compiled shaders",
+    "Exact D3D render-state mapping for BO3 state tokens",
+    "Generic shader entry-point selection rules inside BO3 tooling",
+    "Full material register-token to APE field mapping",
+    "Whether every stock include supports every nested source path"
+  ]
+}

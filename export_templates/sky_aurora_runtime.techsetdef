@@ -1,0 +1,47 @@
+#include "sky_base"
+
+Sampler( "colorSampler" )
+{
+	tile = "tile both"
+	filter = "aniso4x (mip linear)"
+}
+
+Texture( "colorMap" )
+{
+	ref = true
+	image = Image( <colorMap, $white_diffuse_cube_hdr> )
+	semantic = "HDR"
+	tweak = Tweak()
+	{
+		category  = "Color"
+		title     = "Color Map"
+		sortindex = "0"
+	}
+}
+
+Globals()
+{
+    category = "Geometry"
+    renderFlags = "emissive sky"
+    availablePrefixes = "mc/ mcs/ wc/"
+}
+
+Technique( "lit" )
+{
+	state = "sky"
+	source = "techsetdef_sky_latlong_hdr.hlsl"
+	vs = "vs_sky"
+	ps = PixelShader() : "ps_sky"
+	{
+		defines = "USE_EMISSIVE"
+		source = "geometry/sky_procedural_aurora_borealis_ps.hlsl"
+	}
+}
+
+Technique( "unlit" )
+{
+	state = "disable + depthTestOnly"
+	source = "techsetdef_sky_latlong_hdr.hlsl"
+	vs = "vs_sky"
+	ps = "ps_sky"
+}

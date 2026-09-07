@@ -1,0 +1,104 @@
+#include "lit_base_shaders"
+#include "shadowmap_technique_base"
+
+Globals()
+{
+    displayName = "End Portal"
+    category = "Specialty"
+    renderFlags = RenderFlags()
+    {
+        isEmissive = true
+        isOpaque = true
+        castsShadows = false
+        requiresPrepass = true
+        isOccluder = true
+    }
+}
+
+#if TOOLSGFX == "1"
+Texture("colorMap")
+{
+    image = Image("end_portal_static_editor")
+}
+float2("rotateUVs")
+{
+    x = <cg00_x>
+    y = <cg00_y>
+}
+#endif
+
+Sampler("colorSampler")
+{
+    tile = "no tile"
+    filter = "linear (mip linear)"
+}
+
+float1("portalAnimSpeed")
+{
+    x = <cg20_x>
+}
+
+Texture("endSky")
+{
+    ref = true
+    image = Image(<colorMap14, "end_sky2">)
+    semantic = "2d"
+}
+
+Texture("endPortal")
+{
+    ref = true
+    image = Image(<colorMap15, "end_portal">)
+    semantic = "2d"
+}
+
+Technique("depth prepass")
+{
+    state = "depthPrepass"
+    source = "techsetdef_prepass.hlsl"
+    vs = "vs_generic"
+    ps = "ps_generic"
+}
+
+Technique("depth prepass motion vector") : "depth prepass"
+{
+    defines += "GENERATE_MOTION_VECTOR"
+}
+
+Technique("unlit")
+{
+    state = "blend + depth"
+    source = "techsetdef_unlit_simple.hlsl"
+    vs = "vs_generic"
+    ps = PixelShader() : "ps_generic"
+    {
+        colorMap = Texture()
+        {
+            image = Image("end_portal_static_editor")
+        }
+    }
+}
+
+Technique("lit")
+{
+    state = "replace + depth"
+    defines = "BASE_TEXTURES", "USE_COLOR_TINT", "USE_SCROLL_ROTATE_UVS", "USE_EMISSIVE_FLICKER"
+    vs = VertexShader() : "vs_generic"
+    {
+        source = "specialty/emissive_objective.hlsl"
+    }
+    ps = PixelShader() : "ps_generic"
+    {
+#if TOOLSGFX == "1"
+        source = "specialty/emissive_objective.hlsl"
+#else
+        source = "endportal_ps.hlsl"
+#endif
+    }
+}
+
+Technique("oit") : "lit"
+{
+    state = "fallback + depth + rez"
+    defines += "USE_OIT"
+}

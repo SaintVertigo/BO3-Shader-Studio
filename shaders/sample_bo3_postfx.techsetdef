@@ -1,0 +1,49 @@
+#include "lit_base_shaders"
+
+Globals()
+{
+    category = "2d"
+    renderFlags = "none"
+}
+
+Sampler("frameBufferSampler")
+{
+    tile = "no tile"
+    filter = "linear (mip none)"
+}
+
+Sampler("DepthSamplerState")
+{
+    tile = "no tile"
+    filter = "nearest (mip none)"
+}
+
+Texture("frameBuffer")
+{
+    image = Image(<colorMap00, $white_diffuse>)
+    semantic = "2d"
+}
+
+Texture("DepthSampler")
+{
+    image = Image(<colorMap01, $white_diffuse>)
+    semantic = "2d"
+}
+
+Technique("lit", "unlit")
+{
+    state = "replace + nocull"
+    source = "sample_bo3_postfx.hlsl"
+
+    vs = VertexShader()
+    {
+    }
+
+    ps = PixelShader()
+    {
+#if TOOLSGFX != "1"
+        frameBuffer = CodeTexture("resolvedScene")
+        DepthSampler = CodeTexture("floatZ")
+#endif
+    }
+}

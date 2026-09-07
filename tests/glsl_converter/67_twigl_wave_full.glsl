@@ -1,0 +1,1 @@
+void main(){vec2 p=(gl_FragCoord.xy*2.-r)/r.y;vec2 w=p;for(float i=4.;i<15.;++i)w.xy+=sin(sin(w.yx*vec2(92./i,2)+t*8./i+i)*2.5+t*3./i)*vec2(.04,.03);float g=abs(w.y)*.3-.01;if(p.y<.0) p=w;p.y-=sign(p.y)*.4;gl_FragColor=vec4(.03,.05,.1,1)*g/max(.01,length(p)-.3);}

@@ -1,0 +1,36 @@
+#include "lit_base_shaders"
+
+Globals()
+{
+    category = "2d"
+    renderFlags = "none"
+}
+
+Sampler( "bilinearClampler" )
+{
+    tile = "no tile"
+    filter = "linear (mip none)"
+}
+
+Texture( "frameBuffer" )
+{
+    image = Image( <colorMap00, $white_diffuse> )
+    semantic = "2d"
+}
+
+Technique( "lit", "unlit" )
+{
+    state = "replace + nocull"
+    source = "killfeed_shader.hlsl"
+
+    vs = VertexShader()
+    {
+    }
+
+    ps = PixelShader()
+    {
+        #if TOOLSGFX != "1"
+        frameBuffer = CodeTexture( "resolvedScene" )
+        #endif
+    }
+}

@@ -1,0 +1,9 @@
+	"custom_reflection_bake" ( "image.gdf" )
+	{
+		"baseImage" "texture_assets\\_custom\\custom_reflection_bake.exr"
+		"imageType" "Texture"
+		"noMipMaps" "1"
+		"semantic" "HDR"
+		"streamable" "0"
+		"type" "image"
+	}

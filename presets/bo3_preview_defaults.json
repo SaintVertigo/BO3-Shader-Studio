@@ -1,0 +1,15 @@
+{
+  "neutralScriptVectors": {
+    "scriptVector0": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector1": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector2": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector3": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector4": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector5": [0.0, 0.0, 0.0, 0.0],
+    "scriptVector6": [1.0, 0.0, 1.0, 0.0],
+    "scriptVector7": [0.0, 0.0, 0.0, 0.0]
+  },
+  "camera": {
+    "fov": 64.0
+  }
+}

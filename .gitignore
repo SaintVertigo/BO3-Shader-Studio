@@ -1,0 +1,55 @@
+# Project build and deployment output
+/build_qt/
+/dist/
+
+# qmake and Qt Creator generated files
+/.qmake.cache
+/.qmake.stash
+/Makefile
+/Makefile.*
+*.pro.user
+*.pro.user.*
+.qtc_clangd/
+.qtcreator/
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# Visual Studio and MSVC generated files
+/.vs/
+/Debug/
+/Release/
+/x64/
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.tlog
+*.lastbuildstate
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+
+# Generated executables and runtime libraries
+*.exe
+*.dll
+
+# Download/cache markers and generated update packages
+/third_party/tinyexr/tinyexr_v*.installed
+/BO3HLSLPreviewer_Update_*.zip
+
+# Temporary, cache, editor, and OS files
+/.cache/
+*.tmp
+*.temp
+*.log
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
