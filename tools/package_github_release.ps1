@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$Version,
+    [Parameter(Mandatory=$true)][string]$DisplayVersion,
     [Parameter(Mandatory=$true)][ValidateSet('stable','tester')][string]$Channel,
     [Parameter(Mandatory=$true)][string]$Repository,
     [string]$DistDir = 'dist',
@@ -19,33 +20,40 @@ if ($NotesFile) {
     if (Test-Path -LiteralPath $notesPath) { $notes = Get-Content -LiteralPath $notesPath -Raw }
 }
 if (-not $notes.Trim()) {
-    $notes = "BO3 HLSL Previewer $Version ($Channel channel)"
+    $notes = "BO3 Shader Studio $DisplayVersion"
 }
 
-# Stamp the runtime metadata that the application reads after installation.
+# Stamp runtime metadata. `version` is intentionally an internal monotonic
+# SemVer used only for update ordering; `displayVersion` is what users see.
 $versionPath = Join-Path $dist 'version.json'
 $versionJson = if (Test-Path -LiteralPath $versionPath) {
     Get-Content -LiteralPath $versionPath -Raw | ConvertFrom-Json
 } else {
     [pscustomobject]@{ product='BO3 HLSL Previewer'; updateFormat=1 }
 }
-$versionJson.product = 'BO3 HLSL Previewer'
+$versionJson.product = 'BO3 HLSL Previewer' # legacy manifest identity for bridge compatibility
 $versionJson.version = $Version
+if (-not ($versionJson.PSObject.Properties.Name -contains 'displayProduct')) { $versionJson | Add-Member -NotePropertyName displayProduct -NotePropertyValue 'BO3 Shader Studio' }
+else { $versionJson.displayProduct = 'BO3 Shader Studio' }
+if (-not ($versionJson.PSObject.Properties.Name -contains 'displayVersion')) { $versionJson | Add-Member -NotePropertyName displayVersion -NotePropertyValue $DisplayVersion }
+else { $versionJson.displayVersion = $DisplayVersion }
 $versionJson.updateFormat = 1
 if (-not ($versionJson.PSObject.Properties.Name -contains 'githubRepository')) { $versionJson | Add-Member -NotePropertyName githubRepository -NotePropertyValue $Repository }
 else { $versionJson.githubRepository = $Repository }
-if (-not ($versionJson.PSObject.Properties.Name -contains 'updateAssetPrefix')) { $versionJson | Add-Member -NotePropertyName updateAssetPrefix -NotePropertyValue 'BO3_HLSL_Previewer_Update_' }
-else { $versionJson.updateAssetPrefix = 'BO3_HLSL_Previewer_Update_' }
+if (-not ($versionJson.PSObject.Properties.Name -contains 'updateAssetPrefix')) { $versionJson | Add-Member -NotePropertyName updateAssetPrefix -NotePropertyValue 'BO3_Shader_Studio_Update' }
+else { $versionJson.updateAssetPrefix = 'BO3_Shader_Studio_Update' }
 if (-not ($versionJson.PSObject.Properties.Name -contains 'defaultUpdateChannel')) { $versionJson | Add-Member -NotePropertyName defaultUpdateChannel -NotePropertyValue $Channel }
 else { $versionJson.defaultUpdateChannel = $Channel }
 $versionJson | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $versionPath -Encoding UTF8
 
-$safeVersion = $Version -replace '[^0-9A-Za-z._-]', '_'
-$updateName = "BO3_HLSL_Previewer_Update_$safeVersion.zip"
-$fullName = "BO3_HLSL_Previewer_$safeVersion.zip"
+$safeInternalVersion = $Version -replace '[^0-9A-Za-z._-]', '_'
+$updateName = 'BO3_Shader_Studio_Update.zip'
+$legacyUpdateName = "BO3_HLSL_Previewer_Update_$safeInternalVersion.zip"
+$fullName = 'BO3_Shader_Studio.zip'
 $updatePath = Join-Path $out $updateName
+$legacyUpdatePath = Join-Path $out $legacyUpdateName
 $fullPath = Join-Path $out $fullName
-$staging = Join-Path $env:TEMP ("BO3HLSLPreviewer_Package_" + [Guid]::NewGuid().ToString('N'))
+$staging = Join-Path $env:TEMP ("BO3ShaderStudio_Package_" + [Guid]::NewGuid().ToString('N'))
 
 try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
@@ -53,10 +61,15 @@ try {
     New-Item -ItemType Directory -Path $payload -Force | Out-Null
     Copy-Item -Path (Join-Path $dist '*') -Destination $payload -Recurse -Force
 
+    # Keep the legacy product identity in format-1 manifests so 0.20.0-test.1
+    # can install this first renamed build. The installed payload itself uses
+    # BO3 Shader Studio branding and the new asset prefix for future updates.
     $manifest = [ordered]@{
         product = 'BO3 HLSL Previewer'
+        displayProduct = 'BO3 Shader Studio'
         format = 1
         version = $Version
+        displayVersion = $DisplayVersion
         channel = $Channel
         repository = $Repository
         notes = $notes.Trim()
@@ -67,6 +80,10 @@ try {
     Remove-Item -LiteralPath $updatePath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel Optimal
 
+    # Legacy alias lets the already-released BO3 HLSL Previewer updater find
+    # this bridge release. It is byte-for-byte the same update package.
+    Copy-Item -LiteralPath $updatePath -Destination $legacyUpdatePath -Force
+
     Remove-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
 }
@@ -74,11 +91,12 @@ finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-foreach ($path in @($updatePath, $fullPath)) {
+foreach ($path in @($updatePath, $legacyUpdatePath, $fullPath)) {
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath ($path + '.sha256') -Value ("$hash  " + [IO.Path]::GetFileName($path)) -Encoding ASCII
 }
 
 Set-Content -LiteralPath (Join-Path $out 'release_notes.md') -Value $notes -Encoding UTF8
 Write-Host "Created: $updatePath"
+Write-Host "Created: $legacyUpdatePath (legacy bridge alias)"
 Write-Host "Created: $fullPath"

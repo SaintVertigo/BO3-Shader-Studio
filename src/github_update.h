@@ -17,7 +17,7 @@ enum class Channel
 struct Config
 {
     QString repository;      // owner/repo
-    QString assetPrefix = "BO3_HLSL_Previewer_Update_";
+    QString assetPrefix = "BO3_Shader_Studio_Update";
 };
 
 struct ReleaseInfo

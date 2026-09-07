@@ -82,7 +82,7 @@ bool fetchJson(const QUrl& url, QJsonDocument& document, QString& error)
 {
     QNetworkAccessManager manager;
     QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::UserAgentHeader, "BO3-HLSL-Previewer-Updater/2");
+    request.setHeader(QNetworkRequest::UserAgentHeader, "BO3-Shader-Studio-Updater/2");
     request.setRawHeader("Accept", "application/vnd.github+json");
     request.setRawHeader("X-GitHub-Api-Version", "2026-03-10");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -210,7 +210,7 @@ bool fetchLatestRelease(const Config& config,
         if(!fetchJson(url, document, error)) return false;
         if(!document.isObject() || !releaseFromObject(document.object(), config, release))
         {
-            error = "The latest stable GitHub release does not contain a compatible Previewer update ZIP.";
+            error = "The latest stable GitHub release does not contain a compatible BO3 Shader Studio update ZIP.";
             return false;
         }
         return true;
@@ -262,7 +262,7 @@ bool downloadReleaseAsset(const ReleaseInfo& release,
     if(tempDir.isEmpty()) tempDir = QDir::tempPath();
     QDir().mkpath(tempDir);
     QString safeName = release.assetName;
-    if(safeName.isEmpty()) safeName = QString("BO3_HLSL_Previewer_Update_%1.zip").arg(release.version);
+    if(safeName.isEmpty()) safeName = QString("BO3_Shader_Studio_Update.zip");
     safeName.replace(QRegularExpression("[^A-Za-z0-9_.-]"), "_");
     localPath = QDir(tempDir).filePath(safeName);
 
@@ -275,11 +275,11 @@ bool downloadReleaseAsset(const ReleaseInfo& release,
 
     QNetworkAccessManager manager;
     QNetworkRequest request(release.assetUrl);
-    request.setHeader(QNetworkRequest::UserAgentHeader, "BO3-HLSL-Previewer-Updater/2");
+    request.setHeader(QNetworkRequest::UserAgentHeader, "BO3-Shader-Studio-Updater/2");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = manager.get(request);
 
-    QProgressDialog progress("Downloading BO3 HLSL Previewer update...", "Cancel", 0,
+    QProgressDialog progress("Downloading BO3 Shader Studio update...", "Cancel", 0,
                              release.assetSize > 0 ? static_cast<int>(std::min<qint64>(release.assetSize, INT_MAX)) : 0,
                              parent);
     progress.setWindowTitle(QString("Downloading %1").arg(release.version));

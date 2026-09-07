@@ -11,6 +11,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QGroupBox>
 #include <QGuiApplication>
@@ -6600,6 +6601,58 @@ private:
     std::function<void()> sceneChangedCallback_;
 };
 
+// Prevent accidental option changes while the user is simply scrolling a
+// settings panel. QComboBox consumes wheel events by default even when its
+// popup is closed, which makes dense Preview Settings panels especially easy
+// to change unintentionally. Install this once on QApplication so it applies
+// to every combo box, including dynamically-created converter/export dialogs.
+class ComboBoxWheelGuard final : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        auto* combo = qobject_cast<QComboBox*>(watched);
+        if (!combo || event->type() != QEvent::Wheel)
+            return QObject::eventFilter(watched, event);
+
+        // When the popup is actually open, wheel input belongs to the popup's
+        // item view and normal selection scrolling should remain available.
+        if (combo->view() && combo->view()->isVisible())
+            return QObject::eventFilter(watched, event);
+
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        QWidget* parent = combo->parentWidget();
+        while (parent)
+        {
+            if (auto* area = qobject_cast<QAbstractScrollArea*>(parent))
+            {
+                QScrollBar* bar = area->verticalScrollBar();
+                if (bar && bar->isVisible())
+                {
+                    int delta = 0;
+                    if (!wheel->pixelDelta().isNull())
+                        delta = wheel->pixelDelta().y();
+                    else if (!wheel->angleDelta().isNull())
+                        delta = (wheel->angleDelta().y() / 120) * std::max(1, bar->singleStep()) * 3;
+                    if (delta != 0)
+                        bar->setValue(bar->value() - delta);
+                }
+                event->accept();
+                return true;
+            }
+            parent = parent->parentWidget();
+        }
+
+        // Outside a scroll area, swallowing the event is still preferable to
+        // silently changing a setting just because the pointer was over it.
+        event->accept();
+        return true;
+    }
+};
+
 class MainWindow final : public QMainWindow
 {
 public:
@@ -6608,7 +6661,7 @@ public:
         loadAppMetadata();
         if (headless) return;
 
-        setWindowTitle(QString("BO3 HLSL Previewer %1").arg(appVersion_));
+        setWindowTitle(QString("BO3 Shader Studio %1").arg(displayVersion_));
         resize(1680, 960);
         setMinimumSize(900, 440);
         setAcceptDrops(true);
@@ -8180,9 +8233,10 @@ private:
 
     void loadAppMetadata()
     {
-        appVersion_ = "0.19.0";
+        appVersion_ = "1.0.0"; // internal monotonic updater version
+        displayVersion_ = "0.1";
         githubRepository_.clear();
-        updateAssetPrefix_ = "BO3_HLSL_Previewer_Update_";
+        updateAssetPrefix_ = "BO3_Shader_Studio_Update";
         defaultUpdateChannel_ = "stable";
         QFile file(runtimePath("version.json"));
         if (!file.open(QIODevice::ReadOnly)) return;
@@ -8191,6 +8245,8 @@ private:
         const QJsonObject object = document.object();
         const QString version = object.value("version").toString().trimmed();
         if (!version.isEmpty()) appVersion_ = version;
+        const QString displayVersion = object.value("displayVersion").toString().trimmed();
+        if (!displayVersion.isEmpty()) displayVersion_ = displayVersion;
         githubRepository_ = object.value("githubRepository").toString().trimmed();
         const QString prefix = object.value("updateAssetPrefix").toString().trimmed();
         if (!prefix.isEmpty()) updateAssetPrefix_ = prefix;
@@ -8259,14 +8315,14 @@ private:
         {
             if (userInitiated)
                 QMessageBox::information(this, "You're up to date",
-                    QString("BO3 HLSL Previewer %1 is current on the %2 channel.")
-                        .arg(appVersion_, github_update::channelName(channel)));
+                    QString("BO3 Shader Studio %1 is current on the %2 channel.")
+                        .arg(displayVersion_, github_update::channelName(channel)));
             return;
         }
 
         QMessageBox box(this);
         box.setIcon(QMessageBox::Information);
-        box.setWindowTitle("BO3 HLSL Previewer update available");
+        box.setWindowTitle("BO3 Shader Studio update available");
         box.setText(QString("Version %1 is available on the %2 channel.")
             .arg(release.version, github_update::channelName(channel)));
         box.setInformativeText(QString("Installed: %1\nAvailable: %2\n\nDownload and install it now?")
@@ -8302,8 +8358,8 @@ private:
             return;
         }
 
-        statusBar()->showMessage(QString("Verified update %1 (%2)")
-            .arg(release.version, actualSha256.left(12)), 3500);
+        statusBar()->showMessage(QString("Verified %1 (%2)")
+            .arg(release.title, actualSha256.left(12)), 3500);
         installUpdatePackage(downloadedPath, true, true);
     }
 
@@ -8618,13 +8674,13 @@ private:
         if (!maybeSave()) return;
         QString package = preselected;
         if (package.isEmpty())
-            package = QFileDialog::getOpenFileName(this, "Install BO3 HLSL Previewer Update", currentDirectory(), "Previewer updates (*.zip);;ZIP files (*.zip)");
+            package = QFileDialog::getOpenFileName(this, "Install BO3 Shader Studio Update", currentDirectory(), "BO3 Shader Studio updates (*.zip);;ZIP files (*.zip)");
         if (package.isEmpty()) return;
 
         const QFileInfo packageInfo(package);
         if (!packageInfo.exists() || packageInfo.suffix().compare("zip", Qt::CaseInsensitive) != 0)
         {
-            QMessageBox::warning(this, "Invalid update", "Update packages must be ZIP files created for BO3 HLSL Previewer.");
+            QMessageBox::warning(this, "Invalid update", "Update packages must be ZIP files created for BO3 Shader Studio.");
             return;
         }
 
@@ -8664,7 +8720,7 @@ try {
 
     $manifestPath = Join-Path $staging 'update_manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) {
-        throw 'This ZIP does not contain update_manifest.json and is not a BO3 HLSL Previewer update package.'
+        throw 'This ZIP does not contain update_manifest.json and is not a BO3 Shader Studio update package.'
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.product -ne 'BO3 HLSL Previewer') {
@@ -8692,7 +8748,7 @@ catch {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
         "The update could not be installed.`r`n`r`n" + $_.Exception.Message,
-        'BO3 HLSL Previewer Update',
+        'BO3 Shader Studio Update',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
@@ -28163,7 +28219,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const bool beginnerMode = uiSettings.value("ui/experienceMode", "Beginner").toString() != "Advanced";
         setUiExperienceMode(beginnerMode, false);
         refreshPostFxRuntimeUi();
-        statusBar()->showMessage(QString("Ready - version %1").arg(appVersion_));
+        statusBar()->showMessage(QString("Ready - BO3 Shader Studio %1").arg(displayVersion_));
     }
 
     QWidget* buildSourceValuesPanel()
@@ -31207,7 +31263,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void updateTitle()
     {
         QString name = shaderPath_.isEmpty() ? "Untitled" : QFileInfo(shaderPath_).fileName();
-        setWindowTitle(QString("BO3 HLSL Previewer %1 - %2%3").arg(appVersion_).arg(name).arg(modified_ ? " *" : ""));
+        setWindowTitle(QString("BO3 Shader Studio %1 - %2%3").arg(displayVersion_).arg(name).arg(modified_ ? " *" : ""));
     }
 
     CodeEditor* editor_ = new CodeEditor();
@@ -31335,9 +31391,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     bo3::PreviewPackageSession previewPackageSession_;
     QMap<int, QMap<QString, QString>> temporaryPreviewMappings_;
     bool temporaryPreviewValidationPassed_ = false;
-    QString appVersion_ = "0.19.0";
+    QString appVersion_ = "1.0.0"; // internal updater version, intentionally not shown in normal UI
+    QString displayVersion_ = "0.1";
     QString githubRepository_;
-    QString updateAssetPrefix_ = "BO3_HLSL_Previewer_Update_";
+    QString updateAssetPrefix_ = "BO3_Shader_Studio_Update";
     QString defaultUpdateChannel_ = "stable";
     bool onlineUpdateCheckInProgress_ = false;
     QString currentTheme_ = "BO3 Dark";
@@ -31360,8 +31417,10 @@ int main(int argc, char* argv[])
 {
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     QApplication app(argc, argv);
-    app.setApplicationName("BO3 HLSL Previewer");
-    app.setOrganizationName("BO3 HLSL Previewer");
+    app.setApplicationName("BO3 Shader Studio");
+    app.setOrganizationName("BO3 Shader Studio");
+    ComboBoxWheelGuard comboBoxWheelGuard(&app);
+    app.installEventFilter(&comboBoxWheelGuard);
 
     QString regressionCase;
     QString regressionHlslOutput;

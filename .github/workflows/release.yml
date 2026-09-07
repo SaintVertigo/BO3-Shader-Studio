@@ -1,11 +1,12 @@
-name: Build and Release BO3 HLSL Previewer
+name: Build and Release BO3 Shader Studio
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (example: 0.20.0-test.1 or 0.20.0)'
+        description: 'Visible version (example: 0.1, 0.2, 1.0)'
         required: true
+        default: '0.1'
         type: string
       channel:
         description: 'Update channel'
@@ -19,9 +20,6 @@ on:
         description: 'Release notes (optional)'
         required: false
         type: string
-  push:
-    tags:
-      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -37,29 +35,32 @@ jobs:
       - name: Resolve release metadata
         shell: pwsh
         env:
-          MANUAL_VERSION: ${{ inputs.version }}
+          DISPLAY_VERSION: ${{ inputs.version }}
           MANUAL_CHANNEL: ${{ inputs.channel }}
           MANUAL_NOTES: ${{ inputs.notes }}
         run: |
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-            $version = $env:MANUAL_VERSION.Trim()
-            $channel = $env:MANUAL_CHANNEL.Trim().ToLowerInvariant()
-            $notes = $env:MANUAL_NOTES
-          } else {
-            $version = '${{ github.ref_name }}'
-            if ($version.StartsWith('v')) { $version = $version.Substring(1) }
-            $channel = if ($version.Contains('-')) { 'tester' } else { 'stable' }
-            $notes = ''
-          }
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-            throw "Invalid release version: $version"
+          $displayVersion = $env:DISPLAY_VERSION.Trim()
+          $channel = $env:MANUAL_CHANNEL.Trim().ToLowerInvariant()
+          $notes = $env:MANUAL_NOTES
+          if ($displayVersion -notmatch '^\d+(?:\.\d+){0,2}$') {
+            throw "Invalid visible version: $displayVersion"
           }
           if ($channel -notin @('stable','tester')) { throw "Invalid channel: $channel" }
-          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # The public/display version is intentionally decoupled from the update
+          # ordering version. The first GitHub-enabled tester build was
+          # 0.20.0-test.1, so resetting the visible product to 0.1 would otherwise
+          # look older to installed clients. GitHub's monotonically increasing
+          # workflow run number gives every release a unique SemVer that stays
+          # newer while the UI can remain clean (0.1, 0.2, ...).
+          $updateVersion = "1.0.${{ github.run_number }}"
+          "RELEASE_VERSION=$updateVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_DISPLAY_VERSION=$displayVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append
+
           $notesPath = Join-Path $env:RUNNER_TEMP 'bo3_release_notes.md'
           if ([string]::IsNullOrWhiteSpace($notes)) {
-            $notes = "BO3 HLSL Previewer $version`n`nAutomated $channel build."
+            $notes = "BO3 Shader Studio $displayVersion`n`nAutomated $channel build."
           }
           Set-Content -LiteralPath $notesPath -Value $notes -Encoding UTF8
           "RELEASE_NOTES_FILE=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -79,8 +80,12 @@ jobs:
           $path = Join-Path $env:GITHUB_WORKSPACE 'version.json'
           $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
           $json.version = $env:RELEASE_VERSION
+          if (-not ($json.PSObject.Properties.Name -contains 'displayVersion')) { $json | Add-Member -NotePropertyName displayVersion -NotePropertyValue $env:RELEASE_DISPLAY_VERSION }
+          else { $json.displayVersion = $env:RELEASE_DISPLAY_VERSION }
+          if (-not ($json.PSObject.Properties.Name -contains 'displayProduct')) { $json | Add-Member -NotePropertyName displayProduct -NotePropertyValue 'BO3 Shader Studio' }
+          else { $json.displayProduct = 'BO3 Shader Studio' }
           $json.githubRepository = '${{ github.repository }}'
-          $json.updateAssetPrefix = 'BO3_HLSL_Previewer_Update_'
+          $json.updateAssetPrefix = 'BO3_Shader_Studio_Update'
           $json.defaultUpdateChannel = $env:RELEASE_CHANNEL
           $json | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
 
@@ -88,10 +93,6 @@ jobs:
         shell: cmd
         run: tools\ci_build_release.cmd
 
-      # Run every regression suite even when an earlier suite fails. This makes
-      # tester CI report all regressions in one run instead of forcing a
-      # fix/rerun cycle for each suite. The Regression gate below still prevents
-      # broken builds from being packaged or published.
       - name: Run GLSL regression suite
         id: glsl_regression
         continue-on-error: true
@@ -142,6 +143,7 @@ jobs:
         run: |
           .\tools\package_github_release.ps1 `
             -Version $env:RELEASE_VERSION `
+            -DisplayVersion $env:RELEASE_DISPLAY_VERSION `
             -Channel $env:RELEASE_CHANNEL `
             -Repository '${{ github.repository }}' `
             -NotesFile $env:RELEASE_NOTES_FILE
@@ -149,7 +151,7 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: BO3-HLSL-Previewer-${{ env.RELEASE_VERSION }}
+          name: BO3-Shader-Studio-${{ env.RELEASE_DISPLAY_VERSION }}
           path: release_artifacts/*
           if-no-files-found: error
 
@@ -160,7 +162,7 @@ jobs:
         run: |
           $tag = "v$env:RELEASE_VERSION"
           $assets = Get-ChildItem -LiteralPath release_artifacts -File | Where-Object { $_.Name -ne 'release_notes.md' } | ForEach-Object { $_.FullName }
-          $args = @('release','create',$tag,'--title',"BO3 HLSL Previewer $env:RELEASE_VERSION",'--notes-file',(Join-Path $PWD 'release_artifacts\release_notes.md'),'--target','${{ github.sha }}')
+          $args = @('release','create',$tag,'--title',"BO3 Shader Studio $env:RELEASE_DISPLAY_VERSION",'--notes-file',(Join-Path $PWD 'release_artifacts\release_notes.md'),'--target','${{ github.sha }}')
           if ($env:RELEASE_CHANNEL -eq 'tester') { $args += '--prerelease' }
           $args += $assets
           & gh @args
