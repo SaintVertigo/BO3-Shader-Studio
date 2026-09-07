@@ -19884,7 +19884,29 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
                 const QString name = functionMatch.captured(1);
                 QStringList block{line};
                 int braces = line.count('{') - line.count('}');
-                while(braces > 0 && i + 1 < lines.size())
+                bool sawOpeningBrace = line.contains('{');
+
+                // Some compatibility helpers put the opening brace on the next
+                // line (for example GLSL_INVERSE and GLSL_TEXTURE_SIZE).  The
+                // old dependency-pruner treated a zero brace count on the
+                // signature line as a complete one-line function and emitted
+                // only the signature, leaving invalid HLSL behind.  Keep
+                // consuming until the definition's opening brace is found, then
+                // continue through the matching closing brace.
+                while(!sawOpeningBrace && i + 1 < lines.size())
+                {
+                    const QString next = lines[++i];
+                    block << next;
+                    braces += next.count('{') - next.count('}');
+                    if(next.contains('{'))
+                        sawOpeningBrace = true;
+                    // Defensive escape for a declaration/prototype.  The helper
+                    // library currently contains definitions, but do not swallow
+                    // unrelated following source if a prototype is added later.
+                    if(!sawOpeningBrace && next.contains(';'))
+                        break;
+                }
+                while(sawOpeningBrace && braces > 0 && i + 1 < lines.size())
                 {
                     const QString next = lines[++i];
                     block << next;
