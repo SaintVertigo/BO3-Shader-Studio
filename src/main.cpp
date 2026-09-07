@@ -8320,13 +8320,21 @@ private:
             return;
         }
 
+        const QString availableDisplayVersion = release.displayVersion.trimmed().isEmpty()
+            ? displayVersion_ : release.displayVersion.trimmed();
+        const bool sameVisibleVersion = availableDisplayVersion.compare(displayVersion_, Qt::CaseInsensitive) == 0;
+
         QMessageBox box(this);
         box.setIcon(QMessageBox::Information);
         box.setWindowTitle("BO3 Shader Studio update available");
-        box.setText(QString("Version %1 is available on the %2 channel.")
-            .arg(release.version, github_update::channelName(channel)));
-        box.setInformativeText(QString("Installed: %1\nAvailable: %2\n\nDownload and install it now?")
-            .arg(appVersion_, release.version));
+        if (sameVisibleVersion)
+            box.setText(QString("A newer BO3 Shader Studio %1 build is available on the %2 channel.")
+                .arg(availableDisplayVersion, github_update::channelName(channel)));
+        else
+            box.setText(QString("BO3 Shader Studio %1 is available on the %2 channel.")
+                .arg(availableDisplayVersion, github_update::channelName(channel)));
+        box.setInformativeText(QString("Installed: BO3 Shader Studio %1\nAvailable: BO3 Shader Studio %2%3\n\nDownload and install it now?")
+            .arg(displayVersion_, availableDisplayVersion, sameVisibleVersion ? " (newer build)" : ""));
         if (!release.notes.trimmed().isEmpty()) box.setDetailedText(release.notes.trimmed());
         QPushButton* updateNow = box.addButton("Update Now", QMessageBox::AcceptRole);
         QPushButton* later = box.addButton("Later", QMessageBox::RejectRole);

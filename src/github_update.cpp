@@ -151,6 +151,10 @@ bool releaseFromObject(const QJsonObject& object,
     out.tag = object.value("tag_name").toString();
     out.title = object.value("name").toString().trimmed();
     if(out.title.isEmpty()) out.title = out.tag;
+    const QString studioPrefix = "BO3 Shader Studio";
+    if(out.title.startsWith(studioPrefix, Qt::CaseInsensitive))
+        out.displayVersion = out.title.mid(studioPrefix.size()).trimmed();
+    if(out.displayVersion.isEmpty()) out.displayVersion = version;
     out.notes = object.value("body").toString();
     out.prerelease = object.value("prerelease").toBool(false);
     out.releasePage = QUrl(object.value("html_url").toString());
@@ -240,7 +244,7 @@ bool fetchLatestRelease(const Config& config,
     }
     if(!found)
     {
-        error = "No compatible Stable or Tester GitHub release contains a Previewer update ZIP.";
+        error = "No compatible Stable or Tester GitHub release contains a BO3 Shader Studio update ZIP.";
         return false;
     }
     release = best;
@@ -282,7 +286,7 @@ bool downloadReleaseAsset(const ReleaseInfo& release,
     QProgressDialog progress("Downloading BO3 Shader Studio update...", "Cancel", 0,
                              release.assetSize > 0 ? static_cast<int>(std::min<qint64>(release.assetSize, INT_MAX)) : 0,
                              parent);
-    progress.setWindowTitle(QString("Downloading %1").arg(release.version));
+    progress.setWindowTitle("Downloading BO3 Shader Studio update");
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
@@ -366,7 +370,7 @@ bool verifySha256(const QString& path,
     const QString expected = expectedSha256.trimmed().toLower();
     if(expected.isEmpty())
     {
-        error = "GitHub did not provide a SHA-256 digest for this release asset. The Previewer refuses automatic installation without a digest; use manual Install Update File only if you trust the package.";
+        error = "GitHub did not provide a SHA-256 digest for this release asset. BO3 Shader Studio refuses automatic installation without a digest; use manual Install Update File only if you trust the package.";
         return false;
     }
     if(actualSha256 != expected)

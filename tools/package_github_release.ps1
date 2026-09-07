@@ -12,6 +12,12 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $dist = (Resolve-Path (Join-Path $root $DistDir)).Path
 $out = Join-Path $root $OutputDir
+
+# Always start clean so old bridge/legacy assets can never leak into a new
+# release when this script is also used locally.
+if (Test-Path -LiteralPath $out) {
+    Remove-Item -LiteralPath $out -Recurse -Force
+}
 New-Item -ItemType Directory -Path $out -Force | Out-Null
 
 $notes = ''
@@ -31,7 +37,10 @@ $versionJson = if (Test-Path -LiteralPath $versionPath) {
 } else {
     [pscustomobject]@{ product='BO3 HLSL Previewer'; updateFormat=1 }
 }
-$versionJson.product = 'BO3 HLSL Previewer' # legacy manifest identity for bridge compatibility
+
+# Keep the format-1 manifest identity for compatibility with the already-shipped
+# 0.1 updater. It is internal only; all visible branding is BO3 Shader Studio.
+$versionJson.product = 'BO3 HLSL Previewer'
 $versionJson.version = $Version
 if (-not ($versionJson.PSObject.Properties.Name -contains 'displayProduct')) { $versionJson | Add-Member -NotePropertyName displayProduct -NotePropertyValue 'BO3 Shader Studio' }
 else { $versionJson.displayProduct = 'BO3 Shader Studio' }
@@ -46,12 +55,9 @@ if (-not ($versionJson.PSObject.Properties.Name -contains 'defaultUpdateChannel'
 else { $versionJson.defaultUpdateChannel = $Channel }
 $versionJson | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $versionPath -Encoding UTF8
 
-$safeInternalVersion = $Version -replace '[^0-9A-Za-z._-]', '_'
 $updateName = 'BO3_Shader_Studio_Update.zip'
-$legacyUpdateName = "BO3_HLSL_Previewer_Update_$safeInternalVersion.zip"
 $fullName = 'BO3_Shader_Studio.zip'
 $updatePath = Join-Path $out $updateName
-$legacyUpdatePath = Join-Path $out $legacyUpdateName
 $fullPath = Join-Path $out $fullName
 $staging = Join-Path $env:TEMP ("BO3ShaderStudio_Package_" + [Guid]::NewGuid().ToString('N'))
 
@@ -61,9 +67,6 @@ try {
     New-Item -ItemType Directory -Path $payload -Force | Out-Null
     Copy-Item -Path (Join-Path $dist '*') -Destination $payload -Recurse -Force
 
-    # Keep the legacy product identity in format-1 manifests so 0.20.0-test.1
-    # can install this first renamed build. The installed payload itself uses
-    # BO3 Shader Studio branding and the new asset prefix for future updates.
     $manifest = [ordered]@{
         product = 'BO3 HLSL Previewer'
         displayProduct = 'BO3 Shader Studio'
@@ -77,26 +80,18 @@ try {
     }
     $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'update_manifest.json') -Encoding UTF8
 
-    Remove-Item -LiteralPath $updatePath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel Optimal
-
-    # Legacy alias lets the already-released BO3 HLSL Previewer updater find
-    # this bridge release. It is byte-for-byte the same update package.
-    Copy-Item -LiteralPath $updatePath -Destination $legacyUpdatePath -Force
-
-    Remove-Item -LiteralPath $fullPath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
 }
 finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-foreach ($path in @($updatePath, $legacyUpdatePath, $fullPath)) {
+foreach ($path in @($updatePath, $fullPath)) {
     $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath ($path + '.sha256') -Value ("$hash  " + [IO.Path]::GetFileName($path)) -Encoding ASCII
 }
 
 Set-Content -LiteralPath (Join-Path $out 'release_notes.md') -Value $notes -Encoding UTF8
 Write-Host "Created: $updatePath"
-Write-Host "Created: $legacyUpdatePath (legacy bridge alias)"
 Write-Host "Created: $fullPath"

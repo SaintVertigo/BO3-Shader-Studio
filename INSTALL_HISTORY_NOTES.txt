@@ -1,0 +1,32 @@
+BO3 INSTALL HISTORY FEATURE
+
+This build adds persistent history for direct "Install into BO3" exports.
+
+What is tracked per install:
+- Date/time
+- PostFX / Material / Sky target and target details
+- Asset, material, techset, and namespace names
+- BO3 root
+- Original shader path when available
+- Every installed file as a BO3-root-relative path
+- SHA-256 of every tracked file
+
+UI:
+- File -> BO3 Install History...
+- History... button beside the BO3 install root in Export to BO3
+- Install History... button in the direct-install completion dialog
+
+Removal behavior:
+- Deletes only files recorded for the selected install
+- Preserves files also owned by another active tracked install
+- Preserves files whose bytes changed since install unless the user explicitly enables
+  "Also delete files changed since install"
+- Keeps an incomplete history entry active so deletion can be retried
+- Marks repeated same-name installs as Replaced while still allowing old-only leftover
+  files to be cleaned without touching files used by the newer install
+- Prunes empty custom/export subfolders while preserving BO3's standard anchor folders
+- "Forget History Entry" removes only the history row and never touches BO3 files
+
+History is stored in the app's persistent AppData location as bo3_install_history.json.
+Installs made before this feature are not guessed, because the Previewer did not have a
+reliable exact file manifest for them.

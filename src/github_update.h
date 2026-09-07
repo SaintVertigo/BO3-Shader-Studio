@@ -23,7 +23,8 @@ struct Config
 struct ReleaseInfo
 {
     bool valid = false;
-    QString version;
+    QString version;          // internal monotonic update-ordering version
+    QString displayVersion;   // user-facing version parsed from the release title
     QString tag;
     QString title;
     QString notes;
