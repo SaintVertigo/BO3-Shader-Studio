@@ -7713,6 +7713,56 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
+        run("converted Material-style fBM helper chain preserves mainImage", [&]() -> QString
+        {
+            QStringList notes;
+            const QString input =
+                "float colormap_red(float x){return x;}\n"
+                "float4 colormap(float x){return float4(colormap_red(x),x,x,1.0);}\n"
+                "float rand(float2 n){return frac(sin(dot(n,float2(12.9898,4.1414)))*43758.5453);}\n"
+                "float noise(float2 p){return rand(p); }\n"
+                "static const float2x2 mtx=float2x2(0.80,0.60,-0.60,0.80);\n"
+                "float fbm(float2 p){float f=noise(p+iTime);p=mul(p,mtx)*2.02;return f+noise(p);}\n"
+                "float pattern(float2 p){return fbm(p+fbm(p+fbm(p)));}\n"
+                "void mainImage(out float4 fragColor,in float2 fragCoord){float2 uv=fragCoord/iResolution.x;float shade=pattern(uv);fragColor=float4(colormap(shade).rgb,shade);}\n";
+            const QString out = namespaceConvertedGlslUserFunctions(input, notes);
+            if(!out.contains(QRegularExpression(R"(\bmainImage\s*\()")))
+                return "mainImage was removed from the converted Material helper chain";
+            if(!out.contains("BO3GLSL_USER_pattern") || !out.contains("BO3GLSL_USER_fbm") ||
+               !out.contains("BO3GLSL_USER_noise") || !out.contains("BO3GLSL_USER_rand") ||
+               !out.contains("BO3GLSL_USER_colormap"))
+                return "a reachable transitive helper in the fBM/colormap chain was removed";
+            if(!out.contains("mtx")) return "reachable global matrix was removed";
+            return {};
+        });
+
+        run("full GLSL fBM Material conversion keeps fragment entry", [&]() -> QString
+        {
+            QStringList notes;
+            QSet<int> channels;
+            QStringList varyings;
+            const QString glsl =
+                "float rand(vec2 n){return fract(sin(dot(n,vec2(12.9898,4.1414)))*43758.5453);}\n"
+                "float noise(vec2 p){vec2 ip=floor(p);return rand(ip);}\n"
+                "const mat2 mtx=mat2(0.80,0.60,-0.60,0.80);\n"
+                "float fbm(vec2 p){float f=noise(p+iTime);p=mtx*p*2.02;return f+noise(p);}\n"
+                "float pattern(vec2 p){return fbm(p+fbm(p+fbm(p)));}\n"
+                "void mainImage(out vec4 fragColor,in vec2 fragCoord){vec2 uv=fragCoord/iResolution.x;float shade=pattern(uv);fragColor=vec4(shade,shade,shade,1.0);}\n";
+            QString core = convertGlslSyntax(glsl, notes, channels, varyings);
+            if(!core.contains(QRegularExpression(R"(\bmainImage\s*\()")))
+                return "GLSL syntax lowering removed mainImage before BO3 namespacing";
+            core = namespaceConvertedGlslUserFunctions(core, notes);
+            if(!core.contains(QRegularExpression(R"(\bmainImage\s*\()")))
+                return "BO3 helper isolation removed mainImage after GLSL lowering";
+            if(!core.contains("BO3GLSL_USER_pattern") || !core.contains("BO3GLSL_USER_fbm") ||
+               !core.contains("BO3GLSL_USER_noise") || !core.contains("BO3GLSL_USER_rand"))
+                return "full conversion lost a reachable fBM helper";
+            const QString material = makeBo3MaterialFromGlsl(core, channels, varyings, 0);
+            if(!material.contains(QRegularExpression(R"(\bvoid\s+mainImage\s*\()")))
+                return "Material wrapper was emitted without the converted mainImage definition";
+            return {};
+        });
+
         run("runtime GLSL globals and constant loops lower for FXC", [&]() -> QString
         {
             QStringList notes;
@@ -20107,6 +20157,26 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
         };
         addCalls(roots, reachable);
 
+        // Treat the fragment/vertex entry bodies as explicit reachability roots.
+        // In most shaders they are already present in `roots`, but doing this
+        // independently makes the optimizer robust against compact formatting and
+        // future top-level scanning changes.  A converter entry must never lose a
+        // helper merely because the generic root scan failed to see the call.
+        const QStringList entryNames = {"mainImage", "main", "ps_main", "vs_main"};
+        for(const QString& entryName : entryNames)
+        {
+            const QRegularExpression entryRe(
+                QString(R"(\b(?:void|float(?:[234])?|half(?:[234])?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?)\s+%1\s*\([^;{}]*\)\s*\{)")
+                    .arg(QRegularExpression::escape(entryName)),
+                QRegularExpression::CaseInsensitiveOption);
+            const auto entry = entryRe.match(source);
+            if(!entry.hasMatch()) continue;
+            const int open = source.indexOf('{', entry.capturedStart());
+            const int close = open >= 0 ? glslFindMatchingForward(source, open) : -1;
+            if(open >= 0 && close > open)
+                addCalls(source.mid(open + 1, close - open - 1), reachable);
+        }
+
         bool changed = true;
         while(changed)
         {
@@ -20203,7 +20273,61 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
         notes << QString("Namespaced %1 user GLSL helper function(s) for BO3 header compatibility (%2).")
                      .arg(renamed.size())
                      .arg(renamed.join(", "));
-        source = pruneUnusedConvertedGlslFunctions(source, notes);
+
+        // Dead-code elimination is an optimization only; it must never be able to
+        // invalidate the converted shader. Keep a structurally complete namespaced
+        // copy and validate the pruned result before accepting it.
+        const QString namespacedSource = source;
+        const bool hadMainImage = namespacedSource.contains(QRegularExpression(
+            R"(\bmainImage\s*\()", QRegularExpression::CaseInsensitiveOption));
+        const bool hadClassicMain = namespacedSource.contains(QRegularExpression(
+            R"(\bvoid\s+main\s*\()", QRegularExpression::CaseInsensitiveOption));
+
+        QString pruned = pruneUnusedConvertedGlslFunctions(namespacedSource, notes);
+        bool unsafePrune = false;
+        QStringList unsafeReasons;
+        if(hadMainImage && !pruned.contains(QRegularExpression(
+               R"(\bmainImage\s*\()", QRegularExpression::CaseInsensitiveOption)))
+        {
+            unsafePrune = true;
+            unsafeReasons << "mainImage entry was removed";
+        }
+        if(hadClassicMain && !pruned.contains(QRegularExpression(
+               R"(\bvoid\s+main\s*\()", QRegularExpression::CaseInsensitiveOption)))
+        {
+            unsafePrune = true;
+            unsafeReasons << "main entry was removed";
+        }
+
+        // Every remaining BO3GLSL_USER_* call must still have at least one
+        // function definition. This catches transitive reachability mistakes before
+        // they become an FXC X3004 undeclared-identifier error.
+        QSet<QString> calledHelpers;
+        const QRegularExpression helperCallRe(R"(\b(BO3GLSL_USER_[A-Za-z_]\w*)\s*\()");
+        auto callIt = helperCallRe.globalMatch(pruned);
+        while(callIt.hasNext()) calledHelpers.insert(callIt.next().captured(1));
+        for(const QString& helper : calledHelpers)
+        {
+            const QRegularExpression defRe(
+                QString(R"(\b(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|[A-Za-z_]\w*)\s+%1\s*\([^;{}]*\)\s*\{)")
+                    .arg(QRegularExpression::escape(helper)));
+            if(!defRe.match(pruned).hasMatch())
+            {
+                unsafePrune = true;
+                unsafeReasons << QString("%1 call lost its definition").arg(helper);
+            }
+        }
+
+        if(unsafePrune)
+        {
+            notes << QString("Skipped converted-GLSL dead-code pruning because its structural safety check failed (%1). Kept the complete namespaced shader instead.")
+                         .arg(unsafeReasons.join("; "));
+            source = namespacedSource;
+        }
+        else
+        {
+            source = pruned;
+        }
         return pruneUnusedConvertedGlslGlobals(source, notes);
     }
 
