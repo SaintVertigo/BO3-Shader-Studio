@@ -7014,12 +7014,23 @@ float4 ps_main(PixelInput input) : SV_TARGET
                 normalized, rel, {}, "resolvedScene", bo3::PackageConfiguration::Runtime);
             if(runtimeTechset.contains("vs = \"vs_generic\""))
                 return "runtime techset still forces vs_generic for PostFx_GenerateFullscreenQuad vs_main";
-            if(!runtimeTechset.contains(QRegularExpression("vs\\s*=\\s*VertexShader\\s*\\(\\s*\\)")))
+            if(!runtimeTechset.contains(QRegularExpression("vs\s*=\s*VertexShader\s*\(\s*\)")))
                 return "runtime shader-defined fullscreen VS is not selected";
+
+            // TOOLSGFX only uses the proven APE vs_generic contract after the
+            // source has passed through the dedicated APE adapter. Testing the
+            // raw runtime source here was stale and disagreed with the exporter.
+            QMap<QString,QString> mappings;
+            mappings["frameBuffer"] = "resolvedScene";
+            const QString toolsSource = makeBo3PostFxToolsgfxExportShader(normalized, mappings);
+            const QString toolsRel = postFxToolsgfxShaderRelativePath(rel, toolsSource);
             const QString toolsTechset = makePostFxTechset(
-                normalized, rel, {}, "resolvedScene", bo3::PackageConfiguration::Toolsgfx);
+                toolsSource, toolsRel, {}, "resolvedScene",
+                bo3::PackageConfiguration::Toolsgfx, mappings);
+            if(!toolsSource.contains("BO3_PREVIEWER_POSTFX_APE_VS_GENERIC_COMPAT"))
+                return "TOOLSGFX source did not receive the APE vs_generic compatibility bridge";
             if(!toolsTechset.contains("vs = \"vs_generic\""))
-                return "TOOLSGFX techset did not select the proven APE vs_generic path";
+                return "adapted TOOLSGFX techset did not select the proven APE vs_generic path";
             return {};
         });
 
@@ -7174,6 +7185,7 @@ float4 ps_main(float4 position : SV_POSITION) : SV_TARGET0
 // BO3_PREVIEWER_SCENE_CHANNEL_NORMALIZATION
 Texture2D<float4> iChannel0 : register(t2);
 SamplerState bilinearClampler : register(s1);
+#define iResolution (float3(PostFx_GetRenderTargetSize().xy, 1.0))
 struct VertexInput { float3 position : POSITION; float2 texCoords : TEXCOORD0; };
 struct PixelInput { float4 position : SV_POSITION; float2 texCoords : TEXCOORD0; };
 PixelInput vs_main(const VertexInput vertex, const uint instance : INSTANCE_SEMANTIC)
@@ -10378,21 +10390,20 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         auto compileStage = [&](bo3::ResolvedShaderStage& stage,
                                 bo3::CompiledShaderInterface& compiled)
         {
-            const QString normalizedStagePath = QDir::cleanPath(QDir::fromNativeSeparators(stage.source));
-            if(normalizedStagePath != normalizedShaderPath) return;
-
-            const QRegularExpression entryPattern(
-                QString("\\b%1\\s*\\(").arg(QRegularExpression::escape(stage.entryPoint)));
-            const bool entryIsInBundledSource = shaderSource.contains(entryPattern);
-            if(!entryIsInBundledSource && stage.assignment == bo3::StageAssignmentKind::GenericName)
+            // A GenericName assignment (for example vs = "vs_generic") selects
+            // a stock/inherited BO3 shader program. The technique-level source
+            // may still point at the custom opposite stage, but that does NOT
+            // make vs_generic/ps_generic bytecode part of the bundled source.
+            // Treat it as external/unknown instead of accidentally compiling a
+            // coincidentally named vs_main/ps_main from the custom HLSL.
+            if(stage.assignment == bo3::StageAssignmentKind::GenericName)
             {
-                // A generic stage may come from the included stock shader family
-                // even when the technique-level source selects the custom opposite
-                // stage. Do not fabricate bytecode for it from an unrelated preview
-                // shader; leave it explicitly external/unknown.
                 stage.source.clear();
                 return;
             }
+
+            const QString normalizedStagePath = QDir::cleanPath(QDir::fromNativeSeparators(stage.source));
+            if(normalizedStagePath != normalizedShaderPath) return;
 
             bo3::ShaderCompileRequest request;
             request.source = shaderSource;
