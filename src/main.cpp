@@ -7686,6 +7686,29 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
+        run("GLSL helper namespacing never rewrites else-if control flow", [&]() -> QString
+        {
+            QStringList notes;
+            const QString input =
+                "float curve(float x) {\n"
+                "    if (x < 0.0) { return 0.0; }\n"
+                "    else if (x < 0.5) { return x * 2.0; }\n"
+                "    else if (x <= 1.0) { return 1.0; }\n"
+                "    else { return 1.0; }\n"
+                "}\n"
+                "void mainImage(out float4 c, in float2 p) { c = float4(curve(p.x)); }\n";
+            const QString out = namespaceConvertedGlslUserFunctions(input, notes);
+            if(out.contains("BO3GLSL_USER_if"))
+                return "else-if control flow was mistaken for a user function";
+            if(!out.contains(QRegularExpression(R"(\belse\s+if\s*\()")))
+                return "else-if control flow was damaged during helper namespacing";
+            if(!out.contains("BO3GLSL_USER_curve"))
+                return "real user helper was not namespaced";
+            if(!out.contains(QRegularExpression(R"(\bmainImage\s*\()")))
+                return "mainImage entry was damaged while protecting control-flow keywords";
+            return {};
+        });
+
         run("clean GLSL compatibility emission is dependency-based", [&]() -> QString
         {
             const QString converted =
@@ -20113,7 +20136,7 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
 
         const QRegularExpression defRe(
             R"((?:^|[;}
-])\s*(?:static\s+|inline\s+|const\s+)*(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|[A-Za-z_]\w*)\s+(BO3GLSL_USER_[A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{)",
+])\s*(?:static\s+|inline\s+|const\s+)*(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|(?!(?:if|else|for|while|switch|do|return|case|default|discard)\b)[A-Za-z_]\w*)\s+(BO3GLSL_USER_[A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{)",
             QRegularExpression::MultilineOption);
         QVector<FunctionDef> defs;
         auto it = defRe.globalMatch(source);
@@ -20233,14 +20256,26 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
         // renamed alongside declarations, so overload sets remain intact while stock
         // BO3 helper names can coexist safely.
         const QRegularExpression functionDefRe(
-            R"((?:^|[;}\n])\s*(?:static\s+|inline\s+|const\s+)*(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|[A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{)",
+            R"((?:^|[;}\n])\s*(?:static\s+|inline\s+|const\s+)*(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|(?!(?:if|else|for|while|switch|do|return|case|default|discard)\b)[A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{)",
             QRegularExpression::MultilineOption);
+
+        // This pass intentionally accepts user-defined struct return types, so the
+        // final return-type alternative above must remain generic.  That also means
+        // control-flow text can superficially resemble a declaration to a regex
+        // (notably `else if (...) {`).  Never allow GLSL/HLSL control keywords to
+        // enter the user-function namespace set.
+        const QSet<QString> nonFunctionKeywords = {
+            "if", "else", "for", "while", "do", "switch", "case", "default",
+            "return", "break", "continue", "discard"
+        };
 
         QSet<QString> functionNames;
         auto it = functionDefRe.globalMatch(source);
         while(it.hasNext())
         {
             const QString name = it.next().captured(1);
+            if(nonFunctionKeywords.contains(name.toLower()))
+                continue;
             if(name.compare("mainImage", Qt::CaseInsensitive) == 0 ||
                name.compare("main", Qt::CaseInsensitive) == 0 ||
                name.compare("ps_main", Qt::CaseInsensitive) == 0 ||
@@ -20309,7 +20344,7 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
         for(const QString& helper : calledHelpers)
         {
             const QRegularExpression defRe(
-                QString(R"(\b(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|[A-Za-z_]\w*)\s+%1\s*\([^;{}]*\)\s*\{)")
+                QString(R"(\b(?:void|float(?:[234](?:x[234])?)?|half(?:[234](?:x[234])?)?|int(?:[234])?|uint(?:[234])?|bool(?:[234])?|(?!(?:if|else|for|while|switch|do|return|case|default|discard)\b)[A-Za-z_]\w*)\s+%1\s*\([^;{}]*\)\s*\{)")
                     .arg(QRegularExpression::escape(helper)));
             if(!defRe.match(pruned).hasMatch())
             {
