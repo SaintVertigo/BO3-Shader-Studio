@@ -325,17 +325,24 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString threshold = floatLiteral(parameterFloat(effect, *definition, "depth_threshold"));
             const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
             const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail_edges"));
-            out += QString("    // %1 - BO3 Float-Z silhouette edges with restrained cel shading\n"
+            const QString celAmount = floatLiteral(parameterFloat(effect, *definition, "cel_amount"));
+            out += QString("    // %1 - point-sampled Float-Z silhouettes plus optional image-detail ink\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
-                           "    float %2_dCraw = DepthSampler.Sample(bilinearClampler, uv).r;\n"
-                           "    float %2_dC = BO3BeginnerLinearDepth(%2_dCraw);\n"
-                           "    float %2_dL = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x, 0.0))).r);\n"
-                           "    float %2_dR = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r);\n"
-                           "    float %2_dU = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv - float2(0.0, %2_texel.y))).r);\n"
-                           "    float %2_dD = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r);\n"
-                           "    float %2_depthDelta = max(max(abs(%2_dC-%2_dL), abs(%2_dC-%2_dR)), max(abs(%2_dC-%2_dU), abs(%2_dC-%2_dD)));\n"
-                           "    float %2_depthScale = max(%2_dC * (0.0015 * %4), 0.002);\n"
-                           "    float %2_depthEdge = smoothstep(%2_depthScale, %2_depthScale * 2.4, %2_depthDelta);\n"
+                           "    float2 %2_diag = %2_texel * 0.75;\n"
+                           "    float %2_rawBL = BO3BeginnerSampleRawDepthPoint(uv + float2(-%2_diag.x, %2_diag.y));\n"
+                           "    float %2_rawTR = BO3BeginnerSampleRawDepthPoint(uv + float2( %2_diag.x,-%2_diag.y));\n"
+                           "    float %2_rawBR = BO3BeginnerSampleRawDepthPoint(uv + float2( %2_diag.x, %2_diag.y));\n"
+                           "    float %2_rawTL = BO3BeginnerSampleRawDepthPoint(uv + float2(-%2_diag.x,-%2_diag.y));\n"
+                           "    float %2_d0 = FloatZ_Process(%2_rawBL);\n"
+                           "    float %2_d1 = FloatZ_Process(%2_rawTR);\n"
+                           "    float %2_d2 = FloatZ_Process(%2_rawBR);\n"
+                           "    float %2_d3 = FloatZ_Process(%2_rawTL);\n"
+                           "    float %2_fd0 = %2_d1 - %2_d0;\n"
+                           "    float %2_fd1 = %2_d3 - %2_d2;\n"
+                           "    float %2_depthMagnitude = length(float2(%2_fd0,%2_fd1)) * 100.0;\n"
+                           "    float %2_depthReference = max(min(min(%2_d0,%2_d1),min(%2_d2,%2_d3)), 0.0001);\n"
+                           "    float %2_depthThreshold = max(0.015, %4 * %2_depthReference);\n"
+                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.78, %2_depthThreshold * 1.32, %2_depthMagnitude);\n"
                            "    float3 %2_sceneL = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(0.0,%2_texel.y))).rgb);\n"
@@ -343,54 +350,71 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float3 %2_lumaWeights = float3(0.299,0.587,0.114);\n"
                            "    float %2_gx = dot(%2_sceneR-%2_sceneL, %2_lumaWeights);\n"
                            "    float %2_gy = dot(%2_sceneD-%2_sceneU, %2_lumaWeights);\n"
-                           "    float %2_detailEdge = smoothstep(0.055, 0.16, length(float2(%2_gx,%2_gy))) * %5;\n"
+                           "    float %2_detailEdge = smoothstep(0.045, 0.145, length(float2(%2_gx,%2_gy))) * %5;\n"
                            "    float %2_edge = saturate(max(%2_depthEdge, %2_detailEdge));\n"
                            "    float %2_steps = max(2.0, round(%6));\n"
                            "    float %2_luma = max(dot(color, %2_lumaWeights), 0.0001);\n"
                            "    float %2_qLuma = floor(saturate(%2_luma) * (%2_steps - 1.0) + 0.5) / (%2_steps - 1.0);\n"
                            "    float3 %2_toon = color * (%2_qLuma / %2_luma);\n"
-                           "    float3 %2_cel = lerp(color, %2_toon, 0.22);\n"
-                           "    color = lerp(%2_cel, %7, saturate(%2_edge * %8));\n")
-                .arg(definition->name, tag, thickness, threshold, detail, levels, colorLiteral(outlineColor), strength);
+                           "    color = lerp(color, %2_toon, %7);\n"
+                           "    color = lerp(color, %8, saturate(%2_edge * %9));\n")
+                .arg(definition->name, tag, thickness, threshold, detail, levels, celAmount, colorLiteral(outlineColor), strength);
         }
         else if(effect.typeId == "ambient_occlusion" && project.target == Target::PostFx && hasUv)
         {
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
             const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
             const QString bias = floatLiteral(parameterFloat(effect, *definition, "bias"));
-            out += QString("    // %1 - compact Float-Z SSAO/contact shading\n"
-                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
-                           "    float %2_rawC = DepthSampler.Sample(bilinearClampler, uv).r;\n"
-                           "    float %2_depthC = BO3BeginnerLinearDepth(%2_rawC);\n"
-                           "    float %2_occ = 0.0;\n"
-                           "    float %2_weight = 0.0;\n"
-                           "    float2 %2_dirs[8] = { float2(1,0), float2(-1,0), float2(0,1), float2(0,-1), float2(0.707,0.707), float2(-0.707,0.707), float2(0.707,-0.707), float2(-0.707,-0.707) };\n"
-                           "    [unroll] for(int %2_i=0; %2_i<8; ++%2_i) {\n"
-                           "        float2 %2_suv = saturate(uv + %2_dirs[%2_i] * %2_texel);\n"
-                           "        float %2_rawS = DepthSampler.Sample(bilinearClampler, %2_suv).r;\n"
-                           "        float %2_depthS = BO3BeginnerLinearDepth(%2_rawS);\n"
-                           "        float %2_delta = %2_depthC - %2_depthS;\n"
-                           "        float %2_range = max(%2_depthC * 0.08, 0.05);\n"
-                           "        float %2_front = saturate((%2_delta - %4 * %2_range) / %2_range);\n"
-                           "        float %2_rangeMask = 1.0 - smoothstep(%2_range, %2_range * 4.0, abs(%2_delta));\n"
-                           "        %2_occ += %2_front * %2_rangeMask; %2_weight += 1.0;\n"
+            out += QString("    // %1 - 12-tap opposing-pair Float-Z SSAO/contact shading\n"
+                           "    float %2_rawCenter = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_worldMask = %2_rawCenter < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? 1.0 : 0.0;\n"
+                           "    float %2_centerDepth = BO3BeginnerLinearDepth(%2_rawCenter);\n"
+                           "    float %2_surfaceMask = %2_worldMask * (1.0 - smoothstep(6200.0, 12500.0, %2_centerDepth));\n"
+                           "    float %2_depthRadiusScale = clamp(sqrt(430.0 / max(%2_centerDepth, 1.0)), 0.52, 1.85);\n"
+                           "    float %2_radiusPixels = max(%3, 0.5) * %2_depthRadiusScale;\n"
+                           "    float %2_depthBias = max(0.22 + %4 * 1.80, %2_centerDepth * (0.00040 + %4 * 0.0012));\n"
+                           "    float %2_depthRange = max(lerp(7.0, 22.0, %5), %2_centerDepth * lerp(0.016, 0.046, %5));\n"
+                           "    float2 %2_pixel = floor(uv * PostFx_GetRenderTargetSize().xy);\n"
+                           "    float %2_phase = BO3BeginnerSSAOHash12(%2_pixel * 0.0713) * 6.28318530718;\n"
+                           "    float %2_pairSum = 0.0;\n"
+                           "    [unroll] for(int %2_i=0; %2_i<6; ++%2_i)\n"
+                           "    {\n"
+                           "        float %2_progress = (float(%2_i) + 1.0) / 6.0;\n"
+                           "        float %2_pairRadius = sqrt(%2_progress) * %2_radiusPixels;\n"
+                           "        float2 %2_dir = float2(sin(%2_phase), cos(%2_phase));\n"
+                           "        float2 %2_offset = %2_dir * PostFx_GetRenderTargetSize().zw * %2_pairRadius;\n"
+                           "        float %2_depthA = BO3BeginnerSampleWorldDepth(uv + %2_offset);\n"
+                           "        float %2_depthB = BO3BeginnerSampleWorldDepth(uv - %2_offset);\n"
+                           "        float %2_pairWeight = lerp(1.18, 0.72, %2_progress);\n"
+                           "        %2_pairSum += BO3BeginnerSSAOPair(%2_centerDepth, %2_depthA, %2_depthB, %2_depthBias, %2_depthRange) * %2_pairWeight;\n"
+                           "        %2_phase += 2.39996322973;\n"
                            "    }\n"
-                           "    %2_occ = pow(saturate(%2_occ / max(%2_weight,1.0)), 0.72);\n"
-                           "    color *= 1.0 - %2_occ * (%5 * 1.35);\n")
+                           "    float %2_occ = saturate((%2_pairSum / 5.70) * lerp(2.70, 6.80, %5));\n"
+                           "    %2_occ = pow(%2_occ, lerp(1.30, 0.72, %5));\n"
+                           "    float2 %2_edgeUv = min(uv, 1.0 - uv);\n"
+                           "    float %2_edgePixels = min(%2_edgeUv.x / max(PostFx_GetRenderTargetSize().z,1e-6), %2_edgeUv.y / max(PostFx_GetRenderTargetSize().w,1e-6));\n"
+                           "    float %2_frameMask = smoothstep(2.0, 14.0, %2_edgePixels);\n"
+                           "    float %2_darkening = %2_occ * %2_surfaceMask * %2_frameMask * lerp(0.18, 0.78, %5);\n"
+                           "    color *= 1.0 - saturate(%2_darkening);\n")
                 .arg(definition->name, tag, radius, bias, amount);
         }
         else if(effect.typeId == "depth_fog" && project.target == Target::PostFx && hasUv)
         {
             const QColor fogColor = parameterColor(effect, *definition, "color");
-            const QString start = floatLiteral(parameterFloat(effect, *definition, "start"));
-            const QString end = floatLiteral(parameterFloat(effect, *definition, "end"));
+            const QString startControl = floatLiteral(parameterFloat(effect, *definition, "start"));
+            const QString endControl = floatLiteral(parameterFloat(effect, *definition, "end"));
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            out += QString("    // %1 - fog from decoded BO3 Float-Z distance, not screen position\n"
-                           "    float %2_rawDepth = DepthSampler.Sample(bilinearClampler, uv).r;\n"
-                           "    float %2_distance01 = BO3BeginnerDepth01(%2_rawDepth);\n"
-                           "    float %2_fog = smoothstep(%3, max(%3 + 0.001, %4), %2_distance01) * %5;\n"
-                           "    color = lerp(color, %6, saturate(%2_fog));\n")
-                .arg(definition->name, tag, start, end, strength, colorLiteral(fogColor));
+            const QString falloff = floatLiteral(parameterFloat(effect, *definition, "falloff"));
+            out += QString("    // %1 - true linear Float-Z distance fog\n"
+                           "    float %2_rawDepth = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_worldDepth = %2_rawDepth < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? BO3BeginnerLinearDepth(%2_rawDepth) : -1.0;\n"
+                           "    float %2_startWorld = BO3BeginnerDepthControlToWorld(%3);\n"
+                           "    float %2_endWorld = max(%2_startWorld + 1.0, BO3BeginnerDepthControlToWorld(max(%4, %3 + 0.01)));\n"
+                           "    float %2_valid = step(0.0001, %2_worldDepth);\n"
+                           "    float %2_fog = smoothstep(%2_startWorld, %2_endWorld, max(%2_worldDepth,0.0));\n"
+                           "    %2_fog = pow(saturate(%2_fog), max(%5,0.05)) * %2_valid * %6;\n"
+                           "    color = lerp(color, %7, saturate(%2_fog));\n")
+                .arg(definition->name, tag, startControl, endControl, falloff, strength, colorLiteral(fogColor));
         }
         else if(effect.typeId == "luminance_tint")
         {
@@ -404,6 +428,32 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float3 %2_tint = lerp(%4, %5, %2_t);\n"
                            "    color = lerp(color, color * (%2_tint * 1.6), %6);\n")
                 .arg(definition->name, tag, contrast, colorLiteral(shadowColor), colorLiteral(highlightColor), strength);
+        }
+        else if(effect.typeId == "luminance_sharpness" && project.target == Target::PostFx && hasUv)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
+            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "threshold"));
+            out += QString("    // %1 - luminance-only detail enhancement that scales RGB together\n"
+                           "    float2 %2_step = PostFx_GetRenderTargetSize().zw * max(%3,0.5);\n"
+                           "    float3 %2_n = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,-%2_step.y))).rgb);\n"
+                           "    float3 %2_s = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_step.y))).rgb);\n"
+                           "    float3 %2_w = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,0.0))).rgb);\n"
+                           "    float3 %2_e = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2( %2_step.x,0.0))).rgb);\n"
+                           "    float3 %2_lw = float3(0.2126,0.7152,0.0722);\n"
+                           "    float %2_cL = max(dot(color,%2_lw),0.0001);\n"
+                           "    float %2_nL = dot(%2_n,%2_lw); float %2_sL = dot(%2_s,%2_lw);\n"
+                           "    float %2_wL = dot(%2_w,%2_lw); float %2_eL = dot(%2_e,%2_lw);\n"
+                           "    float %2_avg = (%2_nL+%2_sL+%2_wL+%2_eL)*0.25;\n"
+                           "    float %2_minL = min(%2_cL,min(min(%2_nL,%2_sL),min(%2_wL,%2_eL)));\n"
+                           "    float %2_maxL = max(%2_cL,max(max(%2_nL,%2_sL),max(%2_wL,%2_eL)));\n"
+                           "    float %2_range = max(%2_maxL-%2_minL,0.0001);\n"
+                           "    float %2_detail = clamp(%2_cL-%2_avg, -%2_range*0.92, %2_range*0.92);\n"
+                           "    float %2_gate = smoothstep(%4, max(%4*6.0, %4+0.001), %2_range);\n"
+                           "    float %2_sharpL = max(%2_cL + %2_detail * %5 * (1.05 + %5*0.16) * %2_gate, 0.0);\n"
+                           "    float %2_ratio = clamp(%2_sharpL / max(%2_cL,0.025), 0.45, 2.75);\n"
+                           "    color = max(color * %2_ratio, 0.0);\n")
+                .arg(definition->name, tag, radius, threshold, amount);
         }
         else if(effect.typeId == "posterize")
         {
@@ -420,13 +470,28 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
             const QString zoom = floatLiteral(parameterFloat(effect, *definition, "zoom"));
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            out += QString("    // %1\n"
-                           "    float2 %2_p = uv * 2.0 - 1.0;\n"
-                           "    float %2_r2 = dot(%2_p, %2_p);\n"
-                           "    float2 %2_distorted = %2_p * (1.0 + %2_r2 * %3) / max(%4, 0.001);\n"
-                           "    float2 %2_uv = saturate(%2_distorted * 0.5 + 0.5);\n"
-                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_uv).rgb);\n"
-                           "    color = lerp(color, %2_sample, %5);\n")
+            out += QString("    // %1 - signed normalized radial lens curve\n"
+                           "    float2 %2_center = float2(0.5,0.5);\n"
+                           "    float2 %2_delta = uv - %2_center;\n"
+                           "    float %2_r = length(%2_delta);\n"
+                           "    float %2_signed = clamp(%3,-10.0,10.0);\n"
+                           "    float %2_mag = abs(%2_signed);\n"
+                           "    float %2_eff = %2_mag / (1.0 + max(%2_mag-1.0,0.0)*0.18);\n"
+                           "    float %2_linear = 0.55 * %2_eff;\n"
+                           "    float %2_cubic = 0.25 * %2_eff;\n"
+                           "    float %2_curve = 1.0 + %2_r*%2_linear + (%2_r*%2_r*%2_r)*%2_cubic;\n"
+                           "    const float %2_cornerR = 0.70710678;\n"
+                           "    const float %2_sideR = 0.5;\n"
+                           "    float %2_cornerCurve = 1.0 + %2_cornerR*%2_linear + (%2_cornerR*%2_cornerR*%2_cornerR)*%2_cubic;\n"
+                           "    float %2_sideCurve = 1.0 + %2_sideR*%2_linear + (%2_sideR*%2_sideR*%2_sideR)*%2_cubic;\n"
+                           "    float2 %2_positiveUv = %2_center + %2_delta * (%2_curve / max(%2_cornerCurve,0.0001));\n"
+                           "    float2 %2_negativeUv = %2_center + %2_delta * (%2_sideCurve / max(%2_curve,0.0001));\n"
+                           "    float2 %2_lensUv = %2_signed >= 0.0 ? %2_positiveUv : %2_negativeUv;\n"
+                           "    %2_lensUv = %2_center + (%2_lensUv-%2_center) / max(%4,0.05);\n"
+                           "    float2 %2_halfTexel = PostFx_GetRenderTargetSize().zw * 0.5;\n"
+                           "    %2_lensUv = clamp(%2_lensUv,%2_halfTexel,1.0-%2_halfTexel);\n"
+                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,%2_lensUv).rgb);\n"
+                           "    color = lerp(color,%2_sample,%5);\n")
                 .arg(definition->name, tag, amount, zoom, strength);
         }
         else if(effect.typeId == "paint_strokes" && project.target == Target::PostFx && hasUv)
@@ -689,15 +754,31 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
             const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
             const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
             out += QString("    // %1 - lightweight seamless direction-space cloud layers\n"
-                           "    float3 %2_cp = d * %3 + float3(t * %6 * 0.035, -t * %6 * 0.021, t * %6 * 0.011);\n"
+                           "    float %2_windAngle = %9 * 0.01745329252;\n"
+                           "    float3 %2_wind = float3(cos(%2_windAngle), sin(%2_windAngle), 0.12);\n"
+                           "    float3 %2_cp = d * %3 + %2_wind * (t * %6 * 0.045);\n"
                            "    float %2_n1 = BO3BeginnerFbm3(%2_cp);\n"
                            "    float %2_n2 = BO3BeginnerFbm3(%2_cp * 1.83 + float3(4.1,1.7,-2.4));\n"
                            "    float %2_cloud = smoothstep(%4, min(%4 + max(%5,0.01), 1.0), %2_n1 * 0.72 + %2_n2 * 0.28);\n"
-                           "    float %2_skyMask = smoothstep(-0.08, 0.22, d.z);\n"
+                           "    float %2_skyMask = smoothstep(%8 - 0.18, %8 + 0.22, d.z);\n"
                            "    float %2_light = 0.68 + 0.32 * BO3BeginnerFbm3(%2_cp + float3(0.7,-0.4,0.9));\n"
-                           "    color = lerp(color, %7 * %2_light, saturate(%2_cloud * %2_skyMask * %8));\n")
-                .arg(definition->name, tag, scale, coverage, softness, speed, colorLiteral(cloudColor), opacity);
+                           "    float3 %2_cloudColor = %7 * %2_light * %10;\n"
+                           "    color = lerp(color, %2_cloudColor, saturate(%2_cloud * %2_skyMask * %11));\n")
+                .arg(definition->name)
+                .arg(tag)
+                .arg(scale)
+                .arg(coverage)
+                .arg(softness)
+                .arg(speed)
+                .arg(colorLiteral(cloudColor))
+                .arg(height)
+                .arg(direction)
+                .arg(brightness)
+                .arg(opacity);
         }
         else if(effect.typeId == "sky_realistic_clouds" && project.target == Target::Sky)
         {
@@ -707,25 +788,40 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
             const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
             const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
             out += QString("    // %1 - compact volumetric raymarch using warped multi-octave density\n"
+                           "    float %2_windAngle = %9 * 0.01745329252;\n"
+                           "    float3 %2_wind = float3(cos(%2_windAngle), sin(%2_windAngle), 0.08);\n"
                            "    float %2_trans = 1.0;\n"
                            "    float3 %2_accum = 0.0;\n"
-                           "    float %2_upper = smoothstep(-0.10, 0.18, d.z);\n"
+                           "    float %2_upper = smoothstep(%8 - 0.22, %8 + 0.18, d.z);\n"
                            "    [loop] for(int %2_i = 0; %2_i < 18; ++%2_i)\n"
                            "    {\n"
                            "        float %2_dist = 1.25 + float(%2_i) * 0.23;\n"
-                           "        float3 %2_p = d * (%2_dist * %3) + float3(t * %5 * 0.055, -t * %5 * 0.031, t * %5 * 0.018);\n"
+                           "        float3 %2_p = d * (%2_dist * %3) + %2_wind * (t * %5 * 0.060) + float3(0.0,0.0,%8*1.4);\n"
                            "        float %2_base = BO3BeginnerFbm3(%2_p);\n"
                            "        float %2_detail = BO3BeginnerFbm3(%2_p * 2.1 + float3(2.4,-1.7,3.6));\n"
                            "        float %2_density = smoothstep(%4, min(%4 + 0.16,1.0), %2_base * 0.78 + %2_detail * 0.22) * %2_upper;\n"
                            "        float %2_alpha = saturate(%2_density * %6 * 0.13);\n"
                            "        float %2_light = saturate(0.28 + 0.92 * BO3BeginnerFbm3(%2_p + float3(0.65,-0.45,0.8)));\n"
-                           "        float3 %2_cloudColor = lerp(%7, %8, %2_light);\n"
+                           "        float3 %2_cloudColor = lerp(%10, %11, %2_light) * %7;\n"
                            "        %2_accum += %2_cloudColor * (%2_alpha * %2_trans);\n"
                            "        %2_trans *= (1.0 - %2_alpha);\n"
                            "    }\n"
                            "    color = color * %2_trans + %2_accum;\n")
-                .arg(definition->name, tag, scale, coverage, speed, opacity, colorLiteral(shadowColor), colorLiteral(lightColor));
+                .arg(definition->name)
+                .arg(tag)
+                .arg(scale)
+                .arg(coverage)
+                .arg(speed)
+                .arg(opacity)
+                .arg(brightness)
+                .arg(height)
+                .arg(direction)
+                .arg(colorLiteral(shadowColor))
+                .arg(colorLiteral(lightColor));
         }
         else if(effect.typeId == "sky_mountains" && project.target == Target::Sky)
         {
@@ -889,15 +985,61 @@ float BO3BeginnerHash31(float3 p)
     if(needsSceneDepth)
     {
         out += QStringLiteral(R"HLSL(
+static const float BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT = 63.0 / 64.0;
+
+float BO3BeginnerSampleRawDepthPoint(float2 sampleUv)
+{
+    float2 depthSize = max(PostFx_GetRenderTargetSize().xy, float2(1.0, 1.0));
+    float2 clampedUv = saturate(sampleUv);
+    int2 depthPixel = int2(clamp(floor(clampedUv * depthSize), float2(0.0, 0.0), depthSize - 1.0));
+    return DepthSampler.Load(int3(depthPixel, 0)).r;
+}
+
 float BO3BeginnerLinearDepth(float rawDepth)
 {
     return max(zNear.x, 0.001) / FloatZ_Process(rawDepth);
 }
 
-float BO3BeginnerDepth01(float rawDepth)
+float BO3BeginnerSampleWorldDepth(float2 sampleUv)
 {
-    float d = BO3BeginnerLinearDepth(rawDepth);
-    return saturate(log2(1.0 + d) / 12.0);
+    float rawDepth = BO3BeginnerSampleRawDepthPoint(sampleUv);
+    if(rawDepth >= BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT)
+        return -1.0;
+    return BO3BeginnerLinearDepth(rawDepth);
+}
+
+float BO3BeginnerDepthControlToWorld(float control)
+{
+    // Beginner-facing 0..1 distance control mapped over the useful BO3
+    // Float-Z scene range. Exponential spacing gives much finer control nearby.
+    return exp2(lerp(3.0, 13.6, saturate(control)));
+}
+
+float BO3BeginnerSSAOHash12(float2 p)
+{
+    float3 p3 = frac(float3(p.x, p.y, p.x) * float3(0.1031, 0.11369, 0.13787));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float depthBias, float depthRange)
+{
+    float validA = step(0.0001, sampleA);
+    float validB = step(0.0001, sampleB);
+    float deltaA = centerDepth - sampleA;
+    float deltaB = centerDepth - sampleB;
+    float frontA = saturate((deltaA - depthBias) / max(depthRange, 0.0001)) * validA;
+    float frontB = saturate((deltaB - depthBias) / max(depthRange, 0.0001)) * validB;
+    float rangeMaskA = 1.0 - smoothstep(depthRange * 1.10, depthRange * 3.20, abs(deltaA));
+    float rangeMaskB = 1.0 - smoothstep(depthRange * 1.10, depthRange * 3.20, abs(deltaB));
+    frontA *= rangeMaskA;
+    frontB *= rangeMaskB;
+    float paired = sqrt(max(frontA * frontB, 0.0));
+    float strongest = max(frontA, frontB);
+    float pairBalance = 1.0 - smoothstep(depthRange * 0.35, depthRange * 2.20, abs(deltaA - deltaB));
+    float meanDepth = (sampleA + sampleB) * 0.5;
+    float curvature = saturate((centerDepth - meanDepth - depthBias) / max(depthRange * 0.72, 0.0001)) * validA * validB;
+    return saturate(paired * 0.72 + strongest * pairBalance * 0.18 + curvature * 0.46);
 }
 )HLSL");
     }
@@ -1317,24 +1459,26 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {FloatParam("amount", "Strength", "How strongly the grain modulates the photographed image.", 0.0, 2.0, 0.01, 0.28),
                    FloatParam("grain_size", "Grain Size", "Approximate grain particle size in screen pixels.", 0.55, 4.0, 0.05, 1.35),
                    FloatParam("speed", "Speed", "How quickly new film-grain frames appear.", 0.0, 3.0, 0.01, 1.0)}),
-        EffectDef("cartoon_outlines", "Cartoon Outlines", "Create cleaner cel-style line work from BO3 scene depth, with optional image-detail edges and toon color bands.", "Depth & Scene",
+        EffectDef("cartoon_outlines", "Cartoon Outlines", "Draw clean cel-style line work from point-sampled BO3 Float-Z silhouettes, with optional image-detail ink and subtle toon shading.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("color", "Outline Color", "Color of the cartoon line work.", "#090909"),
-                   FloatParam("strength", "Outline Strength", "How strongly the detected lines are drawn over the scene.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("thickness", "Line Width", "Width of the diagonal depth samples in screen pixels.", 1.0, 6.0, 0.1, 2.0),
-                   FloatParam("depth_threshold", "Depth Threshold", "Higher values require a stronger depth change before drawing a line.", 0.5, 12.0, 0.1, 5.0),
-                   FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.28),
-                   FloatParam("levels", "Toon Levels", "How many brightness bands remain in the subtle cel-shaded scene.", 2.0, 12.0, 1.0, 7.0)}),
-        EffectDef("ambient_occlusion", "Ambient Occlusion", "Darken places where nearby depth values crowd together, adding extra scene depth.", "Depth & Scene",
+                   FloatParam("strength", "Outline Strength", "How strongly the detected lines are drawn over the scene.", 0.0, 1.0, 0.01, 0.78),
+                   FloatParam("thickness", "Line Width", "Width of the diagonal depth samples in screen pixels.", 0.5, 6.0, 0.1, 1.5),
+                   FloatParam("depth_threshold", "Depth Threshold", "Higher values require a stronger Float-Z silhouette change before drawing a line.", 0.5, 12.0, 0.1, 5.0),
+                   FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.14),
+                   FloatParam("cel_amount", "Cel Shading", "How much luminance banding is mixed into the original scene. Zero keeps only the outlines.", 0.0, 1.0, 0.01, 0.08),
+                   FloatParam("levels", "Toon Levels", "Number of brightness bands used when Cel Shading is above zero.", 2.0, 12.0, 1.0, 6.0)}),
+        EffectDef("ambient_occlusion", "Ambient Occlusion", "Add depth-only screen-space contact and corner shading using twelve BO3 Float-Z samples arranged in opposing spiral pairs.", "Depth & Scene",
                   {Target::PostFx},
-                  {FloatParam("amount", "Strength", "How strongly contact and corner shading is applied.", 0.0, 1.0, 0.01, 0.55),
-                   FloatParam("radius", "Radius", "How far around each pixel to compare scene depth.", 0.5, 12.0, 0.05, 3.0),
-                   FloatParam("bias", "Bias", "Ignore tiny depth differences to reduce false shadows.", 0.0, 0.35, 0.0025, 0.06)}),
-        EffectDef("depth_fog", "Depth Fog", "Fade distant parts of the scene into a chosen color using scene depth.", "Depth & Scene",
+                  {FloatParam("amount", "Strength", "How strongly contact and corner shading is applied.", 0.0, 1.0, 0.01, 0.52),
+                   FloatParam("radius", "Radius", "Maximum screen-space sampling radius before distance scaling.", 1.0, 14.0, 0.1, 6.0),
+                   FloatParam("bias", "Bias", "Reject shallow depth differences and detached silhouettes that should not cast AO.", 0.0, 1.0, 0.01, 0.10)}),
+        EffectDef("depth_fog", "Depth Fog", "Fade distant world geometry using linearized BO3 Float-Z distance instead of the raw depth texture.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("color", "Fog Color", "Color of the depth fog.", "#7CA2D9"),
-                   FloatParam("start", "Near Fade", "Normalized decoded distance where fog begins.", 0.0, 1.0, 0.01, 0.28),
-                   FloatParam("end", "Far Fade", "Normalized decoded distance where fog reaches full strength.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("start", "Near Distance", "Where fog begins across the useful BO3 scene-distance range.", 0.0, 1.0, 0.01, 0.34),
+                   FloatParam("end", "Far Distance", "Where fog reaches full strength across the useful BO3 scene-distance range.", 0.0, 1.0, 0.01, 0.76),
+                   FloatParam("falloff", "Distance Curve", "Lower values fill sooner; higher values keep fog concentrated farther away.", 0.25, 3.0, 0.05, 1.0),
                    FloatParam("strength", "Strength", "Maximum amount of fog applied.", 0.0, 1.0, 0.01, 0.65)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
@@ -1356,16 +1500,21 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("levels", "Levels", "How many distinct color bands remain.", 2.0, 16.0, 1.0, 5.0),
                    FloatParam("strength", "Strength", "Blend amount between the original and posterized result.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("fisheye", "Fisheye Lens", "Bend the screen outward like a curved lens, inspired by BO3-safe postfx experiments.", "Movement & Distortion",
+        EffectDef("fisheye", "Fisheye Lens", "Use a signed, corner-normalized radial lens curve that can bend outward or reverse inward without folding the frame.", "Movement & Distortion",
                   {Target::PostFx},
-                  {FloatParam("amount", "Curvature", "How strongly the lens bends the screen.", -0.45, 0.85, 0.01, 0.18),
-                   FloatParam("zoom", "Zoom", "Scale compensation to keep more or less of the image visible.", 0.5, 1.5, 0.01, 1.0),
+                  {FloatParam("amount", "Curvature", "Positive values create classic fisheye; negative values reverse the lens.", -10.0, 10.0, 0.05, 1.0),
+                   FloatParam("zoom", "Frame Fit", "Compensate the frame scale after lens distortion.", 0.70, 1.30, 0.01, 1.0),
                    FloatParam("strength", "Strength", "Blend between the original and fisheye image.", 0.0, 1.0, 0.01, 1.0)}),
 
         EffectDef("psx_dithering", "PSX Dithering", "Add ordered 4x4 screen dithering with optional low color precision for a classic console look.", "Retro & Display",
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "How strongly the dithered image replaces the original.", 0.0, 1.0, 0.01, 1.0),
                    FloatParam("color_precision", "Low Color Precision", "0 keeps full color precision; 1 quantizes toward a 5-bit-per-channel look.", 0.0, 1.0, 0.01, 0.65)}),
+        EffectDef("luminance_sharpness", "Luminance Sharpness", "Sharpen local luminance detail while scaling RGB together, reducing colored halos around edges.", "Color & Look",
+                  {Target::PostFx},
+                  {FloatParam("amount", "Amount", "Strength of the luminance detail boost.", 0.0, 8.0, 0.05, 1.35),
+                   FloatParam("radius", "Radius", "Sampling radius in screen pixels.", 0.5, 3.0, 0.05, 1.0),
+                   FloatParam("threshold", "Detail Threshold", "Ignore tiny local luminance ranges so flat areas remain clean.", 0.0005, 0.05, 0.0005, 0.003)}),
         EffectDef("sharpness", "Sharpness", "Sharpen real image detail with an edge-aware 8-neighbor filter instead of a simple brightness boost.", "Color & Look",
                   {Target::PostFx},
                   {FloatParam("amount", "Amount", "Strength of the local detail boost.", 0.0, 3.0, 0.01, 0.65),
@@ -1456,22 +1605,28 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("size", "Star Size", "Radius of each star inside its procedural cell.", 0.03, 0.30, 0.005, 0.10),
                    FloatParam("brightness", "Brightness", "HDR brightness of the stars.", 0.0, 6.0, 0.05, 1.15),
                    FloatParam("twinkle", "Twinkle", "Amount of animated brightness variation.", 0.0, 1.0, 0.01, 0.25)}),
-        EffectDef("sky_clouds", "Cloud Layers", "Add lightweight seamless procedural clouds that move across the sky.", "Sky & Environment",
+        EffectDef("sky_clouds", "Cloud Layers", "Add lightweight seamless procedural clouds with controllable altitude, brightness and wind direction.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("color", "Cloud Color", "Base color of the clouds.", "#DDE6EF"),
+                   FloatParam("brightness", "Brightness", "Brightness multiplier for the cloud layer.", 0.10, 4.0, 0.05, 1.0),
                    FloatParam("opacity", "Opacity", "How strongly the clouds cover the sky behind them.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("height", "Cloud Height", "Raise or lower the visible cloud layer relative to the horizon.", -0.35, 0.75, 0.01, 0.06),
                    FloatParam("scale", "Cloud Scale", "Size and frequency of the cloud formations.", 0.8, 12.0, 0.05, 3.4),
                    FloatParam("coverage", "Coverage", "Higher values leave more open sky between cloud masses.", 0.15, 0.85, 0.01, 0.52),
                    FloatParam("softness", "Softness", "Feathering around cloud edges.", 0.02, 0.35, 0.01, 0.14),
-                   FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts.", -3.0, 3.0, 0.01, 0.22)}),
-        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build denser, layered clouds with a compact BO3-friendly raymarch for a more realistic sky.", "Sky & Environment",
+                   FloatParam("direction", "Wind Direction", "Direction the cloud field travels, in degrees around the horizon.", 0.0, 360.0, 1.0, 25.0),
+                   FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts. Negative values reverse it.", -3.0, 3.0, 0.01, 0.22)}),
+        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build denser raymarched clouds with controllable altitude, brightness and wind direction.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color inside the darker cloud cavities.", "#40536B"),
                    ColorParam("light_color", "Light Color", "Color on the brighter parts of the cloud volume.", "#E8EDF2"),
+                   FloatParam("brightness", "Brightness", "HDR brightness multiplier for the cloud volume.", 0.10, 4.0, 0.05, 1.0),
                    FloatParam("opacity", "Density", "Overall cloud-volume density.", 0.0, 1.5, 0.01, 0.80),
+                   FloatParam("height", "Cloud Height", "Raise or lower the volumetric layer relative to the horizon.", -0.35, 0.75, 0.01, 0.08),
                    FloatParam("scale", "Formation Scale", "Scale of the 3D cloud volume.", 0.5, 8.0, 0.05, 2.25),
                    FloatParam("coverage", "Coverage", "Higher values make the volume more broken up.", 0.15, 0.85, 0.01, 0.48),
-                   FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts.", -2.0, 2.0, 0.01, 0.20)}),
+                   FloatParam("direction", "Wind Direction", "Direction the cloud volume moves, in degrees around the horizon.", 0.0, 360.0, 1.0, 35.0),
+                   FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts. Negative values reverse it.", -2.0, 2.0, 0.01, 0.20)}),
         EffectDef("sky_mountains", "Mountain Silhouettes", "Generate layered mountain ranges around the entire horizon without a longitude seam.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("near_color", "Near Mountains", "Color of the closer mountain range.", "#0C111B"),

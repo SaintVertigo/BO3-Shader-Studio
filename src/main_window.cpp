@@ -1025,6 +1025,14 @@ public:
         liveCompileTimer_.setInterval(550);
         connect(&liveCompileTimer_, &QTimer::timeout, this, [this]
         {
+            if(beginnerUiMode_ && beginnerProjectActive_ && beginnerParameterPreviewDirty_)
+            {
+                // Generate once per preview tick from the newest slider state,
+                // rather than rebuilding a large HLSL string on every mouse move.
+                beginnerPendingHlsl_ = beginner::generateHlsl(beginnerProject_);
+                beginnerGeneratedHlsl_ = beginnerPendingHlsl_;
+                beginnerParameterPreviewDirty_ = false;
+            }
             if(beginnerUiMode_ && beginnerProjectActive_ && !beginnerPendingHlsl_.isEmpty() && editor_)
             {
                 const CodeEditor::ViewState view = editor_->captureViewState();
@@ -1493,8 +1501,10 @@ public:
             if(!postHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
                !postHlsl.contains("BO3BeginnerGrainLayer") ||
                !postHlsl.contains("BO3BeginnerPsxDither") ||
-               !postHlsl.contains("BO3BeginnerLinearDepth") ||
-               !postHlsl.contains("BO3 Float-Z silhouette edges with restrained cel shading"))
+               !postHlsl.contains("BO3BeginnerSampleRawDepthPoint") ||
+               !postHlsl.contains("BO3BeginnerSSAOPair") ||
+               !postHlsl.contains("point-sampled Float-Z silhouettes") ||
+               !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth modules are missing from generated BO3 coverage HLSL.";
 
             const beginner::Project material = projects[1].first;
@@ -1538,7 +1548,9 @@ public:
             if(!skyHlsl.contains("BO3BeginnerAuroraNoise") ||
                !skyHlsl.contains("BO3BeginnerFbm3") ||
                !skyHlsl.contains("BO3BeginnerNebulaField") ||
-               !skyHlsl.contains("compact volumetric raymarch"))
+               !skyHlsl.contains("compact volumetric raymarch") ||
+               !skyHlsl.contains("windAngle") ||
+               !skyHlsl.contains("cloudColor"))
                 return "Beginner Sky quality modules are missing from generated BO3 coverage HLSL.";
             if(skyHlsl.contains("return float4(saturate(color)") ||
                !skyHlsl.contains("65024.0"))
@@ -13514,8 +13526,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(id == "retro_crt") return "Scanlines + film grain + color split";
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
-        if(id == "sunset") return "Warm horizon + deep blue sky";
-        if(id == "dream_sky") return "Purple-blue sky + gentle pulse";
+        if(id == "sunset") return "Warm horizon + low sun + haze";
+        if(id == "mountain_dawn") return "Sunrise + layered mountains + clouds";
+        if(id == "cloudy_day") return "Bright sky + volumetric moving clouds";
+        if(id == "starry_night") return "Moon + dense stars + dark horizon";
+        if(id == "aurora_night") return "Aurora ribbons + stars + mountains";
+        if(id == "dream_sky") return "Purple-blue sky + stars + nebula";
+        if(id == "space_nebula") return "Deep space + fractal nebula + stars";
         return "Ready-made BO3-safe preset";
     }
 
@@ -14061,12 +14078,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             card->setText(preset.second + "\n" + beginnerPresetDescription(beginnerProject_.target, preset.first));
             card->setToolButtonStyle(Qt::ToolButtonTextOnly);
             card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-            card->setMinimumHeight(54);
+            card->setMinimumHeight(48);
             card->setObjectName("BeginnerPresetCard");
             card->setStyleSheet(
                 "QToolButton { text-align:left; padding:8px 10px; border:1px solid #344352; border-radius:6px; background:#121A23; }"
                 "QToolButton:hover { border-color:#66A9D5; background:#172533; }");
-            beginnerPresetCardsLayout_->addWidget(card, i, 0);
+            beginnerPresetCardsLayout_->addWidget(card, i / 2, i % 2);
             connect(card, &QToolButton::clicked, this, [this, presetId = preset.first]{ applyBeginnerPreset(presetId); });
         }
     }
@@ -14248,6 +14265,28 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerEffectParamsLayout_->addWidget(title);
         beginnerEffectParamsLayout_->addWidget(help);
 
+        const bool selectedUsesDepth = beginnerProject_.target == beginner::Target::PostFx &&
+            (effect.typeId == "cartoon_outlines" || effect.typeId == "ambient_occlusion" || effect.typeId == "depth_fog");
+        if(selectedUsesDepth)
+        {
+            const bool hasDepth = preview_ && preview_->renderer().HasUserDepthTexture();
+            auto* depthNotice = new QLabel(hasDepth
+                ? "Depth preview: matching depth map loaded."
+                : "Depth preview needs a matching depth map. Without one, Shader Studio uses flat neutral depth so it does not invent diagonal geometry over your screenshot.");
+            depthNotice->setWordWrap(true);
+            depthNotice->setStyleSheet(hasDepth
+                ? "QLabel { color:#79C893; background:#10251A; border:1px solid #285B39; border-radius:5px; padding:7px; }"
+                : "QLabel { color:#E4C478; background:#2A2413; border:1px solid #66552A; border-radius:5px; padding:7px; }");
+            beginnerEffectParamsLayout_->addWidget(depthNotice);
+            if(!hasDepth)
+            {
+                auto* loadDepth = new QPushButton("Load Matching Depth Map...");
+                loadDepth->setToolTip("Load the depth image that matches the current Preview Image. BO3 supplies real floatZ automatically in-game.");
+                beginnerEffectParamsLayout_->addWidget(loadDepth);
+                connect(loadDepth, &QPushButton::clicked, this, [this]{ openTexture(true); });
+            }
+        }
+
         auto* formHost = new QWidget();
         auto* form = new QFormLayout(formHost);
         form->setContentsMargins(0, 8, 0, 0);
@@ -14314,7 +14353,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
                 markBeginnerProjectModified();
-                applyBeginnerProjectToEditor(false);
+                queueBeginnerParameterPreview();
             });
             connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, instanceId, parameter, slider](double value)
             {
@@ -14328,7 +14367,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
                 markBeginnerProjectModified();
-                applyBeginnerProjectToEditor(false);
+                queueBeginnerParameterPreview();
             });
         }
         beginnerEffectParamsLayout_->addWidget(formHost);
@@ -14383,9 +14422,26 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateTemporaryPreviewActions();
     }
 
+    void queueBeginnerParameterPreview()
+    {
+        if(!beginnerProjectActive_) return;
+        beginnerParameterPreviewDirty_ = true;
+        modified_ = false;
+        updateTitle();
+        if(!preview_) return;
+        if(!liveCompileTimer_.isActive())
+        {
+            // About 25 preview refreshes/sec while dragging. The slider UI itself
+            // remains unthrottled; only shader regeneration/compile is paced.
+            liveCompileTimer_.setInterval(40);
+            liveCompileTimer_.start();
+        }
+    }
+
     void applyBeginnerProjectToEditor(bool immediateCompile)
     {
         if(!beginnerProjectActive_ || !editor_) return;
+        beginnerParameterPreviewDirty_ = false;
         const QString generated = beginner::generateHlsl(beginnerProject_);
         beginnerGeneratedHlsl_ = generated;
 
@@ -14444,7 +14500,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 // the slider itself remains smooth.
                 if(!liveCompileTimer_.isActive())
                 {
-                    liveCompileTimer_.setInterval(60);
+                    liveCompileTimer_.setInterval(40);
                     liveCompileTimer_.start();
                 }
             }
@@ -15115,8 +15171,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         presetScroll->setFrameShape(QFrame::NoFrame);
         presetScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         presetScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        presetScroll->setMinimumHeight(118);
-        presetScroll->setMaximumHeight(250);
+        presetScroll->setMinimumHeight(108);
+        presetScroll->setMaximumHeight(225);
         presetScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         auto* presetContainer = new QWidget();
         beginnerPresetCardsLayout_ = new QGridLayout(presetContainer);
@@ -18724,6 +18780,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 refreshPostFxRuntimeUi();
                 if(selectedPreviewMode() == PreviewMode::PostFX) compileEditor();
             }
+            if(beginnerUiMode_ && beginnerProjectActive_)
+                rebuildBeginnerEffectParameters();
             statusBar()->showMessage(QString("Loaded %1 as %2%3")
                 .arg(QFileInfo(path).fileName(), depth ? "t1 depth" : "t0 source",
                      (!depth && preview_->renderer().SourceIsLinearHDR()) ? " (scene-linear HDR)" : ""), 4000);
@@ -19445,6 +19503,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QString beginnerProjectPath_;
     QString beginnerGeneratedHlsl_;
     QString beginnerPendingHlsl_;
+    bool beginnerParameterPreviewDirty_ = false;
     bool beginnerProjectActive_ = false;
     bool beginnerProjectModified_ = false;
     bool beginnerRefreshingUi_ = false;

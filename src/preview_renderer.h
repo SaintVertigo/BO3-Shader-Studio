@@ -160,6 +160,7 @@ public:
     void SetLiveSplitFraction(float value);
     float LiveSplitFraction() const;
     bool LoadTexture(const std::filesystem::path& path, bool depth, std::wstring& error);
+    bool HasUserDepthTexture() const;
     void SetPaused(bool paused);
     void SetShaderDrivenMovementDisabled(bool disabled);
     bool ShaderDrivenMovementDisabled() const;

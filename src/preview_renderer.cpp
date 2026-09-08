@@ -1520,9 +1520,14 @@ public:
             depthSRV_ = srv;
             depthWidth_ = w;
             depthHeight_ = h;
+            depthUserLoaded_ = true;
         }
         else
         {
+            // A depth map only matches the image it was authored/captured with.
+            // Loading a new source invalidates the previous preview depth rather
+            // than silently reusing it and producing false diagonal/contact artifacts.
+            depthUserLoaded_ = false;
             sourceSRV_ = srv;
             sourceWidth_ = w;
             sourceHeight_ = h;
@@ -1531,6 +1536,13 @@ public:
             sourceHdrMeanLuminance_ = 0.18f;
         }
         return true;
+    }
+
+    bool HasUserDepthTexture() const { return depthUserLoaded_; }
+
+    ID3D11ShaderResourceView* ActivePreviewDepthSRV() const
+    {
+        return depthUserLoaded_ && depthSRV_ ? depthSRV_.Get() : neutralDepthSRV_.Get();
     }
 
     void SetPaused(bool paused) { paused_ = paused; }
@@ -2311,7 +2323,7 @@ private:
                 if(mappedRole->second == bo3::PackageResourceRole::FloatDepth &&
                    Is2DLike(resource.dimension))
                 {
-                    srvs[resource.slot] = depthSRV_.Get();
+                    srvs[resource.slot] = ActivePreviewDepthSRV();
                     continue;
                 }
                 if(mappedRole->second == bo3::PackageResourceRole::Ignore)
@@ -2327,7 +2339,7 @@ private:
                      temporalExposureSRVs_[temporalExposureReadIndex_])
                 srvs[resource.slot] = temporalExposureSRVs_[temporalExposureReadIndex_].Get();
             else if (resource.slot == 1 && Is2DLike(resource.dimension))
-                srvs[1] = depthSRV_.Get();
+                srvs[1] = ActivePreviewDepthSRV();
             else if (resource.name.rfind("iChannel", 0) == 0 && resource.name.size() == 9)
             {
                 const char digit = resource.name[8];
@@ -2341,7 +2353,7 @@ private:
             }
         }
         if (!srvs[0]) srvs[0] = postFxSource;
-        if (!srvs[1]) srvs[1] = depthSRV_.Get();
+        if (!srvs[1]) srvs[1] = ActivePreviewDepthSRV();
         context_->PSSetShaderResources(0, static_cast<UINT>(srvs.size()), srvs.data());
     }
 
@@ -3114,10 +3126,10 @@ private:
                 srvs[slot] = fallback;
             }
             if (resource.slot == 0 && Is2DLike(resource.dimension)) srvs[0] = sourceSRV_.Get();
-            if (resource.slot == 1 && Is2DLike(resource.dimension)) srvs[1] = depthSRV_.Get();
+            if (resource.slot == 1 && Is2DLike(resource.dimension)) srvs[1] = ActivePreviewDepthSRV();
         }
         if (!srvs[0]) srvs[0] = sourceSRV_.Get();
-        if (!srvs[1]) srvs[1] = depthSRV_.Get();
+        if (!srvs[1]) srvs[1] = ActivePreviewDepthSRV();
         if (vertexOnlyShader_)
         {
             if (!srvs[2]) srvs[2] = neutralNormalSRV_.Get();
@@ -4362,11 +4374,16 @@ float4 ps_main(VS_OUT i) : SV_Target0
         if (!CreateTextureSRV(source.data(), w, h, sourceSRV_, error)) return false;
         if (!CreateTextureSRV(depth.data(), w, h, depthSRV_, error)) return false;
         const std::array<uint8_t, 4> neutralWhite{255, 255, 255, 255};
+        // Flat Float-Z fallback for screenshots without a matching depth capture.
+        // A constant depth is intentionally boring: it prevents the old generated
+        // diagonal gradient from masquerading as real geometry in AO/outlines/fog.
+        const std::array<uint8_t, 4> neutralDepth{96, 96, 96, 255};
         const std::array<uint8_t, 4> neutralNormal{128, 128, 255, 255};
         const std::array<uint8_t, 4> neutralBlack{0, 0, 0, 255};
         const std::array<uint8_t, 4> neutralSpecular{10, 10, 10, 255};
         const std::array<uint8_t, 4> neutralGloss{89, 89, 89, 255};
         if (!CreateTextureSRV(neutralWhite.data(), 1, 1, neutralSRV_, error)) return false;
+        if (!CreateTextureSRV(neutralDepth.data(), 1, 1, neutralDepthSRV_, error)) return false;
         if (!CreateTextureSRV(neutralNormal.data(), 1, 1, neutralNormalSRV_, error)) return false;
         if (!CreateTextureSRV(neutralBlack.data(), 1, 1, neutralBlackSRV_, error)) return false;
         if (!CreateTextureSRV(neutralSpecular.data(), 1, 1, neutralSpecularSRV_, error)) return false;
@@ -4376,6 +4393,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
         if (!CreateNeutralCubeSRV(neutralWhite.data(), neutralCubeSRV_, error)) return false;
         sourceWidth_ = depthWidth_ = w;
         sourceHeight_ = depthHeight_ = h;
+        depthUserLoaded_ = false;
         sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
         sourceHdrPeakLuminance_ = 1.0f;
         sourceHdrMeanLuminance_ = 0.18f;
@@ -5428,6 +5446,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
     ComPtr<ID3D11RasterizerState> comparisonScissorRasterizer_;
     ComPtr<ID3D11ShaderResourceView> sourceSRV_;
     ComPtr<ID3D11ShaderResourceView> depthSRV_;
+    ComPtr<ID3D11ShaderResourceView> neutralDepthSRV_;
+    bool depthUserLoaded_ = false;
     ComPtr<ID3D11ShaderResourceView> environmentSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralNormalSRV_;
@@ -5707,6 +5727,11 @@ float PreviewRenderer::LiveSplitFraction() const
 bool PreviewRenderer::LoadTexture(const std::filesystem::path& path, bool depth, std::wstring& error)
 {
     return impl_->LoadTexture(path, depth, error);
+}
+
+bool PreviewRenderer::HasUserDepthTexture() const
+{
+    return impl_->HasUserDepthTexture();
 }
 
 void PreviewRenderer::SetPaused(bool paused)
