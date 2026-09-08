@@ -8416,11 +8416,17 @@ float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
     // interval. That removes the hard longitude seam on wrapped meshes while
     // keeping the image upright in the preview and BO3 material export.
     float2 surfaceUv = input.texCoords.xy;
-    float2 fragCoord = surfaceUv * BO3_GLSL_MATERIAL_RESOLUTION;
+    // Closed meshes duplicate the longitude vertex at U=0 and U=1. Never use
+    // frac(U) for the blend weight: frac(1.0) becomes 0.0 and makes the two
+    // duplicate vertices select different shifted mainImage evaluations. Clamp
+    // the authored 0..1 material canvas instead so both seam endpoints resolve
+    // to the same virtual-canvas sample.
+    float materialU = saturate(surfaceUv.x);
+    float2 fragCoord = float2(materialU, surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
     float2 shiftedFragCoord = fragCoord + float2(BO3_GLSL_MATERIAL_RESOLUTION.x, 0.0);
     float4 authoredColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
     float4 shiftedColor = BO3GLSL_EvaluateMaterialMainImage(shiftedFragCoord);
-    float periodicWeight = BO3GLSL_PeriodicMaterialUWeight(frac(surfaceUv.x));
+    float periodicWeight = BO3GLSL_PeriodicMaterialUWeight(materialU);
     float4 fragColor = lerp(shiftedColor, authoredColor, periodicWeight);
 
     // Restore the primary coordinate for any wrapper-side logic that follows.
@@ -8793,6 +8799,20 @@ float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 // Converted GLSL - 2D/image-space lat-long wrap
 // -----------------------------------------------------------------------------
 )SKY") + convertedForSky + QStringLiteral(R"SKY(
+float4 BO3GLSL_EvaluateLatLongSkyMainImage(float2 fragCoord)
+{
+    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
+    float4 c = float4(0.0, 0.0, 0.0, 1.0);
+    mainImage(c, fragCoord);
+    return c;
+}
+
+float BO3GLSL_LatLongPeriodicWeight(float u)
+{
+    u = saturate(u);
+    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+}
+
 float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 {
     float3 rd = normalize(input.skyDirection.xyz);
@@ -8800,10 +8820,21 @@ float4 ps_main(const PixelShaderInput input) : SV_TARGET0
     float2 skyUv;
     skyUv.x = atan2(rd.y, rd.x) / (2.0 * PI) + 0.5;
     skyUv.y = asin(clamp(rd.z, -1.0, 1.0)) / PI + 0.5;
-    float2 fragCoord = skyUv * iResolution.xy;
+
+    // atan2 has an unavoidable -PI/+PI branch cut. A raw 2D mainImage is not
+    // necessarily horizontally tileable, so evaluating U=0 on one side and
+    // U=1 on the other produces a visible meridian. Periodicize the image-space
+    // sky exactly like converted closed-mesh Materials. Crucially, keep U=1 as
+    // 1 instead of applying frac(), so both sides resolve to the same authored
+    // virtual-canvas point at the branch cut.
+    float skyU = saturate(skyUv.x);
+    float2 fragCoord = float2(skyU, skyUv.y) * iResolution.xy;
+    float2 shiftedFragCoord = fragCoord + float2(iResolution.x, 0.0);
+    float4 authoredColor = BO3GLSL_EvaluateLatLongSkyMainImage(fragCoord);
+    float4 shiftedColor = BO3GLSL_EvaluateLatLongSkyMainImage(shiftedFragCoord);
+    float periodicWeight = BO3GLSL_LatLongPeriodicWeight(skyU);
+    float4 fragColor = lerp(shiftedColor, authoredColor, periodicWeight);
     GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    float4 fragColor = float4(0.0, 0.0, 0.0, 1.0);
-    mainImage(fragColor, fragCoord);
     return fragColor;
 }
 )SKY");
