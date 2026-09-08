@@ -13513,6 +13513,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return targets.join(" · ");
     }
 
+    static bool beginnerEffectUsesSceneDepth(const QString& id)
+    {
+        return id == "cartoon_outlines" || id == "ambient_occlusion" || id == "depth_fog";
+    }
+
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
     {
         const QString id = presetId.trimmed().toLower();
@@ -14012,6 +14017,39 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateTitle();
     }
 
+    bool beginnerProjectUsesSceneDepth() const
+    {
+        if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::PostFx)
+            return false;
+        for(const beginner::Effect& effect : beginnerProject_.effects)
+            if(effect.enabled && beginnerEffectUsesSceneDepth(effect.typeId)) return true;
+        return false;
+    }
+
+    void activateBuiltInDepthPreview(bool showMessage = true)
+    {
+        if(!preview_) return;
+        QString initError;
+        if(!preview_->ensureInitialized(initError))
+        {
+            if(showMessage && !initError.isEmpty())
+                QMessageBox::critical(this, "DirectX initialization failed", initError);
+            return;
+        }
+        std::wstring error;
+        if(!preview_->renderer().UseBuiltInDepthScene(error))
+        {
+            if(showMessage) QMessageBox::warning(this, "3D Depth Scene", ToQString(error));
+            return;
+        }
+        sourceImagePath_.clear();
+        preview_->update();
+        rebuildBeginnerEffectParameters();
+        updateBeginnerBuilderSummary();
+        if(showMessage)
+            statusBar()->showMessage("Using built-in 3D Depth Scene — color and Float-Z now match automatically.", 4200);
+    }
+
     void updateBeginnerBuilderSummary()
     {
         if(beginnerCompatibilityLabel_)
@@ -14034,22 +14072,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         else if(beginnerPreviewImageToolbarButton_)
             beginnerPreviewImageToolbarButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::PostFx);
         if(beginnerDepthToolbarAction_)
-        {
-            bool usesDepth = false;
-            if(beginnerProject_.target == beginner::Target::PostFx)
-            {
-                for(const beginner::Effect& effect : beginnerProject_.effects)
-                {
-                    if(!effect.enabled) continue;
-                    if(effect.typeId == "cartoon_outlines" || effect.typeId == "ambient_occlusion" || effect.typeId == "depth_fog")
-                    {
-                        usesDepth = true;
-                        break;
-                    }
-                }
-            }
-            beginnerDepthToolbarAction_->setVisible(!beginnerUiMode_ || usesDepth);
-        }
+            beginnerDepthToolbarAction_->setVisible(!beginnerUiMode_);
+        if(beginnerDepthSceneToolbarAction_)
+            beginnerDepthSceneToolbarAction_->setVisible(beginnerUiMode_ && beginnerProjectUsesSceneDepth());
         if(loadModelQuickButton_)
             loadModelQuickButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::Material);
     }
@@ -14071,6 +14096,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(QWidget* widget = item->widget()) widget->deleteLater();
             delete item;
         }
+        if(beginnerPresetScroll_)
+        {
+            const int rows = qMax(1, (presets.size() + 1) / 2);
+            const int desired = qBound(108, rows * 54 + 4, 222);
+            beginnerPresetScroll_->setMinimumHeight(desired);
+            beginnerPresetScroll_->setMaximumHeight(desired);
+        }
         for(int i = 0; i < presets.size(); ++i)
         {
             const auto& preset = presets[i];
@@ -14080,9 +14112,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             card->setMinimumHeight(48);
             card->setObjectName("BeginnerPresetCard");
-            card->setStyleSheet(
-                "QToolButton { text-align:left; padding:8px 10px; border:1px solid #344352; border-radius:6px; background:#121A23; }"
-                "QToolButton:hover { border-color:#66A9D5; background:#172533; }");
             beginnerPresetCardsLayout_->addWidget(card, i / 2, i % 2);
             connect(card, &QToolButton::clicked, this, [this, presetId = preset.first]{ applyBeginnerPreset(presetId); });
         }
@@ -14255,7 +14284,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!definition) return;
 
         auto* category = new QLabel(definition->category.toUpper());
-        category->setStyleSheet("QLabel { color:#7FB5D8; font-size:10px; font-weight:700; }");
+        category->setObjectName("BeginnerCategoryLabel");
         auto* title = new QLabel(definition->name);
         title->setObjectName("InspectorTitle");
         auto* help = new QLabel(definition->description);
@@ -14266,25 +14295,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerEffectParamsLayout_->addWidget(help);
 
         const bool selectedUsesDepth = beginnerProject_.target == beginner::Target::PostFx &&
-            (effect.typeId == "cartoon_outlines" || effect.typeId == "ambient_occlusion" || effect.typeId == "depth_fog");
+            beginnerEffectUsesSceneDepth(effect.typeId);
         if(selectedUsesDepth)
         {
-            const bool hasDepth = preview_ && preview_->renderer().HasUserDepthTexture();
-            auto* depthNotice = new QLabel(hasDepth
-                ? "Depth preview: matching depth map loaded."
-                : "Depth preview needs a matching depth map. Without one, Shader Studio uses flat neutral depth so it does not invent diagonal geometry over your screenshot.");
+            const bool hasDepth = preview_ && preview_->renderer().HasPreviewDepthTexture();
+            const bool builtInDepth = preview_ && preview_->renderer().BuiltInDepthSceneActive();
+            auto* depthNotice = new QLabel();
+            if(builtInDepth)
+                depthNotice->setText("3D Depth Scene active. The preview image and Float-Z depth are generated together, so outlines, AO and fog can be judged in real 3D space.");
+            else if(hasDepth)
+                depthNotice->setText("Matching custom depth is loaded for this preview image. BO3 supplies live Float-Z automatically after export.");
+            else
+                depthNotice->setText("This effect needs real scene depth. A normal screenshot contains color only, so use the built-in 3D Depth Scene for an accurate preview.");
             depthNotice->setWordWrap(true);
-            depthNotice->setStyleSheet(hasDepth
-                ? "QLabel { color:#79C893; background:#10251A; border:1px solid #285B39; border-radius:5px; padding:7px; }"
-                : "QLabel { color:#E4C478; background:#2A2413; border:1px solid #66552A; border-radius:5px; padding:7px; }");
+            depthNotice->setObjectName(hasDepth ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
-            if(!hasDepth)
-            {
-                auto* loadDepth = new QPushButton("Load Matching Depth Map...");
-                loadDepth->setToolTip("Load the depth image that matches the current Preview Image. BO3 supplies real floatZ automatically in-game.");
-                beginnerEffectParamsLayout_->addWidget(loadDepth);
-                connect(loadDepth, &QPushButton::clicked, this, [this]{ openTexture(true); });
-            }
+
+            auto* depthScene = new QPushButton(builtInDepth ? "3D Depth Scene Active" : "Use 3D Depth Scene");
+            depthScene->setEnabled(!builtInDepth);
+            depthScene->setObjectName(builtInDepth ? "" : "PrimaryAction");
+            depthScene->setToolTip("Use Shader Studio's built-in color + Float-Z test scene. No depth-map file is required.");
+            beginnerEffectParamsLayout_->addWidget(depthScene);
+            connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
+
         }
 
         auto* formHost = new QWidget();
@@ -14412,6 +14445,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         refreshBeginnerTargetButtons();
         refreshBeginnerEffectList(preferredEffect);
         beginnerRefreshingUi_ = false;
+        if(beginnerProjectUsesSceneDepth() && preview_ && sourceImagePath_.isEmpty() &&
+           !preview_->renderer().HasPreviewDepthTexture())
+            activateBuiltInDepthPreview(false);
     }
 
     void clearBeginnerPreviewPackageState()
@@ -14556,7 +14592,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             button->setMinimumSize(185, 150);
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             button->setObjectName("BeginnerTargetCard");
-            button->setStyleSheet("QToolButton { text-align:left; padding:12px; } QToolButton:checked { border:2px solid #64A7D4; background:#1D3040; }");
             choices->addWidget(button);
             buttons.push_back(button);
             connect(button, &QToolButton::clicked, &dlg, [&, target, button]
@@ -14630,6 +14665,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerProject_.effects.push_back(effect);
         markBeginnerProjectModified();
         refreshBeginnerEffectList(effect.instanceId);
+        if(beginnerProject_.target == beginner::Target::PostFx && beginnerEffectUsesSceneDepth(typeId) &&
+           preview_ && !preview_->renderer().HasPreviewDepthTexture())
+            activateBuiltInDepthPreview(false);
         applyBeginnerProjectToEditor(false);
     }
 
@@ -14729,11 +14767,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
                 auto* card = new QFrame();
                 card->setObjectName("BeginnerEffectCard");
+                card->setProperty("supported", supported);
                 card->setMinimumHeight(currentColumns == 1 ? 186 : 218);
                 card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-                card->setStyleSheet(supported
-                    ? "QFrame#BeginnerEffectCard { background:#111923; border:1px solid #34495C; border-radius:8px; } QFrame#BeginnerEffectCard:hover { border-color:#67A9D5; background:#13202B; }"
-                    : "QFrame#BeginnerEffectCard { background:#10151B; border:1px solid #29313A; border-radius:8px; }");
 
                 auto* layout = new QVBoxLayout(card);
                 layout->setContentsMargins(12, 10, 12, 10);
@@ -14747,13 +14783,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
                 auto* headingRow = new QHBoxLayout();
                 auto* name = new QLabel(definition.name);
-                name->setStyleSheet(supported
-                    ? "QLabel { font-size:14px; font-weight:700; color:#F2F6FA; }"
-                    : "QLabel { font-size:14px; font-weight:700; color:#89919A; }");
+                name->setObjectName(supported ? "EffectCardTitle" : "EffectCardTitleDisabled");
                 auto* category = new QLabel(definition.category.toUpper());
-                category->setStyleSheet(supported
-                    ? "QLabel { color:#79B9E4; font-size:9px; font-weight:700; }"
-                    : "QLabel { color:#707984; font-size:9px; font-weight:700; }");
+                category->setObjectName(supported ? "EffectCardCategory" : "EffectCardCategoryDisabled");
                 headingRow->addWidget(name, 1);
                 headingRow->addWidget(category, 0, Qt::AlignRight);
                 layout->addLayout(headingRow);
@@ -14776,12 +14808,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     availability->setText(usesSceneDepth
                         ? QString::fromUtf8("✓ Works with this shader   •   Uses scene depth")
                         : QString::fromUtf8("✓ Works with this shader"));
-                    availability->setStyleSheet("QLabel { color:#84D4A0; font-size:10px; }");
+                    availability->setObjectName("EffectAvailabilityGood");
                 }
                 else
                 {
                     availability->setText("Works with: " + beginnerEffectAvailability(definition));
-                    availability->setStyleSheet("QLabel { color:#A58E64; font-size:10px; }");
+                    availability->setObjectName("EffectAvailabilityWarn");
                 }
                 layout->addWidget(availability);
 
@@ -15024,7 +15056,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         root->addWidget(intro);
 
         auto* target = new QFrame();
-        target->setStyleSheet("QFrame { background:#111923; border:1px solid #34495C; border-radius:7px; }");
+        target->setObjectName("BeginnerInfoFrame");
         auto* targetLayout = new QVBoxLayout(target);
         targetLayout->setContentsMargins(12, 10, 12, 10);
         auto* targetTitle = new QLabel("Project type: " + beginner::targetName(beginnerProject_.target));
@@ -15113,7 +15145,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         heroLayout->addWidget(subtitle);
         heroRow->addWidget(heroText, 1);
         beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  Works in Black Ops III"));
-        beginnerCompatibilityLabel_->setStyleSheet("QLabel { color:#B8F0CA; background:#173624; border:1px solid #2C7A49; border-radius:6px; padding:7px 10px; font-weight:600; }");
+        beginnerCompatibilityLabel_->setObjectName("BeginnerCompatibilityLabel");
         heroRow->addWidget(beginnerCompatibilityLabel_, 0, Qt::AlignTop);
         root->addLayout(heroRow);
 
@@ -15131,7 +15163,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             button->setMinimumHeight(62);
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             button->setObjectName("BeginnerTargetCard");
-            button->setStyleSheet("QToolButton { text-align:left; padding:8px 12px; border:1px solid #3D4650; border-radius:6px; background:#181C21; } QToolButton:hover { border-color:#5D7488; } QToolButton:checked { border:2px solid #64A7D4; background:#1C3040; color:#FFFFFF; }");
             beginnerTargetButtons_[i] = button;
             targetCards->addWidget(button);
             connect(button, &QToolButton::clicked, this, [this, target]{ switchBeginnerTarget(target); });
@@ -15167,6 +15198,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         presetHelp->setWordWrap(true);
         projectLayout->addWidget(presetHelp);
         auto* presetScroll = new QScrollArea();
+        beginnerPresetScroll_ = presetScroll;
         presetScroll->setWidgetResizable(true);
         presetScroll->setFrameShape(QFrame::NoFrame);
         presetScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -15193,7 +15225,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         auto* emptyEffects = new QFrame();
         emptyEffects->setObjectName("BeginnerEmptyEffects");
-        emptyEffects->setStyleSheet("QFrame#BeginnerEmptyEffects { border:1px dashed #3A4B5C; border-radius:8px; background:#0F161E; }");
         auto* emptyLayout = new QVBoxLayout(emptyEffects);
         emptyLayout->setContentsMargins(18, 22, 18, 22);
         auto* emptyTitle = new QLabel("Your shader has no effects yet");
@@ -15452,7 +15483,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         sourceButton->setMinimumWidth(104);
         sourceButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects.");
+        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide 3D depth; depth effects can use the built-in 3D Depth Scene instead.");
         beginnerPreviewImageToolbarAction_ = toolbar->addWidget(sourceButton);
         auto* depthButton = new QToolButton();
         depthButton->setDefaultAction(depthAction);
@@ -15462,6 +15493,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         depthButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
         depthButton->setToolTip("Load the depth texture used by DepthSampler / t1.");
         beginnerDepthToolbarAction_ = toolbar->addWidget(depthButton);
+
+        beginnerDepthSceneToolbarAction_ = toolbar->addAction("3D Depth Scene");
+        beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+        beginnerDepthSceneToolbarAction_->setToolTip("Use Shader Studio's built-in color + Float-Z scene for depth effects. No external depth map is required.");
+        beginnerDepthSceneToolbarAction_->setVisible(false);
+        if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
+            depthSceneButton->setObjectName("PrimaryAction");
 
         auto* previewAction = toolbar->addAction("Preview");
         previewAction->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
@@ -15523,6 +15561,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         compileStatusBadge_->setAlignment(Qt::AlignCenter);
         auto* compileStatusToolbarAction = toolbar->addWidget(compileStatusBadge_);
         advancedOnlyToolbarActions_ = {
+            beginnerDepthToolbarAction_,
             pauseToolbarAction,
             liveToolbarAction,
             toolbarSpacerBAction,
@@ -15609,6 +15648,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(previewAction, &QAction::triggered, this, [this]{ compileEditor(); });
         connect(sourceAction, &QAction::triggered, this, [this]{ openTexture(false); });
         connect(depthAction, &QAction::triggered, this, [this]{ openTexture(true); });
+        connect(beginnerDepthSceneToolbarAction_, &QAction::triggered, this, [this]{ activateBuiltInDepthPreview(); });
         connect(includeAction, &QAction::triggered, this, [this]{ chooseIncludeRoot(); });
         connect(selectTechsetAction, &QAction::triggered, this, [this]{ selectAssociatedTechset(); });
         connect(exportBo3Action, &QAction::triggered, this, [this]{ exportToBO3(); });
@@ -16170,7 +16210,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(restoreLayout, &QAction::triggered, this, [this]{ restoreWorkspace(true); });
         connect(resetLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Default"); });
 
-        const QStringList themes{"BO3 Dark", "Graphite", "Midnight Blue", "Light", "High Contrast"};
+        const QStringList themes{
+            "BO3 Dark", "Graphite", "Midnight Blue", "AMOLED", "Deep Purple",
+            "Forest", "Warm Ember", "Nord", "Light", "High Contrast"
+        };
         for (const QString& themeName : themes)
         {
             auto* action = themeMenu->addAction(themeName);
@@ -17184,20 +17227,49 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         if (name == "Graphite")
         {
-            window="#181818"; panel="#202020"; base="#111111"; button="#292929"; hover="#353535"; border="#414141"; accent="#777777"; editorBase="#101010";
+            window="#17191C"; panel="#1F2226"; base="#111315"; button="#272B30"; hover="#333940"; border="#414952"; textColor="#E8ECF0"; muted="#A3ADB7"; accent="#6C92B6"; editorBase="#0F1113";
         }
         else if (name == "Midnight Blue")
         {
-            window="#0C1420"; panel="#111D2C"; base="#07101A"; button="#182B40"; hover="#213B57"; border="#29445F"; accent="#3F8FD2"; editorBase="#08111C";
+            window="#0C1420"; panel="#111D2C"; base="#07101A"; button="#182B40"; hover="#213B57"; border="#29445F"; textColor="#E4EDF6"; muted="#93A8BA"; accent="#3F8FD2"; editorBase="#08111C";
+        }
+        else if (name == "AMOLED")
+        {
+            window="#000000"; panel="#050607"; base="#000000"; button="#0D1012"; hover="#171C20"; border="#263039"; textColor="#F2F5F7"; muted="#98A4AE"; accent="#00AEEF"; editorBase="#000000";
+        }
+        else if (name == "Deep Purple")
+        {
+            window="#15101F"; panel="#1D152A"; base="#0F0A17"; button="#2A1D3A"; hover="#39274F"; border="#4B3861"; textColor="#EEE8F7"; muted="#B2A5C4"; accent="#8E63D9"; editorBase="#100B18";
+        }
+        else if (name == "Forest")
+        {
+            window="#0F1714"; panel="#16211D"; base="#0A100E"; button="#223029"; hover="#2E4037"; border="#3A5548"; textColor="#E5EEE9"; muted="#9FB2A8"; accent="#3C9E69"; editorBase="#0A100E";
+        }
+        else if (name == "Warm Ember")
+        {
+            window="#1A1411"; panel="#241B17"; base="#100C0A"; button="#31241D"; hover="#443126"; border="#5A4132"; textColor="#F1E8E1"; muted="#B8A599"; accent="#C66B35"; editorBase="#110D0B";
+        }
+        else if (name == "Nord")
+        {
+            window="#242933"; panel="#2E3440"; base="#20242C"; button="#3B4252"; hover="#434C5E"; border="#4C566A"; textColor="#ECEFF4"; muted="#A7B0C0"; accent="#5E81AC"; editorBase="#20242C";
         }
         else if (name == "Light")
         {
-            window="#ECEFF3"; panel="#F5F6F8"; base="#FFFFFF"; button="#E2E6EB"; hover="#D4DAE1"; border="#B8C0CA"; textColor="#1E2329"; muted="#626D78"; accent="#3178B7"; editorBase="#FFFFFF";
+            window="#EDF1F5"; panel="#F7F9FB"; base="#FFFFFF"; button="#E4E9EF"; hover="#D5DDE6"; border="#AEB9C6"; textColor="#1C252E"; muted="#5D6975"; accent="#2F78B9"; editorBase="#FFFFFF";
         }
         else if (name == "High Contrast")
         {
-            window="#000000"; panel="#080808"; base="#000000"; button="#111111"; hover="#202020"; border="#E6E6E6"; textColor="#FFFFFF"; muted="#D0D0D0"; accent="#00A8FF"; editorBase="#000000";
+            window="#000000"; panel="#070707"; base="#000000"; button="#111111"; hover="#222222"; border="#F0F0F0"; textColor="#FFFFFF"; muted="#D5D5D5"; accent="#00B9F2"; editorBase="#000000";
         }
+
+        const bool lightTheme = name == "Light";
+        const QString successText = lightTheme ? "#176B39" : "#84D4A0";
+        const QString successBg = lightTheme ? "#E7F5EC" : "#10251A";
+        const QString successBorder = lightTheme ? "#7FB894" : "#285B39";
+        const QString warnText = lightTheme ? "#7A5A10" : "#E4C478";
+        const QString warnBg = lightTheme ? "#FFF6DD" : "#2A2413";
+        const QString warnBorder = lightTheme ? "#C6A85A" : "#66552A";
+
 
         QPalette palette;
         palette.setColor(QPalette::Window, QColor(window));
@@ -17212,9 +17284,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         palette.setColor(QPalette::Highlight, QColor(accent));
         palette.setColor(QPalette::HighlightedText, QColor("#FFFFFF"));
         palette.setColor(QPalette::PlaceholderText, QColor(muted));
+        palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(muted));
+        palette.setColor(QPalette::Disabled, QPalette::Text, QColor(muted));
+        palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(muted));
+        palette.setColor(QPalette::Disabled, QPalette::Highlight, QColor(border));
+        palette.setColor(QPalette::Disabled, QPalette::HighlightedText, QColor(textColor));
         qApp->setPalette(palette);
 
-        const QString qss = QString(R"QSS(
+        QString qss = QString(R"QSS(
             QMainWindow, QWidget { background:%1; color:%7; }
             QMenuBar { background:%2; border-bottom:1px solid %6; padding:2px; }
             QMenuBar::item { padding:5px 9px; border-radius:4px; }
@@ -17223,22 +17300,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QMenu::item { padding:6px 24px 6px 10px; border-radius:3px; }
             QMenu::item:selected { background:%9; color:#FFFFFF; }
             QToolBar { background:%2; border:0; border-bottom:1px solid %6; spacing:8px; padding:6px 8px; }
-            QToolButton, QPushButton { background:%4; border:1px solid %6; border-radius:5px; padding:6px 11px; min-height:24px; }
+            QToolButton, QPushButton { background:%4; color:%7; border:1px solid %6; border-radius:5px; padding:6px 11px; min-height:24px; }
             QToolButton:hover, QPushButton:hover { background:%5; }
             QToolButton:pressed, QPushButton:pressed { background:%9; color:#FFFFFF; }
-            QLineEdit, QDoubleSpinBox, QComboBox, QKeySequenceEdit { background:%3; border:1px solid %6; border-radius:4px; padding:4px 6px; min-height:20px; }
+            QToolButton:disabled, QPushButton:disabled { background:%3; color:%10; border-color:%6; }
+            QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QKeySequenceEdit { background:%3; color:%7; border:1px solid %6; border-radius:4px; padding:4px 6px; min-height:20px; }
             QComboBox::drop-down { border:0; width:20px; }
-            QPlainTextEdit { background:%8; border:0; selection-background-color:%9; }
+            QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTableWidget { background:%8; color:%7; border-color:%6; selection-background-color:%9; selection-color:#FFFFFF; }
             QDockWidget { titlebar-close-icon:url(); titlebar-normal-icon:url(); }
             QDockWidget::title { background:%2; border-bottom:1px solid %6; padding:6px 8px; font-weight:600; }
             QDockWidget > QWidget { border:1px solid %6; }
             QTabWidget::pane { border:1px solid %6; }
-            QTabBar::tab { background:%2; border:1px solid %6; padding:6px 12px; }
+            QTabBar::tab { background:%2; color:%7; border:1px solid %6; padding:6px 12px; }
             QTabBar::tab:selected { background:%4; border-bottom-color:%4; }
             QSplitter::handle { background:%6; }
             QLabel#SectionHeader { color:%7; font-weight:700; letter-spacing:0.8px; padding:3px 2px 2px 2px; border-bottom:1px solid %6; }
-            QToolButton#PrimaryAction { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
-            QToolButton#PrimaryAction:hover { background:%5; border-color:%9; }
+            QToolButton#PrimaryAction, QPushButton#PrimaryAction { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
+            QToolButton#PrimaryAction:hover, QPushButton#PrimaryAction:hover { background:%5; border-color:%9; color:%7; }
             QToolButton#ExperienceModeButton { min-width:72px; padding:5px 10px; }
             QToolButton#ExperienceModeButton:checked { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
             QToolButton#PreviewModeToggle { min-width:78px; padding:5px 10px; }
@@ -17247,21 +17325,53 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QLabel#CompileStatusBadge { background:%3; border:1px solid %6; border-radius:11px; padding:4px 10px; font-weight:600; }
             QFrame#PreviewSettingsPanel { background:%2; border:1px solid %6; border-radius:7px; }
             QWidget#PreviewSettingsOverlayHost { background:transparent; }
-            QScrollArea#PreviewSettingsScroll { background:transparent; border:0; }
+            QScrollArea, QScrollArea#PreviewSettingsScroll { background:transparent; border:0; }
+            QScrollArea > QWidget > QWidget { background:transparent; }
             QPushButton#CompactConsoleButton { min-height:18px; padding:3px 8px; }
             QLabel#InspectorTitle { font-weight:700; font-size:13px; }
             QLabel#DetectedPreviewType { color:%7; font-weight:700; }
-            QLabel#InspectorHelp { color:%10; }
-            QLabel#CompactHelp { color:%10; padding:1px 0; }
+            QLabel#InspectorHelp, QLabel#CompactHelp { color:%10; }
+            QLabel#CompactHelp { padding:1px 0; }
+            QLabel#BeginnerCategoryLabel { color:%9; font-size:10px; font-weight:700; }
+            QLabel#BeginnerCompatibilityLabel { color:@GOOD_TEXT@; background:@GOOD_BG@; border:1px solid @GOOD_BORDER@; border-radius:6px; padding:7px 10px; font-weight:600; }
+            QLabel#DepthStatusGood { color:@GOOD_TEXT@; background:@GOOD_BG@; border:1px solid @GOOD_BORDER@; border-radius:5px; padding:7px; }
+            QLabel#DepthStatusWarn { color:@WARN_TEXT@; background:@WARN_BG@; border:1px solid @WARN_BORDER@; border-radius:5px; padding:7px; }
             QGroupBox { border:1px solid %6; border-radius:6px; margin-top:10px; padding-top:8px; font-weight:600; }
             QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 5px; color:%7; }
+            QToolButton#BeginnerTargetCard { text-align:left; padding:8px 12px; background:%4; color:%7; border:1px solid %6; border-radius:6px; }
+            QToolButton#BeginnerTargetCard:hover { background:%5; border-color:%9; }
+            QToolButton#BeginnerTargetCard:checked { background:%9; color:#FFFFFF; border:2px solid %9; font-weight:600; }
+            QToolButton#BeginnerPresetCard { text-align:left; padding:7px 10px; background:%3; color:%7; border:1px solid %6; border-radius:6px; }
+            QToolButton#BeginnerPresetCard:hover { background:%4; border-color:%9; }
+            QFrame#BeginnerEmptyEffects { border:1px dashed %6; border-radius:8px; background:%3; }
+            QFrame#BeginnerInfoFrame { background:%3; border:1px solid %6; border-radius:7px; }
+            QFrame#BeginnerEffectCard { background:%3; border:1px solid %6; border-radius:8px; }
+            QFrame#BeginnerEffectCard[supported="true"]:hover { background:%4; border-color:%9; }
+            QFrame#BeginnerEffectCard[supported="false"] { background:%1; border-color:%6; }
+            QLabel#EffectCardTitle { color:%7; font-size:14px; font-weight:700; }
+            QLabel#EffectCardTitleDisabled { color:%10; font-size:14px; font-weight:700; }
+            QLabel#EffectCardCategory { color:%9; font-size:9px; font-weight:700; }
+            QLabel#EffectCardCategoryDisabled { color:%10; font-size:9px; font-weight:700; }
+            QLabel#EffectAvailabilityGood { color:@GOOD_TEXT@; font-size:10px; }
+            QLabel#EffectAvailabilityWarn { color:@WARN_TEXT@; font-size:10px; }
             QStatusBar { background:%2; border-top:1px solid %6; }
             QScrollBar:vertical { background:%1; width:12px; }
             QScrollBar::handle:vertical { background:%6; min-height:28px; border-radius:5px; margin:2px; }
             QScrollBar:horizontal { background:%1; height:12px; }
             QScrollBar::handle:horizontal { background:%6; min-width:28px; border-radius:5px; margin:2px; }
             QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; }
+            QSlider::groove:horizontal { height:4px; background:%6; border-radius:2px; }
+            QSlider::sub-page:horizontal { background:%9; border-radius:2px; }
+            QSlider::add-page:horizontal { background:%6; border-radius:2px; }
+            QSlider::handle:horizontal { background:%4; border:1px solid %6; width:12px; margin:-5px 0; border-radius:6px; }
+            QSlider::handle:horizontal:hover { border-color:%9; background:%5; }
         )QSS").arg(window, panel, base, button, hover, border, textColor, editorBase, accent, muted);
+        qss.replace("@GOOD_TEXT@", successText);
+        qss.replace("@GOOD_BG@", successBg);
+        qss.replace("@GOOD_BORDER@", successBorder);
+        qss.replace("@WARN_TEXT@", warnText);
+        qss.replace("@WARN_BG@", warnBg);
+        qss.replace("@WARN_BORDER@", warnBorder);
         setStyleSheet(qss);
 
         for (auto it = themeActions_.begin(); it != themeActions_.end(); ++it)
@@ -17403,6 +17513,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(beginnerPreviewImageToolbarAction_)
             beginnerPreviewImageToolbarAction_->setVisible(!beginner ||
                 (beginnerProjectActive_ && beginnerProject_.target == beginner::Target::PostFx));
+        if(beginnerDepthSceneToolbarAction_)
+            beginnerDepthSceneToolbarAction_->setVisible(beginner && beginnerProjectUsesSceneDepth());
 
         if(previewSettingsTitle_)
             previewSettingsTitle_->setText(beginner ? "Preview Settings" : "Advanced Preview Settings");
@@ -19485,6 +19597,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QLineEdit* beginnerProjectNameEdit_ = nullptr;
     QComboBox* beginnerPresetCombo_ = nullptr;
     QGridLayout* beginnerPresetCardsLayout_ = nullptr;
+    QScrollArea* beginnerPresetScroll_ = nullptr;
     QListWidget* beginnerEffectList_ = nullptr;
     QStackedWidget* beginnerEffectsContentStack_ = nullptr;
     QPushButton* beginnerBrowseEffectsButton_ = nullptr;
@@ -19545,6 +19658,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QToolButton* beginnerPreviewImageToolbarButton_ = nullptr;
     QAction* beginnerPreviewImageToolbarAction_ = nullptr;
     QAction* beginnerDepthToolbarAction_ = nullptr;
+    QAction* beginnerDepthSceneToolbarAction_ = nullptr;
     QAction* uiBeginnerModeAction_ = nullptr;
     QAction* uiAdvancedModeAction_ = nullptr;
     QLabel* compileStatusBadge_ = nullptr;
