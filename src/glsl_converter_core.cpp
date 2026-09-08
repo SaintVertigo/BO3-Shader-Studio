@@ -8380,19 +8380,20 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
 )MAT")
             : QString();
 
-        // Texture-free procedural GLSL is frequently authored as a non-tiling
-        // 2D image. A narrow blend band only hides the exact U wrap and creates
-        // a visible wedge on a sphere. Instead, make the procedural evaluation
-        // genuinely periodic in U: smoothly blend the authored sample with a
-        // copy shifted by one virtual canvas width. The endpoint value and first
-        // derivative then match at U=0/U=1, so closed meshes have no special
-        // seam strip. Textured/image materials keep their exact authored UVs.
-        const bool proceduralSeamBridge = channels.isEmpty() && !needsGenericSampler &&
-            !converted.contains(QRegularExpression(
-                R"(\b(?:Texture1D|Texture2D|Texture3D|TextureCube|SamplerState)\b)",
-                QRegularExpression::CaseInsensitiveOption));
-        const QString materialEntry = proceduralSeamBridge
-            ? QStringLiteral(R"MAT(
+        // Converted GLSL Materials are fundamentally image-space shaders being
+        // projected onto closed 3D meshes. Two wrapper fixes are important for
+        // them to preview cleanly on the built-in sphere and other wrapped UV
+        // meshes:
+        //
+        // 1) Evaluate the image as periodic in U for *all* converted GLSL
+        //    Materials, including channel/texture users. Restricting this only
+        //    to texture-free shaders still leaves an obvious longitude seam on
+        //    Shadertoy-style materials that sample iChannel textures.
+        //
+        // 2) Do not vertically flip the virtual fragCoord. The material preview
+        //    UVs already match the desired orientation for these conversions;
+        //    flipping V makes converted materials appear upside down.
+        const QString materialEntry = QStringLiteral(R"MAT(
 float4 BO3GLSL_EvaluateMaterialMainImage(float2 fragCoord)
 {
     GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
@@ -8410,12 +8411,12 @@ float BO3GLSL_PeriodicMaterialUWeight(float u)
 
 float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
 {
-    // Seamless procedural closed-mesh mapping. Do not create a localized seam
-    // band: periodicize the full U interval by cross-fading two adjacent copies
-    // of mainImage. At U=0 and U=1 both sides evaluate the same authored point,
-    // with a matching first derivative, so the sphere/model wrap disappears.
+    // Evaluate converted GLSL Materials directly from the authored UV space
+    // without a vertical flip, then make the result periodic across the full U
+    // interval. That removes the hard longitude seam on wrapped meshes while
+    // keeping the image upright in the preview and BO3 material export.
     float2 surfaceUv = input.texCoords.xy;
-    float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
+    float2 fragCoord = surfaceUv * BO3_GLSL_MATERIAL_RESOLUTION;
     float2 shiftedFragCoord = fragCoord + float2(BO3_GLSL_MATERIAL_RESOLUTION.x, 0.0);
     float4 authoredColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
     float4 shiftedColor = BO3GLSL_EvaluateMaterialMainImage(shiftedFragCoord);
@@ -8424,17 +8425,6 @@ float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
 
     // Restore the primary coordinate for any wrapper-side logic that follows.
     GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-)MAT")
-            : QStringLiteral(R"MAT(
-float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
-{
-    // Material UVs are top-left oriented in the preview. mainImage/gl_FragCoord
-    // expect a lower-left origin, so flip V when creating the virtual canvas.
-    float2 surfaceUv = input.texCoords.xy;
-    float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    float4 fragColor = float4(0.0, 0.0, 0.0, 0.0);
-    mainImage(fragColor, fragCoord);
 )MAT");
 
         return QString("// BO3_PREVIEWER_MATERIAL_SURFACE: %1\n").arg(surfaceTag) + resources + QStringLiteral(R"MAT(
