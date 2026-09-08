@@ -17,5 +17,10 @@
     </qresource>
     <qresource prefix="/preview">
         <file alias="beginner_depth_game_scene.jpg">preview/beginner_depth_game_scene.jpg</file>
+        <file alias="bo3_depth_shadows_of_evil.jpg">preview/bo3_depth_shadows_of_evil.jpg</file>
+        <file alias="bo3_depth_der_eisendrache.jpg">preview/bo3_depth_der_eisendrache.jpg</file>
+        <file alias="bo3_depth_gorod_krovi.jpg">preview/bo3_depth_gorod_krovi.jpg</file>
+        <file alias="bo3_depth_the_giant.jpg">preview/bo3_depth_the_giant.jpg</file>
+        <file alias="bo3_depth_zetsubou.jpg">preview/bo3_depth_zetsubou.jpg</file>
     </qresource>
 </RCC>

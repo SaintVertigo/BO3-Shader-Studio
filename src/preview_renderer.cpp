@@ -1543,20 +1543,52 @@ public:
         return true;
     }
 
-    bool UseBuiltInDepthScene(std::wstring& error)
+    bool UseBuiltInDepthScene(std::wstring& error, const QString& requestedSceneId)
     {
         if(liveCaptureSource_) StopLiveCapture();
 
-        // Beginner depth preview uses an actual Black Ops III screenshot supplied
-        // by the user (Shadows of Evil) for the color image. Shader Studio pairs
-        // it with an approximate Float-Z field authored for the same composition.
-        // It is intentionally a visual/gameplay preview, not a claim that we have
-        // captured BO3's protected runtime depth buffer. Export still binds live
-        // floatZ in game.
-        QImage sourceImage(QStringLiteral(":/preview/beginner_depth_game_scene.jpg"));
+        struct DepthPreviewScene
+        {
+            const char* id;
+            const char* resource;
+            float horizon;
+            float vanishX;
+            float sideStrength;
+            float farDistance;
+            float weaponX;
+            float weaponY;
+            float weaponScale;
+        };
+
+        static const DepthPreviewScene scenes[] = {
+            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", 0.49f, 0.51f, 0.72f, 4200.0f, 0.60f, 0.80f, 1.00f},
+            {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", 0.50f, 0.50f, 0.58f, 5200.0f, 0.57f, 0.84f, 1.05f},
+            {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", 0.48f, 0.53f, 0.34f, 4800.0f, 0.68f, 0.79f, 1.12f},
+            {"the_giant", ":/preview/bo3_depth_the_giant.jpg", 0.52f, 0.53f, 0.76f, 2400.0f, 0.57f, 0.84f, 0.95f},
+            {"zetsubou", ":/preview/bo3_depth_zetsubou.jpg", 0.53f, 0.50f, 0.84f, 1700.0f, 0.61f, 0.85f, 1.08f}
+        };
+
+        const QString sceneId = requestedSceneId.trimmed().toLower();
+        const DepthPreviewScene* scene = &scenes[0];
+        for(const DepthPreviewScene& candidate : scenes)
+        {
+            if(sceneId == QString::fromLatin1(candidate.id))
+            {
+                scene = &candidate;
+                break;
+            }
+        }
+
+        // These are real Black Ops III screenshots supplied by the user. The
+        // paired depth is intentionally a smooth perspective approximation, not
+        // a fake collection of hard rectangular object masks. This avoids the
+        // obvious box-shaped AO/outlines from the old preview while still giving
+        // Beginner depth effects coherent near/mid/far geometry. Export always
+        // binds BO3's real live floatZ instead.
+        QImage sourceImage(QString::fromLatin1(scene->resource));
         if(sourceImage.isNull())
         {
-            error = L"Could not load the built-in BO3 Game Depth Preview screenshot resource.";
+            error = L"Could not load the selected BO3 Game Depth Preview screenshot resource.";
             return false;
         }
 
@@ -1572,7 +1604,7 @@ public:
         std::memcpy(color.data(), sourceImage.constBits(), color.size());
 
         std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
-        std::vector<float> worldDepth(static_cast<size_t>(w) * h, 1600.0f);
+        std::vector<float> worldDepth(static_cast<size_t>(w) * h, scene->farDistance);
         std::vector<uint8_t> depthHackMask(static_cast<size_t>(w) * h, 0u);
 
         auto encodeWorldRawDepth = [&](float distance)
@@ -1588,13 +1620,18 @@ public:
             return std::clamp((processed + 63.0f) / 64.0f,
                               depthHackSplit + 0.000001f, 0.999999f);
         };
+        auto smooth01 = [](float value)
+        {
+            value = std::clamp(value, 0.0f, 1.0f);
+            return value * value * (3.0f - 2.0f * value);
+        };
+        auto ellipse = [](float x, float y, float cx, float cy, float rx, float ry)
+        {
+            const float dx = (x - cx) / std::max(rx, 0.0001f);
+            const float dy = (y - cy) / std::max(ry, 0.0001f);
+            return dx * dx + dy * dy;
+        };
 
-        // Approximate perspective/depth for the supplied Shadows of Evil street
-        // screenshot. The values are deliberately broad and stable: AO needs
-        // believable contact discontinuities, cartoon outlines need silhouettes,
-        // and depth fog needs a useful near/mid/far progression.
-        const float vpX = 0.555f;
-        const float vpY = 0.485f;
         for(UINT y = 0; y < h; ++y)
         {
             const float fy = static_cast<float>(y) / static_cast<float>(h - 1);
@@ -1603,72 +1640,42 @@ public:
                 const float fx = static_cast<float>(x) / static_cast<float>(w - 1);
                 const size_t pidx = static_cast<size_t>(y) * w + x;
 
-                float distance = 1800.0f;
+                // Ground distance follows a continuous perspective curve from the
+                // bottom of the frame toward the selected scene's vanishing line.
+                const float groundProgress = std::clamp((fy - scene->horizon) / std::max(1.0f - scene->horizon, 0.001f), 0.0f, 1.0f);
+                const float groundDepth = 4.0f + 1500.0f * std::pow(1.0f - groundProgress, 2.35f);
 
-                // Wet street / ground plane converges toward the Easy Street arch.
-                if(fy >= vpY)
-                {
-                    const float groundT = std::clamp((fy - vpY) / (1.0f - vpY), 0.0f, 1.0f);
-                    distance = 5.0f + 1450.0f * (1.0f - groundT) * (1.0f - groundT);
-                }
-                else
-                {
-                    // Upper sky and very distant roofline.
-                    distance = 2600.0f + (vpY - fy) * 3400.0f;
-                }
+                // Upper frame is treated as distant architecture/sky. Keep the
+                // transition around the horizon smooth so depth effects do not
+                // invent a horizontal seam.
+                const float above = std::clamp((scene->horizon - fy) / std::max(scene->horizon, 0.001f), 0.0f, 1.0f);
+                const float verticalDepth = 520.0f + scene->farDistance * (0.42f + 0.58f * above);
+                const float groundBlend = smooth01(std::clamp((fy - scene->horizon + 0.035f) / 0.09f, 0.0f, 1.0f));
+                float distance = verticalDepth * (1.0f - groundBlend) + groundDepth * groundBlend;
 
-                // Left brick/market frontage. It is close at the left edge and
-                // recedes rapidly toward the street opening.
-                if(fx < 0.36f)
-                {
-                    const float t = std::clamp(fx / 0.36f, 0.0f, 1.0f);
-                    const float side = 7.0f + 250.0f * std::pow(t, 1.65f);
-                    distance = std::min(distance, side);
-                }
+                // Smoothly pull side geometry toward the camera. Unlike the old
+                // preview, this is continuous and never creates rectangular masks.
+                const float edgeDistance = std::min(fx, 1.0f - fx);
+                const float sideMask = scene->sideStrength * (1.0f - smooth01(std::clamp(edgeDistance / 0.34f, 0.0f, 1.0f)));
+                const float sidePerspective = std::clamp(std::abs(fx - scene->vanishX) / 0.55f, 0.0f, 1.0f);
+                const float sideDepth = 7.0f + 520.0f * std::pow(1.0f - sidePerspective, 1.8f) + 110.0f * std::abs(fy - scene->horizon);
+                distance = distance * (1.0f - sideMask) + std::min(distance, sideDepth) * sideMask;
 
-                // Right-hand building/railing close to the camera.
-                if(fx > 0.84f)
-                {
-                    const float t = std::clamp((1.0f - fx) / 0.16f, 0.0f, 1.0f);
-                    const float side = 8.0f + 230.0f * std::pow(t, 1.55f);
-                    distance = std::min(distance, side);
-                }
-
-                // Mid-street architecture and the distant Easy Street opening.
-                if(fx > 0.34f && fx < 0.61f && fy > 0.25f && fy < 0.62f)
-                    distance = std::min(distance, 95.0f + std::abs(fx - 0.50f) * 220.0f);
-                if(fx > 0.44f && fx < 0.70f && fy < 0.42f)
-                    distance = std::max(distance, 520.0f);
-
-                // Left market stand, crates and barrels.
-                if(fx < 0.34f && fy > 0.42f && fy < 0.76f)
-                    distance = std::min(distance, 10.0f + (0.76f - fy) * 26.0f);
-                if(fx > 0.17f && fx < 0.33f && fy > 0.55f && fy < 0.77f)
-                    distance = std::min(distance, 7.5f + (0.77f - fy) * 20.0f);
-
-                // Truck and awning on the right side of the street.
-                if(fx > 0.59f && fx < 0.84f && fy > 0.40f && fy < 0.69f)
-                    distance = std::min(distance, 18.0f + (0.69f - fy) * 26.0f);
-                if(fx > 0.67f && fx < 0.86f && fy > 0.34f && fy < 0.48f)
-                    distance = std::min(distance, 24.0f + (0.48f - fy) * 40.0f);
-
-                // Small mid-ground street props.
-                if(fx > 0.44f && fx < 0.58f && fy > 0.46f && fy < 0.64f)
-                    distance = std::min(distance, 34.0f + (0.64f - fy) * 65.0f);
-
-                // First-person revolver and arms are approximated as BO3
-                // depth-hacked geometry so Beginner AO/fog can exclude them.
+                // Approximate the first-person weapon/arms with smooth ellipses so
+                // the depth-hack mask follows the visible lower-frame silhouette
+                // without introducing rectangular outlines.
+                const float s = scene->weaponScale;
                 const bool viewmodel =
-                    (fy > 0.78f && fx > 0.49f && fx < 0.78f) ||
-                    (fy > 0.62f && fy < 0.82f && fx > 0.54f && fx < 0.66f) ||
-                    (fy > 0.84f && fx > 0.42f);
+                    ellipse(fx, fy, scene->weaponX, scene->weaponY, 0.105f * s, 0.115f * s) < 1.0f ||
+                    ellipse(fx, fy, scene->weaponX + 0.055f * s, scene->weaponY + 0.105f * s, 0.20f * s, 0.10f * s) < 1.0f ||
+                    ellipse(fx, fy, scene->weaponX - 0.035f * s, scene->weaponY - 0.115f * s, 0.038f * s, 0.16f * s) < 1.0f;
                 if(viewmodel)
                 {
                     depthHackMask[pidx] = 1u;
                     distance = 0.68f;
                 }
 
-                worldDepth[pidx] = distance;
+                worldDepth[pidx] = std::max(distance, 0.11f);
             }
         }
 
@@ -5898,9 +5905,9 @@ bool PreviewRenderer::LoadTexture(const std::filesystem::path& path, bool depth,
     return impl_->LoadTexture(path, depth, error);
 }
 
-bool PreviewRenderer::UseBuiltInDepthScene(std::wstring& error)
+bool PreviewRenderer::UseBuiltInDepthScene(std::wstring& error, const QString& sceneId)
 {
-    return impl_->UseBuiltInDepthScene(error);
+    return impl_->UseBuiltInDepthScene(error, sceneId);
 }
 
 bool PreviewRenderer::HasUserDepthTexture() const

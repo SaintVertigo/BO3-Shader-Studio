@@ -13528,6 +13528,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
         if(id == "sunset") return "Warm horizon + low sun + haze";
+        if(id == "lake_sunset") return "Sunset atmosphere + volumetric clouds + still-water reflection";
         if(id == "mountain_dawn") return "Sunrise + layered mountains + clouds";
         if(id == "cloudy_day") return "Bright sky + volumetric moving clouds";
         if(id == "starry_night") return "Moon + dense stars + dark horizon";
@@ -14021,7 +14022,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             beginnerTargetButtons_[i]->setText(
                 beginner::targetName(target) + "\n" +
                 (compact ? compactSubtitles[i] : fullSubtitles[i]));
-            beginnerTargetButtons_[i]->setMinimumHeight(compact ? 54 : 62);
+            beginnerTargetButtons_[i]->setMinimumHeight(compact ? 46 : 52);
         }
 
         if(beginnerBodySplitter_)
@@ -14048,9 +14049,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return false;
     }
 
-    void activateBuiltInDepthPreview(bool showMessage = true)
+    static QString beginnerDepthPreviewSceneName(const QString& sceneId)
+    {
+        const QString id = sceneId.trimmed().toLower();
+        if(id == "der_eisendrache") return "Der Eisendrache";
+        if(id == "gorod_krovi") return "Gorod Krovi";
+        if(id == "the_giant") return "The Giant";
+        if(id == "zetsubou") return "Zetsubou No Shima";
+        return "Shadows of Evil";
+    }
+
+    void activateBuiltInDepthPreview(bool showMessage = true, const QString& requestedSceneId = QString())
     {
         if(!preview_) return;
+        const QString sceneId = requestedSceneId.trimmed().isEmpty()
+            ? beginnerDepthPreviewSceneId_
+            : requestedSceneId.trimmed().toLower();
         QString initError;
         if(!preview_->ensureInitialized(initError))
         {
@@ -14059,17 +14073,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return;
         }
         std::wstring error;
-        if(!preview_->renderer().UseBuiltInDepthScene(error))
+        if(!preview_->renderer().UseBuiltInDepthScene(error, sceneId))
         {
             if(showMessage) QMessageBox::warning(this, "Game Depth Preview", ToQString(error));
             return;
         }
+        beginnerDepthPreviewSceneId_ = sceneId;
         sourceImagePath_.clear();
         preview_->update();
         rebuildBeginnerEffectParameters();
         updateBeginnerBuilderSummary();
         if(showMessage)
-            statusBar()->showMessage("Using BO3 Game Depth Preview — Shadows of Evil screenshot with matched preview Float-Z approximation.", 4200);
+            statusBar()->showMessage(
+                QString("Using BO3 Game Depth Preview — %1 with smooth approximate preview Float-Z. BO3 export uses live floatZ.")
+                    .arg(beginnerDepthPreviewSceneName(sceneId)),
+                4600);
     }
 
     void updateBeginnerBuilderSummary()
@@ -14107,45 +14125,34 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void refreshBeginnerPresetCombo()
     {
         const auto presets = beginner::presetsForTarget(beginnerProject_.target);
-        if(beginnerPresetCombo_)
+        if(!beginnerPresetCombo_) return;
+
+        QSignalBlocker blocker(beginnerPresetCombo_);
+        beginnerPresetCombo_->clear();
+        for(const auto& preset : presets)
         {
-            QSignalBlocker blocker(beginnerPresetCombo_);
-            beginnerPresetCombo_->clear();
-            for(const auto& preset : presets)
-                beginnerPresetCombo_->addItem(preset.second, preset.first);
+            beginnerPresetCombo_->addItem(preset.second, preset.first);
+            beginnerPresetCombo_->setItemData(
+                beginnerPresetCombo_->count() - 1,
+                beginnerPresetDescription(beginnerProject_.target, preset.first),
+                Qt::ToolTipRole);
         }
 
-        if(!beginnerPresetCardsLayout_) return;
-        while(QLayoutItem* item = beginnerPresetCardsLayout_->takeAt(0))
+        QString selectedPresetId = "blank";
+        for(const auto& preset : presets)
         {
-            if(QWidget* widget = item->widget()) widget->deleteLater();
-            delete item;
+            const beginner::Project candidate = beginner::makePreset(preset.first, beginnerProject_.target);
+            if(candidate.name == beginnerProject_.name)
+            {
+                selectedPresetId = preset.first;
+                break;
+            }
         }
-        if(beginnerPresetScroll_)
-        {
-            // Preset descriptions used to make every Sky card two lines tall,
-            // forcing a clipped/scrolling "starting point" box as the library grew.
-            // Keep the cards compact and put the explanation in the tooltip.
-            const int rows = qMax(1, (presets.size() + 1) / 2);
-            const int desired = qBound(82, rows * 38 + 4, 198);
-            beginnerPresetScroll_->setMinimumHeight(desired);
-            beginnerPresetScroll_->setMaximumHeight(desired);
-        }
-        for(int i = 0; i < presets.size(); ++i)
-        {
-            const auto& preset = presets[i];
-            auto* card = new QToolButton();
-            const QString description = beginnerPresetDescription(beginnerProject_.target, preset.first);
-            card->setText(preset.second);
-            card->setToolTip(description);
-            card->setToolButtonStyle(Qt::ToolButtonTextOnly);
-            card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-            card->setMinimumHeight(32);
-            card->setMaximumHeight(36);
-            card->setObjectName("BeginnerPresetCard");
-            beginnerPresetCardsLayout_->addWidget(card, i / 2, i % 2);
-            connect(card, &QToolButton::clicked, this, [this, presetId = preset.first]{ applyBeginnerPreset(presetId); });
-        }
+        const int index = beginnerPresetCombo_->findData(selectedPresetId);
+        beginnerPresetCombo_->setCurrentIndex(index >= 0 ? index : 0);
+        if(beginnerPresetDescriptionLabel_)
+            beginnerPresetDescriptionLabel_->setText(
+                beginnerPresetDescription(beginnerProject_.target, beginnerPresetCombo_->currentData().toString()));
     }
 
     void rebuildBeginnerBaseAppearance()
@@ -14252,7 +14259,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 QString("%1    ·    %2").arg(definition->name, definition->category), beginnerEffectList_);
             item->setData(Qt::UserRole, effect.instanceId);
             item->setToolTip(definition->description);
-            item->setSizeHint(QSize(0, 38));
+            item->setSizeHint(QSize(0, 32));
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
             item->setCheckState(effect.enabled ? Qt::Checked : Qt::Unchecked);
             if(effect.instanceId == preferredInstanceId) preferredRow = beginnerEffectList_->count() - 1;
@@ -14333,19 +14340,44 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const bool builtInDepth = preview_ && preview_->renderer().BuiltInDepthSceneActive();
             auto* depthNotice = new QLabel();
             if(builtInDepth)
-                depthNotice->setText("BO3 Game Depth Preview active. The in-game screenshot is paired with preview Float-Z so outlines, AO and fog can be judged on a game-like scene.");
+                depthNotice->setText(QString("BO3 Game Depth Preview active: %1. The screenshot is real BO3; preview depth is a smooth perspective approximation. Export uses BO3's live Float-Z.")
+                    .arg(beginnerDepthPreviewSceneName(beginnerDepthPreviewSceneId_)));
             else if(hasDepth)
                 depthNotice->setText("Matching custom depth is loaded for this preview image. BO3 supplies live Float-Z automatically after export.");
             else
-                depthNotice->setText("This effect needs scene depth. A normal screenshot contains color only, so use BO3 Game Depth Preview to test it on an in-game image with matched preview depth.");
+                depthNotice->setText("This effect needs scene depth. Pick a BO3 Game Depth Preview scene below; Shader Studio supplies approximate preview depth automatically.");
             depthNotice->setWordWrap(true);
             depthNotice->setObjectName(hasDepth ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
 
-            auto* depthScene = new QPushButton(builtInDepth ? "Game Depth Preview Active" : "Use Game Depth Preview");
-            depthScene->setEnabled(!builtInDepth);
+            auto* depthSceneRow = new QWidget();
+            auto* depthSceneLayout = new QHBoxLayout(depthSceneRow);
+            depthSceneLayout->setContentsMargins(0, 0, 0, 0);
+            depthSceneLayout->setSpacing(6);
+            auto* depthSceneLabel = new QLabel("Preview Scene");
+            auto* depthScenePicker = new QComboBox();
+            const QVector<QPair<QString, QString>> depthScenes = {
+                {"shadows_of_evil", "Shadows of Evil"},
+                {"der_eisendrache", "Der Eisendrache"},
+                {"gorod_krovi", "Gorod Krovi"},
+                {"the_giant", "The Giant"},
+                {"zetsubou", "Zetsubou No Shima"}
+            };
+            for(const auto& scene : depthScenes)
+                depthScenePicker->addItem(scene.second, scene.first);
+            const int selectedScene = depthScenePicker->findData(beginnerDepthPreviewSceneId_);
+            if(selectedScene >= 0) depthScenePicker->setCurrentIndex(selectedScene);
+            depthSceneLayout->addWidget(depthSceneLabel);
+            depthSceneLayout->addWidget(depthScenePicker, 1);
+            beginnerEffectParamsLayout_->addWidget(depthSceneRow);
+            connect(depthScenePicker, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, depthScenePicker](int)
+            {
+                activateBuiltInDepthPreview(false, depthScenePicker->currentData().toString());
+            });
+
+            auto* depthScene = new QPushButton(builtInDepth ? "Refresh Game Depth Preview" : "Use Game Depth Preview");
             depthScene->setObjectName(builtInDepth ? "" : "PrimaryAction");
-            depthScene->setToolTip("Use Shader Studio's BO3 in-game screenshot with paired preview Float-Z. No depth-map file is required.");
+            depthScene->setToolTip("Use a real BO3 screenshot with Shader Studio's smooth approximate preview depth. No external depth map is required.");
             beginnerEffectParamsLayout_->addWidget(depthScene);
             connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
 
@@ -14410,7 +14442,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             {
                 beginnerSliderDragging_ = true;
                 beginnerHeavyPreviewEffect_ =
-                    previewEffectType == "sky_realistic_clouds" ||
                     previewEffectType == "sky_aurora" ||
                     previewEffectType == "sky_nebula";
             });
@@ -14426,7 +14457,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
                 beginnerHeavyPreviewEffect_ =
-                    previewEffectType == "sky_realistic_clouds" ||
                     previewEffectType == "sky_aurora" ||
                     previewEffectType == "sky_nebula";
                 markBeginnerProjectModified();
@@ -14478,9 +14508,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 beginnerBaseAppearanceGroup_->setTitle("Sky colors");
         }
         if(beginnerEffectsGroup_)
-            beginnerEffectsGroup_->setTitle("3. Add effects to your shader");
+            beginnerEffectsGroup_->setTitle("3. Effects");
         if(beginnerParamsGroup_)
-            beginnerParamsGroup_->setTitle("4. Fine tune the selected effect");
+            beginnerParamsGroup_->setTitle("Adjust Selected Effect");
         refreshBeginnerPresetCombo();
         rebuildBeginnerBaseAppearance();
         updateBeginnerBuilderSummary();
@@ -14525,9 +14555,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             // sticky. Keep ordinary effects responsive, but pace expensive cloud
             // stacks more gently while the mouse is held down. The final value is
             // compiled immediately on slider release.
-            int interval = beginnerSliderDragging_ ? 72 : 28;
+            int interval = beginnerSliderDragging_ ? 58 : 24;
             if(beginnerSliderDragging_ && beginnerHeavyPreviewEffect_)
-                interval = 135;
+                interval = 120;
             liveCompileTimer_.setInterval(interval);
             liveCompileTimer_.start();
         }
@@ -14741,7 +14771,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         auto* root = new QVBoxLayout(&dlg);
         root->setContentsMargins(16, 14, 16, 14);
-        root->setSpacing(10);
+        root->setSpacing(8);
 
         auto* title = new QLabel("Add an effect");
         title->setObjectName("InspectorTitle");
@@ -15190,8 +15220,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* panel = new QWidget(this);
         panel->setObjectName("BeginnerBuilderPanel");
         auto* root = new QVBoxLayout(panel);
-        root->setContentsMargins(12, 10, 12, 10);
-        root->setSpacing(10);
+        root->setContentsMargins(10, 8, 10, 8);
+        root->setSpacing(8);
 
         auto* heroRow = new QHBoxLayout();
         auto* heroText = new QWidget();
@@ -15210,7 +15240,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         heroRow->addWidget(beginnerCompatibilityLabel_, 0, Qt::AlignTop);
         root->addLayout(heroRow);
 
-        auto* targetGroup = new QGroupBox("1. What are you making?");
+        auto* targetGroup = new QGroupBox("1. Shader Type");
         auto* targetLayout = new QVBoxLayout(targetGroup);
         auto* targetCards = new QHBoxLayout();
         const QStringList targetShort = {"Changes the game screen", "Changes a model / surface", "Creates the environment"};
@@ -15221,7 +15251,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             button->setCheckable(true);
             button->setText(beginner::targetName(target) + "\n" + targetShort[i]);
             button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-            button->setMinimumHeight(62);
+            button->setMinimumHeight(52);
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             button->setObjectName("BeginnerTargetCard");
             beginnerTargetButtons_[i] = button;
@@ -15245,8 +15275,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         leftLayout->setContentsMargins(0, 0, 6, 0);
         leftLayout->setSpacing(8);
 
-        auto* projectGroup = new QGroupBox("2. Choose a starting point");
+        auto* projectGroup = new QGroupBox("2. Project");
         auto* projectLayout = new QVBoxLayout(projectGroup);
+        projectLayout->setContentsMargins(9, 9, 9, 9);
+        projectLayout->setSpacing(7);
+
         auto* nameRow = new QHBoxLayout();
         auto* nameLabel = new QLabel("Name");
         beginnerProjectNameEdit_ = new QLineEdit();
@@ -15254,25 +15287,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         nameRow->addWidget(nameLabel);
         nameRow->addWidget(beginnerProjectNameEdit_, 1);
         projectLayout->addLayout(nameRow);
-        auto* presetHelp = new QLabel("Choose a preset, or start with a blank shader.");
-        presetHelp->setObjectName("CompactHelp");
-        presetHelp->setWordWrap(true);
-        projectLayout->addWidget(presetHelp);
-        auto* presetScroll = new QScrollArea();
-        beginnerPresetScroll_ = presetScroll;
-        presetScroll->setWidgetResizable(true);
-        presetScroll->setFrameShape(QFrame::NoFrame);
-        presetScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        presetScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        presetScroll->setMinimumHeight(108);
-        presetScroll->setMaximumHeight(225);
-        presetScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        auto* presetContainer = new QWidget();
-        beginnerPresetCardsLayout_ = new QGridLayout(presetContainer);
-        beginnerPresetCardsLayout_->setContentsMargins(0, 0, 2, 0);
-        beginnerPresetCardsLayout_->setSpacing(6);
-        presetScroll->setWidget(presetContainer);
-        projectLayout->addWidget(presetScroll);
+
+        auto* presetRow = new QHBoxLayout();
+        auto* presetLabel = new QLabel("Starting Point");
+        beginnerPresetCombo_ = new QComboBox();
+        beginnerPresetCombo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        beginnerPresetCombo_->setMinimumContentsLength(12);
+        auto* applyPresetButton = new QPushButton("Apply");
+        applyPresetButton->setMinimumWidth(64);
+        presetRow->addWidget(presetLabel);
+        presetRow->addWidget(beginnerPresetCombo_, 1);
+        presetRow->addWidget(applyPresetButton);
+        projectLayout->addLayout(presetRow);
+
+        beginnerPresetDescriptionLabel_ = new QLabel();
+        beginnerPresetDescriptionLabel_->setObjectName("CompactHelp");
+        beginnerPresetDescriptionLabel_->setWordWrap(true);
+        beginnerPresetDescriptionLabel_->setMinimumHeight(18);
+        projectLayout->addWidget(beginnerPresetDescriptionLabel_);
         leftLayout->addWidget(projectGroup);
 
         beginnerBaseAppearanceGroup_ = new QGroupBox("Base Appearance");
@@ -15280,7 +15312,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerBaseAppearanceLayout_->setContentsMargins(8, 8, 8, 8);
         leftLayout->addWidget(beginnerBaseAppearanceGroup_);
 
-        beginnerEffectsGroup_ = new QGroupBox("3. Add effects to your shader");
+        beginnerEffectsGroup_ = new QGroupBox("3. Effects");
         auto* effectsLayout = new QVBoxLayout(beginnerEffectsGroup_);
         beginnerEffectsContentStack_ = new QStackedWidget();
 
@@ -15337,18 +15369,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* rightLayout = new QVBoxLayout(right);
         rightLayout->setContentsMargins(6, 0, 0, 0);
         rightLayout->setSpacing(8);
-        beginnerParamsGroup_ = new QGroupBox("4. Fine tune the selected effect");
-        beginnerEffectParamsLayout_ = new QVBoxLayout(beginnerParamsGroup_);
-        beginnerEffectParamsLayout_->setContentsMargins(10, 10, 10, 10);
+        beginnerParamsGroup_ = new QGroupBox("Adjust Selected Effect");
+        auto* paramsOuterLayout = new QVBoxLayout(beginnerParamsGroup_);
+        paramsOuterLayout->setContentsMargins(4, 7, 4, 4);
+        auto* paramsScroll = new QScrollArea();
+        paramsScroll->setWidgetResizable(true);
+        paramsScroll->setFrameShape(QFrame::NoFrame);
+        paramsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* paramsContent = new QWidget();
+        beginnerEffectParamsLayout_ = new QVBoxLayout(paramsContent);
+        beginnerEffectParamsLayout_->setContentsMargins(7, 4, 7, 7);
+        beginnerEffectParamsLayout_->setSpacing(8);
+        paramsScroll->setWidget(paramsContent);
+        paramsOuterLayout->addWidget(paramsScroll, 1);
         rightLayout->addWidget(beginnerParamsGroup_, 1);
-
-        auto* explain = new QGroupBox("Want to learn how it works?");
-        auto* explainLayout = new QVBoxLayout(explain);
-        auto* explainText = new QLabel("See the simple recipe Shader Studio uses to build your look. Code stays optional and out of the way.");
-        explainText->setWordWrap(true);
-        explainText->setObjectName("CompactHelp");
-        explainLayout->addWidget(explainText);
-        rightLayout->addWidget(explain);
 
         auto* actions = new QHBoxLayout();
         auto* viewCode = new QPushButton("Learn How It Works");
@@ -15365,6 +15399,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         body->setStretchFactor(0, 3);
         body->setStretchFactor(1, 4);
         root->addWidget(body, 1);
+
+        connect(beginnerPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if(!beginnerPresetCombo_ || !beginnerPresetDescriptionLabel_) return;
+            beginnerPresetDescriptionLabel_->setText(
+                beginnerPresetDescription(beginnerProject_.target, beginnerPresetCombo_->currentData().toString()));
+        });
+        connect(applyPresetButton, &QPushButton::clicked, this, [this]{ applySelectedBeginnerPreset(); });
 
         connect(beginnerProjectNameEdit_, &QLineEdit::textEdited, this, [this](const QString& text)
         {
@@ -15565,7 +15607,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Use an actual BO3 Shadows of Evil screenshot paired with Shader Studio preview Float-Z for depth effects. No external depth map is required.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Use one of the built-in BO3 screenshots with Shader Studio's smooth approximate preview Float-Z. Scene choices appear in the depth-effect inspector; export uses BO3 live floatZ.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -16283,17 +16325,27 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(restoreLayout, &QAction::triggered, this, [this]{ restoreWorkspace(true); });
         connect(resetLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Default"); });
 
-        const QStringList themes{
+        const QStringList darkThemes{
             "BO3 Dark", "Graphite", "Midnight Blue", "AMOLED", "Deep Purple",
-            "Forest", "Warm Ember", "Nord", "Light", "High Contrast"
+            "Forest", "Warm Ember", "Nord", "Tokyo Night", "Dracula",
+            "Catppuccin Mocha", "Rose Pine", "Solarized Dark", "Crimson", "Oceanic"
         };
-        for (const QString& themeName : themes)
+        const QStringList lightThemes{
+            "Light", "Solarized Light", "Warm Paper"
+        };
+        auto* darkThemeMenu = themeMenu->addMenu("Dark Themes");
+        auto* lightThemeMenu = themeMenu->addMenu("Light Themes");
+        auto addThemeAction = [this](QMenu* menu, const QString& themeName)
         {
-            auto* action = themeMenu->addAction(themeName);
+            auto* action = menu->addAction(themeName);
             action->setCheckable(true);
             themeActions_[themeName] = action;
             connect(action, &QAction::triggered, this, [this, themeName]{ applyTheme(themeName); });
-        }
+        };
+        for(const QString& themeName : darkThemes) addThemeAction(darkThemeMenu, themeName);
+        for(const QString& themeName : lightThemes) addThemeAction(lightThemeMenu, themeName);
+        themeMenu->addSeparator();
+        addThemeAction(themeMenu, "High Contrast");
         auto* interfaceModeMenu = settingsMenu->addMenu("Interface Mode");
         auto* beginnerModeAction = interfaceModeMenu->addAction("Beginner");
         auto* advancedModeAction = interfaceModeMenu->addAction("Advanced");
@@ -17268,7 +17320,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto fn = reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
         if (fn)
         {
-            const BOOL dark = currentTheme_ != "Light";
+            const BOOL dark = !(currentTheme_ == "Light" || currentTheme_ == "Solarized Light" || currentTheme_ == "Warm Paper");
             const DWORD immersiveDarkMode = 20;
             fn(hwnd, immersiveDarkMode, &dark, sizeof(dark));
             COLORREF caption = dark ? RGB(22,24,29) : RGB(242,243,245);
@@ -17326,16 +17378,52 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             window="#242933"; panel="#2E3440"; base="#20242C"; button="#3B4252"; hover="#434C5E"; border="#4C566A"; textColor="#ECEFF4"; muted="#A7B0C0"; accent="#5E81AC"; editorBase="#20242C";
         }
+        else if (name == "Tokyo Night")
+        {
+            window="#16161E"; panel="#1A1B26"; base="#101014"; button="#24283B"; hover="#30364F"; border="#3B4261"; textColor="#C0CAF5"; muted="#7F8AA8"; accent="#7AA2F7"; editorBase="#0F0F14";
+        }
+        else if (name == "Dracula")
+        {
+            window="#20212A"; panel="#282A36"; base="#181920"; button="#343746"; hover="#44475A"; border="#55596E"; textColor="#F8F8F2"; muted="#A7A9B4"; accent="#BD93F9"; editorBase="#171820";
+        }
+        else if (name == "Catppuccin Mocha")
+        {
+            window="#181825"; panel="#1E1E2E"; base="#11111B"; button="#313244"; hover="#45475A"; border="#585B70"; textColor="#CDD6F4"; muted="#A6ADC8"; accent="#89B4FA"; editorBase="#11111B";
+        }
+        else if (name == "Rose Pine")
+        {
+            window="#17151F"; panel="#191724"; base="#12101A"; button="#26233A"; hover="#312E45"; border="#403C58"; textColor="#E0DEF4"; muted="#908CAA"; accent="#C4A7E7"; editorBase="#12101A";
+        }
+        else if (name == "Solarized Dark")
+        {
+            window="#002B36"; panel="#073642"; base="#00232C"; button="#164B56"; hover="#205A66"; border="#376A73"; textColor="#EEE8D5"; muted="#93A1A1"; accent="#268BD2"; editorBase="#00232C";
+        }
+        else if (name == "Crimson")
+        {
+            window="#160C11"; panel="#1D1016"; base="#0E080B"; button="#2A171F"; hover="#3A1D28"; border="#512536"; textColor="#F3E8ED"; muted="#B79AA6"; accent="#E5486D"; editorBase="#0E080B";
+        }
+        else if (name == "Oceanic")
+        {
+            window="#08161F"; panel="#0D202B"; base="#061018"; button="#15313D"; hover="#1C4350"; border="#285866"; textColor="#E0F1F3"; muted="#94AFB5"; accent="#35B8C4"; editorBase="#061018";
+        }
         else if (name == "Light")
         {
             window="#EDF1F5"; panel="#F7F9FB"; base="#FFFFFF"; button="#E4E9EF"; hover="#D5DDE6"; border="#AEB9C6"; textColor="#1C252E"; muted="#5D6975"; accent="#2F78B9"; editorBase="#FFFFFF";
+        }
+        else if (name == "Solarized Light")
+        {
+            window="#FDF6E3"; panel="#FFFBEF"; base="#FFFDF6"; button="#EEE8D5"; hover="#E4DCC8"; border="#C8BFA8"; textColor="#3B4A4D"; muted="#657B83"; accent="#268BD2"; editorBase="#FFFDF6";
+        }
+        else if (name == "Warm Paper")
+        {
+            window="#F1ECE4"; panel="#F7F2EA"; base="#FFFCF6"; button="#E8DED1"; hover="#DCCDBD"; border="#BDAE9E"; textColor="#342D29"; muted="#74685F"; accent="#A65F38"; editorBase="#FFFCF6";
         }
         else if (name == "High Contrast")
         {
             window="#000000"; panel="#070707"; base="#000000"; button="#111111"; hover="#222222"; border="#F0F0F0"; textColor="#FFFFFF"; muted="#D5D5D5"; accent="#00B9F2"; editorBase="#000000";
         }
 
-        const bool lightTheme = name == "Light";
+        const bool lightTheme = name == "Light" || name == "Solarized Light" || name == "Warm Paper";
         const QString successText = lightTheme ? "#176B39" : "#84D4A0";
         const QString successBg = lightTheme ? "#E7F5EC" : "#10251A";
         const QString successBorder = lightTheme ? "#7FB894" : "#285B39";
@@ -19702,8 +19790,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QToolButton* beginnerTargetButtons_[3]{};
     QLineEdit* beginnerProjectNameEdit_ = nullptr;
     QComboBox* beginnerPresetCombo_ = nullptr;
-    QGridLayout* beginnerPresetCardsLayout_ = nullptr;
-    QScrollArea* beginnerPresetScroll_ = nullptr;
+    QLabel* beginnerPresetDescriptionLabel_ = nullptr;
     QListWidget* beginnerEffectList_ = nullptr;
     QStackedWidget* beginnerEffectsContentStack_ = nullptr;
     QPushButton* beginnerBrowseEffectsButton_ = nullptr;
@@ -19866,6 +19953,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QString defaultUpdateChannel_ = "stable";
     bool onlineUpdateCheckInProgress_ = false;
     QString currentTheme_ = "BO3 Dark";
+    QString beginnerDepthPreviewSceneId_ = "shadows_of_evil";
     bool modified_ = false, loadingText_ = false, refreshingVectors_ = false, lastWriteTimeValid_ = false;
     bool beginnerUiMode_ = true;
     PreviewMode detectedPreviewMode_ = PreviewMode::HLSL;

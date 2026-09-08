@@ -710,13 +710,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    %2_sky = max(%2_sky, 0.0);\n"
                            "    color = lerp(color, %2_sky, saturate(%5));\n"
                            "    float %2_angle = acos(clamp(%2_mu, -1.0, 1.0));\n"
-                           "    float %2_disc = 1.0 - smoothstep(%6, %6 + %7, %2_angle);\n"
-                           "    float %2_softHalo = exp(-%2_angle * lerp(42.0, 11.0, saturate(%4)));\n"
+                           "    float %2_discRadius = max(%6, 0.0005);\n"
+                           "    float %2_disc = 1.0 - smoothstep(%2_discRadius, %2_discRadius + max(%7, 0.0004), %2_angle);\n"
+                           "    float %2_discNorm = saturate(%2_angle / %2_discRadius);\n"
+                           "    float %2_limb = sqrt(saturate(1.0 - %2_discNorm * %2_discNorm));\n"
+                           "    float %2_softHalo = exp(-%2_angle * lerp(72.0, 20.0, saturate(%4)));\n"
                            "    float %2_sunVisible = smoothstep(-0.018, 0.010, beginnerSunElevation);\n"
-                           "    float %2_discEnergy = 0.28 + %8 * 0.28;\n"
-                           "    float %2_haloEnergy = (0.035 + %8 * 0.018) * %4;\n"
-                           "    color += %2_warm * (%2_disc * %2_discEnergy + %2_softHalo * %2_haloEnergy) * %2_sunVisible;\n"
-                           "    color = lerp(color, color + %2_warm * 0.16, %2_horizon * saturate(%9) * %2_twilight * 0.55);\n")
+                           "    float %2_discEnergy = 0.16 + %8 * 0.14;\n"
+                           "    float %2_haloEnergy = (0.012 + %8 * 0.007) * %4;\n"
+                           "    float %2_discShape = %2_disc * (0.72 + 0.28 * %2_limb);\n"
+                           "    color += %2_warm * (%2_discShape * %2_discEnergy + %2_softHalo * %2_haloEnergy) * %2_sunVisible;\n"
+                           "    color = lerp(color, color + %2_warm * 0.12, %2_horizon * saturate(%9) * %2_twilight * 0.52);\n")
                 .arg(definition->name, tag, colorLiteral(sunColor), glow, atmosphere, size, softness, brightness, haze);
         }
         else if(effect.typeId == "sky_moon" && project.target == Target::Sky)
@@ -821,44 +825,35 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
             const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
             const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
-            out += QString("    // %1 - compact height-bounded volumetric cloud march adapted from the supplied Shadertoy weather model\n"
+            out += QString("    // %1 - continuous volumetric-look cloud deck without visible raymarch slices\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
                            "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
-                           "    float %2_cloudBase = 1.75 + %8 * 3.4;\n"
-                           "    float %2_cloudTop = %2_cloudBase + 1.15;\n"
-                           "    float %2_upper = smoothstep(0.012, 0.070, d.z);\n"
-                           "    float %2_viewZ = max(d.z, 0.030);\n"
-                           "    float %2_t0 = %2_cloudBase / %2_viewZ;\n"
-                           "    float %2_t1 = %2_cloudTop / %2_viewZ;\n"
-                           "    float %2_threshold = lerp(0.70, 0.36, saturate(%4));\n"
-                           "    float %2_trans = 1.0;\n"
-                           "    float3 %2_accum = 0.0;\n"
-                           "    float %2_jitter = BO3BeginnerHash31(float3(floor(input.position.xy), 19.0)) * 0.85;\n"
-                           "    [loop] for(int %2_i = 0; %2_i < 9; ++%2_i)\n"
-                           "    {\n"
-                           "        float %2_q = (float(%2_i) + 0.22 + %2_jitter * 0.45) / 9.0;\n"
-                           "        float %2_dist = lerp(%2_t0, %2_t1, saturate(%2_q));\n"
-                           "        float3 %2_world = d * %2_dist;\n"
-                           "        %2_world.xy += %2_wind * (t * %5 * 0.34);\n"
-                           "        float3 %2_p = float3(%2_world.xy * (%3 * 0.18), %2_world.z * 0.33);\n"
-                           "        float %2_low = BO3BeginnerFbm3(%2_p);\n"
-                           "        float %2_detail = BO3BeginnerFbm3(%2_p * 2.37 + float3(3.2,-2.1,5.4));\n"
-                           "        float %2_heightShape = smoothstep(0.02, 0.18, %2_q) * (1.0 - smoothstep(0.72, 0.99, %2_q));\n"
-                           "        float %2_field = %2_low - (1.0 - %2_detail) * 0.13;\n"
-                           "        float %2_density = smoothstep(%2_threshold, %2_threshold + 0.115, %2_field) * %2_heightShape * %2_upper;\n"
-                           "        float %2_lightField = BO3BeginnerFbm3(%2_p + beginnerSunDir * 0.42);\n"
-                           "        float %2_shadow = exp(-max(%2_lightField - %2_field + 0.08, 0.0) * 2.6);\n"
-                           "        float %2_forward = pow(saturate(dot(d, beginnerSunDir)), 10.0) * beginnerDaylight;\n"
-                           "        float %2_light = saturate(0.24 + %2_shadow * 0.72 + %2_forward * 0.22);\n"
-                           "        float3 %2_cloudColor = lerp(%10, %11, %2_light);\n"
-                           "        %2_cloudColor *= %7 * lerp(0.58, 1.0, beginnerDaylight);\n"
-                           "        float %2_alpha = (1.0 - exp(-%2_density * %6 * 0.72));\n"
-                           "        %2_accum += %2_cloudColor * (%2_alpha * %2_trans);\n"
-                           "        %2_trans *= (1.0 - %2_alpha);\n"
-                           "        if(%2_trans < 0.035) break;\n"
-                           "    }\n"
-                           "    float %2_horizonFade = smoothstep(0.010, 0.055, d.z);\n"
-                           "    color = lerp(color, color * %2_trans + %2_accum, %2_horizonFade);\n")
+                           "    float %2_layerHeight = 1.8 + %8 * 3.2;\n"
+                           "    float %2_viewZ = max(d.z, 0.035);\n"
+                           "    float %2_cloudT = %2_layerHeight / %2_viewZ;\n"
+                           "    float2 %2_world = d.xy * %2_cloudT + %2_wind * (t * %5 * 0.32);\n"
+                           "    float3 %2_p = float3(%2_world * (%3 * 0.16), t * %5 * 0.018);\n"
+                           "    float %2_broad = BO3BeginnerFbm3(%2_p * 0.62 + float3(1.7,-2.4,0.9));\n"
+                           "    float %2_shape = BO3BeginnerFbm3(%2_p);\n"
+                           "    float %2_detail = BO3BeginnerFbm3(%2_p * 2.15 + float3(4.3,1.2,-3.7));\n"
+                           "    float %2_field = %2_broad * 0.34 + %2_shape * 0.78 - (1.0 - %2_detail) * 0.15;\n"
+                           "    float %2_threshold = lerp(0.82, 0.39, saturate(%4));\n"
+                           "    float %2_density = smoothstep(%2_threshold, %2_threshold + 0.13, %2_field);\n"
+                           "    %2_density = %2_density * %2_density * (3.0 - 2.0 * %2_density);\n"
+                           "    float %2_skyMask = smoothstep(0.014, 0.075, d.z);\n"
+                           "    float3 %2_sunStep = float3(beginnerSunDir.xy * 0.24, beginnerSunDir.z * 0.11);\n"
+                           "    float %2_sunField = BO3BeginnerFbm3(%2_p + %2_sunStep);\n"
+                           "    float %2_lightThrough = saturate(0.48 + (%2_shape - %2_sunField) * 1.8);\n"
+                           "    float %2_forward = pow(saturate(dot(d, beginnerSunDir)), 22.0) * beginnerDaylight;\n"
+                           "    float %2_edge = smoothstep(0.04, 0.42, 1.0 - %2_density) * %2_forward;\n"
+                           "    float %2_heightLight = saturate(0.52 + d.z * 0.55);\n"
+                           "    float %2_light = saturate(0.20 + %2_lightThrough * 0.62 + %2_heightLight * 0.18 + %2_edge * 0.38);\n"
+                           "    float3 %2_cloudColor = lerp(%10, %11, %2_light);\n"
+                           "    %2_cloudColor *= %7 * lerp(0.62, 1.0, beginnerDaylight);\n"
+                           "    float %2_alpha = saturate(%2_density * %6 * %2_skyMask);\n"
+                           "    float %2_horizonAtmosphere = smoothstep(0.012, 0.12, d.z);\n"
+                           "    %2_cloudColor = lerp(color, %2_cloudColor, %2_horizonAtmosphere);\n"
+                           "    color = lerp(color, %2_cloudColor, %2_alpha);\n")
                 .arg(definition->name)
                 .arg(tag)
                 .arg(scale)
@@ -1779,15 +1774,15 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("softness", "Softness", "Feathering around cloud edges.", 0.02, 0.35, 0.01, 0.14),
                    FloatParam("direction", "Wind Direction", "Direction the cloud field travels, in degrees around the horizon.", 0.0, 360.0, 1.0, 25.0),
                    FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts. Negative values reverse it.", -3.0, 3.0, 0.01, 0.22)}),
-        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build softer height-bounded cloud volumes with broad shapes, detail erosion, directional wind and sunlight.", "Sky & Environment",
+        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build a soft perspective cloud deck with broad formations, detail erosion, directional wind and sunlight without visible slice bands.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color inside the darker cloud cavities.", "#54606D"),
                    ColorParam("light_color", "Light Color", "Color on the brighter parts of the cloud volume.", "#F2F4F6"),
                    FloatParam("brightness", "Brightness", "Cloud brightness before atmospheric blending.", 0.15, 2.0, 0.01, 0.92),
-                   FloatParam("opacity", "Density", "Overall cloud-volume density.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("opacity", "Density", "Overall cloud-volume density.", 0.0, 1.0, 0.01, 0.62),
                    FloatParam("height", "Cloud Height", "Raise or lower the volumetric layer relative to the horizon.", -0.35, 0.75, 0.01, 0.16),
-                   FloatParam("scale", "Formation Scale", "Scale of the 3D cloud volume.", 0.5, 5.0, 0.05, 1.35),
-                   FloatParam("coverage", "Coverage", "Higher values fill more of the sky with cloud.", 0.0, 1.0, 0.01, 0.52),
+                   FloatParam("scale", "Formation Scale", "Scale of the cloud formations.", 0.5, 5.0, 0.05, 1.10),
+                   FloatParam("coverage", "Coverage", "Higher values fill more of the sky with cloud.", 0.0, 1.0, 0.01, 0.48),
                    FloatParam("direction", "Wind Direction", "Direction the cloud volume moves, in degrees around the horizon.", 0.0, 360.0, 1.0, 35.0),
                    FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts. Negative values reverse it.", -2.0, 2.0, 0.01, 0.10)}),
         EffectDef("sky_water", "Still Water Reflection", "Turn the lower hemisphere into a still-water reflection of the complete procedural sky, with subtle animated ripples and tint.", "Sky & Environment",
@@ -2001,7 +1996,7 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["horizonColor"] = "#A9BAC7";
         project.settings["groundColor"] = "#27323D";
         add("sky_sun", {{"color", "#F4F6F8"}, {"time_of_day", 13.2}, {"azimuth", 0.30}, {"height", 0.88}, {"size", 0.0048}, {"softness", 0.0015}, {"brightness", 1.65}, {"glow", 0.24}, {"atmosphere", 0.78}, {"haze", 0.24}});
-        add("sky_realistic_clouds", {{"shadow_color", "#455463"}, {"light_color", "#E8EDF1"}, {"brightness", 0.88}, {"opacity", 0.74}, {"height", 0.18}, {"scale", 1.45}, {"coverage", 0.64}, {"direction", 35.0}, {"speed", 0.14}});
+        add("sky_realistic_clouds", {{"shadow_color", "#596774"}, {"light_color", "#EDF1F4"}, {"brightness", 0.92}, {"opacity", 0.64}, {"height", 0.20}, {"scale", 1.08}, {"coverage", 0.50}, {"direction", 35.0}, {"speed", 0.14}});
     }
     else if(target == Target::Sky && id == "starry_night")
     {
