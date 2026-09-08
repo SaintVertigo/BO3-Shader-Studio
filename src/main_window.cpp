@@ -1477,6 +1477,11 @@ public:
                 return "Beginner PostFX did not use the proven BO3 bilinearClampler binding.";
             if(postHlsl.contains("frameBufferSampler"))
                 return "Beginner PostFX still emits a synthetic framebuffer sampler name.";
+            if(!postHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               !postHlsl.contains("BO3BeginnerGrainLayer") ||
+               !postHlsl.contains("BO3BeginnerPsxDither") ||
+               !postHlsl.contains("BO3 float-Z diagonal finite differences"))
+                return "Beginner PostFX quality/depth modules are missing from generated BO3 coverage HLSL.";
 
             const beginner::Project material = projects[1].first;
             const QString materialHlsl = beginner::generateHlsl(material);
@@ -1516,6 +1521,14 @@ public:
                 return "Beginner Sky should use BO3's stock vs_sky stage rather than an authored fullscreen vertex shader.";
             if(!skyHlsl.contains("float t = gameTime.w;"))
                 return "Beginner Sky animation is not using its declared BO3 gameTime constant.";
+            if(!skyHlsl.contains("BO3BeginnerAuroraNoise") ||
+               !skyHlsl.contains("BO3BeginnerFbm3") ||
+               !skyHlsl.contains("BO3BeginnerNebulaField") ||
+               !skyHlsl.contains("compact volumetric raymarch"))
+                return "Beginner Sky quality modules are missing from generated BO3 coverage HLSL.";
+            if(skyHlsl.contains("return float4(saturate(color)") ||
+               !skyHlsl.contains("65024.0"))
+                return "Beginner Sky final output is still clipping procedural HDR effects to 0..1.";
 
             const QJsonObject serialized = beginner::projectToJson(material);
             beginner::Project roundTrip;
@@ -1546,8 +1559,8 @@ public:
                !beginner::supportsTarget(*gradient, beginner::Target::Sky) ||
                beginner::supportsTarget(*gradient, beginner::Target::Material))
                 return "Beginner Color Gradient target gating is incorrect.";
-            if(beginner::effectDefinitions().size() < 20)
-                return "Beginner V3 effect library is incomplete.";
+            if(beginner::effectDefinitions().size() < 40)
+                return "Beginner effect library is incomplete.";
 
             for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             {
@@ -13489,7 +13502,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(id == "hologram") return "Edge glow + scanlines + flicker";
         if(id == "sunset") return "Warm horizon + deep blue sky";
         if(id == "dream_sky") return "Purple-blue sky + gentle pulse";
-        return "Ready-made BO3-safe starting look";
+        return "Ready-made BO3-safe preset";
     }
 
     static QPixmap beginnerEffectPreviewPixmap(const beginner::EffectDefinition& definition, bool supported)
@@ -13730,6 +13743,122 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     path.lineTo(x, y + std::sin((x - inner.left()) * 0.12 + y * 0.08) * 3.5);
                 painter.drawPath(path);
             }
+        }
+        else if(id == "psx_dithering")
+        {
+            painter.fillRect(inner, QColor("#17212B"));
+            const QColor cols[4] = {QColor("#203A5B"), QColor("#476A8D"), QColor("#8A6D6F"), QColor("#D0B477")};
+            for(int y = 0; y < 8; ++y)
+                for(int x = 0; x < 16; ++x)
+                    painter.fillRect(QRectF(inner.left()+x*inner.width()/16.0, inner.top()+y*inner.height()/8.0,
+                                            inner.width()/16.0+1, inner.height()/8.0+1), cols[(x+y*3)&3]);
+            painter.setPen(QPen(QColor(10,10,10,110),1.0));
+            for(int y=0;y<8;++y) for(int x=0;x<16;++x)
+                if(((x*5+y*3)&3)==0) painter.drawPoint(QPointF(inner.left()+x*inner.width()/16.0+2, inner.top()+y*inner.height()/8.0+2));
+        }
+        else if(id == "sharpness")
+        {
+            fillLinear(QColor("#253544"), QColor("#89A6BD"));
+            painter.setPen(QPen(QColor("#E8F5FF"), 2.0));
+            painter.drawRect(QRectF(inner.left()+20, inner.top()+18, inner.width()-40, inner.height()-36));
+            painter.drawLine(QPointF(inner.left()+26, inner.bottom()-24), QPointF(inner.center().x(), inner.top()+28));
+            painter.drawLine(QPointF(inner.center().x(), inner.top()+28), QPointF(inner.right()-28, inner.bottom()-30));
+        }
+        else if(id == "pixel_resolution")
+        {
+            painter.fillRect(inner, QColor("#10161D"));
+            const int sx=12, sy=6;
+            for(int y=0;y<sy;++y) for(int x=0;x<sx;++x)
+            {
+                const int h=(x*37+y*53)&255;
+                painter.fillRect(QRectF(inner.left()+x*inner.width()/sx,inner.top()+y*inner.height()/sy,
+                                        inner.width()/sx+1,inner.height()/sy+1), QColor::fromHsl(h,130,105+(y%3)*24));
+            }
+        }
+        else if(id == "vhs_tape" || id == "vhs_dropouts")
+        {
+            fillLinear(QColor("#1B2832"), QColor("#3D4650"));
+            painter.setPen(QPen(QColor(220,235,235,110),1.0));
+            for(int y=static_cast<int>(inner.top())+5;y<inner.bottom();y+=5)
+                painter.drawLine(QPointF(inner.left(),y),QPointF(inner.right(),y));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(240,245,245,90));
+            painter.drawRect(QRectF(inner.left()+8,inner.center().y()-4,inner.width()*0.62,7));
+            painter.setBrush(QColor(70,210,225,100)); painter.drawRect(QRectF(inner.left()+18,inner.top()+15,inner.width()*0.38,5));
+            painter.setBrush(QColor(230,70,80,90)); painter.drawRect(QRectF(inner.left()+25,inner.top()+21,inner.width()*0.38,5));
+        }
+        else if(id == "sky_sun")
+        {
+            fillLinear(QColor("#173B72"), QColor("#E88963"), true);
+            QRadialGradient g(QPointF(inner.right()-42, inner.top()+29), 31);
+            g.setColorAt(0.0,QColor("#FFF5C8")); g.setColorAt(0.25,QColor("#FFD27C")); g.setColorAt(1.0,QColor(255,180,85,0));
+            painter.fillRect(inner,QBrush(g));
+        }
+        else if(id == "sky_moon")
+        {
+            painter.fillRect(inner,QColor("#071126"));
+            QRadialGradient g(QPointF(inner.right()-46, inner.top()+30), 30);
+            g.setColorAt(0.0,QColor("#F5F8FF")); g.setColorAt(0.22,QColor("#D5E3FF")); g.setColorAt(0.44,QColor(105,140,205,70)); g.setColorAt(1.0,QColor(0,0,0,0));
+            painter.fillRect(inner,QBrush(g));
+            painter.setPen(Qt::NoPen); painter.setBrush(QColor("#F0F4FF")); painter.drawEllipse(QPointF(inner.right()-46,inner.top()+30),10,10);
+            painter.setBrush(QColor("#071126")); painter.drawEllipse(QPointF(inner.right()-41,inner.top()+27),9,10);
+        }
+        else if(id == "sky_haze")
+        {
+            QLinearGradient g(inner.topLeft(),inner.bottomLeft());
+            g.setColorAt(0.0,QColor("#31547B")); g.setColorAt(0.42,QColor("#6D87A3")); g.setColorAt(0.63,QColor("#D2BEAD")); g.setColorAt(1.0,QColor("#6D5E62"));
+            painter.fillRect(inner,g);
+            QLinearGradient haze(inner.topLeft(),inner.bottomLeft()); haze.setColorAt(0.0,QColor(255,255,255,0)); haze.setColorAt(0.58,QColor(225,232,238,150)); haze.setColorAt(0.74,QColor(225,232,238,0));
+            painter.fillRect(inner,haze);
+        }
+        else if(id == "sky_stars")
+        {
+            painter.fillRect(inner,QColor("#061126"));
+            painter.setPen(Qt::NoPen);
+            for(int i=0;i<34;++i)
+            {
+                int x=static_cast<int>(inner.left())+5+(i*47)%qMax(6,static_cast<int>(inner.width()-10));
+                int y=static_cast<int>(inner.top())+5+(i*29)%qMax(6,static_cast<int>(inner.height()-10));
+                int r=(i%7==0)?2:1;
+                painter.setBrush(i%4==0?QColor("#BBD9FF"):QColor("#F4F6FF")); painter.drawEllipse(QPointF(x,y),r,r);
+            }
+        }
+        else if(id == "sky_clouds" || id == "sky_realistic_clouds")
+        {
+            fillLinear(QColor("#436B8C"), QColor("#B8C9D8"), true);
+            painter.setPen(Qt::NoPen);
+            for(int i=0;i<8;++i)
+            {
+                const qreal x=inner.left()+18+(i*31)%static_cast<int>(inner.width()-36);
+                const qreal y=inner.top()+20+(i%3)*16;
+                QColor c=id=="sky_realistic_clouds"?QColor(222,229,235,200):QColor(235,241,245,185);
+                painter.setBrush(c); painter.drawEllipse(QRectF(x-18,y-9,46,22));
+                if(id=="sky_realistic_clouds") { painter.setBrush(QColor(74,91,110,90)); painter.drawEllipse(QRectF(x-14,y+2,42,15)); }
+            }
+        }
+        else if(id == "sky_mountains")
+        {
+            fillLinear(QColor("#527397"), QColor("#D6A582"), true);
+            QPainterPath far; far.moveTo(inner.left(),inner.bottom());
+            for(int x=0;x<=12;++x){ qreal px=inner.left()+x*inner.width()/12.0; qreal py=inner.center().y()+9-std::abs(std::sin(x*1.37))*23; far.lineTo(px,py); }
+            far.lineTo(inner.right(),inner.bottom()); far.closeSubpath(); painter.fillPath(far,QColor("#53657A"));
+            QPainterPath near; near.moveTo(inner.left(),inner.bottom());
+            for(int x=0;x<=10;++x){ qreal px=inner.left()+x*inner.width()/10.0; qreal py=inner.center().y()+20-std::abs(std::sin(x*1.91+0.6))*31; near.lineTo(px,py); }
+            near.lineTo(inner.right(),inner.bottom()); near.closeSubpath(); painter.fillPath(near,QColor("#151B24"));
+        }
+        else if(id == "sky_aurora")
+        {
+            painter.fillRect(inner,QColor("#061528"));
+            QLinearGradient g(inner.topLeft(),inner.bottomRight()); g.setColorAt(0.0,QColor(30,255,145,0)); g.setColorAt(0.45,QColor(45,235,155,210)); g.setColorAt(0.72,QColor(91,105,255,165)); g.setColorAt(1.0,QColor(50,70,180,0));
+            QPainterPath pth; pth.moveTo(inner.left(),inner.bottom()-8);
+            for(int x=0;x<=60;++x){ qreal px=inner.left()+x*inner.width()/60.0; qreal py=inner.center().y()+std::sin(x*0.31)*13+std::sin(x*0.09)*9; pth.lineTo(px,py); }
+            pth.lineTo(inner.right(),inner.bottom()); pth.lineTo(inner.left(),inner.bottom()); pth.closeSubpath(); painter.fillPath(pth,g);
+        }
+        else if(id == "sky_nebula")
+        {
+            painter.fillRect(inner,QColor("#020817"));
+            QRadialGradient g1(QPointF(inner.left()+inner.width()*0.38,inner.center().y()),inner.width()*0.35); g1.setColorAt(0,QColor(75,80,255,220)); g1.setColorAt(0.5,QColor(145,52,190,120)); g1.setColorAt(1,QColor(0,0,0,0)); painter.fillRect(inner,QBrush(g1));
+            QRadialGradient g2(QPointF(inner.right()-35,inner.top()+24),inner.width()*0.24); g2.setColorAt(0,QColor(40,210,220,140)); g2.setColorAt(1,QColor(0,0,0,0)); painter.fillRect(inner,QBrush(g2));
         }
         else if(id == "edge_glow")
         {
@@ -14264,9 +14393,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
         {
-            // Beginner mode is always live: the user should see slider changes
-            // immediately even if Advanced mode previously disabled Live Update.
-            liveCompileTimer_.start();
+            // Beginner mode uses a throttle rather than the editor's debounce.
+            // Do not restart an active timer on every slider tick: that old
+            // behavior meant the user had to stop dragging before the preview
+            // could ever compile. This caps generated-shader rebuilds at about
+            // 11 Hz while still updating continuously during a drag.
+            if(beginnerUiMode_)
+            {
+                if(!liveCompileTimer_.isActive())
+                {
+                    liveCompileTimer_.setInterval(90);
+                    liveCompileTimer_.start();
+                }
+            }
+            else
+            {
+                liveCompileTimer_.setInterval(550);
+                liveCompileTimer_.start();
+            }
         }
     }
 
@@ -14527,7 +14671,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 availability->setWordWrap(true);
                 if(supported)
                 {
-                    availability->setText(QString::fromUtf8("✓ Works with this shader"));
+                    const bool usesSceneDepth =
+                        definition.id == "cartoon_outlines" ||
+                        definition.id == "ambient_occlusion" ||
+                        definition.id == "depth_fog";
+                    availability->setText(usesSceneDepth
+                        ? QString::fromUtf8("✓ Works with this shader   •   Uses scene depth")
+                        : QString::fromUtf8("✓ Works with this shader"));
                     availability->setStyleSheet("QLabel { color:#84D4A0; font-size:10px; }");
                 }
                 else
@@ -14625,8 +14775,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!beginnerProject_.effects.isEmpty())
         {
             const auto answer = QMessageBox::question(
-                this, "Apply Starting Look",
-                "Replace the current effects and colors with this starting look?",
+                this, "Apply Preset",
+                "Replace the current effects and colors with this preset?",
                 QMessageBox::Yes | QMessageBox::No);
             if(answer != QMessageBox::Yes) return;
         }
@@ -14905,7 +15055,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         leftLayout->setContentsMargins(0, 0, 6, 0);
         leftLayout->setSpacing(8);
 
-        auto* projectGroup = new QGroupBox("2. Start with a look");
+        auto* projectGroup = new QGroupBox("2. Choose a starting point");
         auto* projectLayout = new QVBoxLayout(projectGroup);
         auto* nameRow = new QHBoxLayout();
         auto* nameLabel = new QLabel("Name");
@@ -14914,7 +15064,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         nameRow->addWidget(nameLabel);
         nameRow->addWidget(beginnerProjectNameEdit_, 1);
         projectLayout->addLayout(nameRow);
-        auto* presetHelp = new QLabel("Pick a ready-made starting look, or begin blank.");
+        auto* presetHelp = new QLabel("Choose a preset, or start with a blank shader.");
         presetHelp->setObjectName("CompactHelp");
         presetHelp->setWordWrap(true);
         projectLayout->addWidget(presetHelp);

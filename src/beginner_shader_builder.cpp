@@ -212,13 +212,21 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "film_grain" && project.target == Target::PostFx && hasUv && hasTime)
         {
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString grainSize = floatLiteral(parameterFloat(effect, *definition, "grain_size"));
             const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            out += QString("    // %1\n"
-                           "    float %2_grain = BO3BeginnerHash21(floor(uv * %3) + floor(t * %4 * 59.0));\n"
-                           "    float %2_lumaMask = 0.45 + 0.55 * saturate(1.0 - dot(saturate(color), float3(0.2126, 0.7152, 0.0722)));\n"
-                           "    color += (%2_grain - 0.5) * %5 * %2_lumaMask;\n")
-                .arg(definition->name, tag, scale, speed, amount);
+            out += QString("    // %1 - layered pixel-space grain, modulated like photographed film\n"
+                           "    float %2_fine = BO3BeginnerGrainLayer(uv, %3 * 1.00, 0.35, 0.0, %4);\n"
+                           "    float %2_medium = BO3BeginnerGrainLayer(uv, %3 * 1.56, 1.91, 7.0, %4);\n"
+                           "    float %2_coarse = BO3BeginnerGrainLayer(uv, %3 * 0.67, -1.17, 13.0, %4);\n"
+                           "    float %2_grain = %2_fine * 0.58 + %2_medium * 0.27 + %2_coarse * 0.15;\n"
+                           "    float3 %2_responseColor = max(color, 0.0) / (1.0 + max(color, 0.0));\n"
+                           "    float %2_luma = dot(%2_responseColor, float3(0.299, 0.587, 0.114));\n"
+                           "    float %2_midtone = pow(saturate(1.0 - abs(%2_luma * 2.0 - 1.0)), 1.35);\n"
+                           "    float %2_shadow = 1.0 - smoothstep(0.35, 0.95, %2_luma);\n"
+                           "    float %2_response = saturate(0.18 + %2_midtone * 0.67 + %2_shadow * 0.15);\n"
+                           "    color += color * %2_grain * (%5 * 0.055) * %2_response;\n"
+                           "    color += %2_grain.xxx * (%5 * 0.0032) * %2_shadow;\n")
+                .arg(definition->name, tag, grainSize, speed, amount);
         }
         else if(effect.typeId == "uv_scroll" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -314,25 +322,34 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QColor outlineColor = parameterColor(effect, *definition, "color");
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
             const QString thickness = floatLiteral(parameterFloat(effect, *definition, "thickness"));
-            const QString sensitivity = floatLiteral(parameterFloat(effect, *definition, "depth_sensitivity"));
+            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "depth_threshold"));
             const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
-            out += QString("    // %1\n"
-                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * %3;\n"
-                           "    float %2_depthC = DepthSampler.Sample(bilinearClampler, saturate(uv)).r;\n"
-                           "    float %2_depthR = DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r;\n"
-                           "    float %2_depthL = DepthSampler.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x, 0.0))).r;\n"
-                           "    float %2_depthU = DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r;\n"
-                           "    float %2_depthD = DepthSampler.Sample(bilinearClampler, saturate(uv - float2(0.0, %2_texel.y))).r;\n"
-                           "    float %2_depthEdge = abs(%2_depthC - %2_depthR) + abs(%2_depthC - %2_depthL) + abs(%2_depthC - %2_depthU) + abs(%2_depthC - %2_depthD);\n"
-                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).rgb);\n"
-                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).rgb);\n"
-                           "    float %2_luma = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
-                           "    float %2_lumaEdge = abs(%2_luma - dot(%2_sceneR, float3(0.2126, 0.7152, 0.0722))) + abs(%2_luma - dot(%2_sceneU, float3(0.2126, 0.7152, 0.0722)));\n"
-                           "    float %2_edge = saturate(%2_depthEdge * (220.0 * %4) + %2_lumaEdge * 3.0);\n"
-                           "    float %2_steps = max(2.0, round(%5));\n"
+            const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail_edges"));
+            out += QString("    // %1 - BO3 float-Z diagonal finite differences + optional scene-detail edges\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
+                           "    float %2_halfFloor = floor(%3 * 0.5);\n"
+                           "    float %2_halfCeil = ceil(%3 * 0.5);\n"
+                           "    float2 %2_blUv = saturate(uv - %2_texel * %2_halfFloor);\n"
+                           "    float2 %2_trUv = saturate(uv + %2_texel * %2_halfCeil);\n"
+                           "    float2 %2_brUv = saturate(uv + float2(%2_texel.x * %2_halfCeil, -%2_texel.y * %2_halfFloor));\n"
+                           "    float2 %2_tlUv = saturate(uv + float2(-%2_texel.x * %2_halfFloor, %2_texel.y * %2_halfCeil));\n"
+                           "    float %2_d0 = DepthSampler.Sample(bilinearClampler, %2_blUv).r;\n"
+                           "    float %2_d1 = DepthSampler.Sample(bilinearClampler, %2_trUv).r;\n"
+                           "    float %2_d2 = DepthSampler.Sample(bilinearClampler, %2_brUv).r;\n"
+                           "    float %2_d3 = DepthSampler.Sample(bilinearClampler, %2_tlUv).r;\n"
+                           "    float2 %2_dd = float2(%2_d1 - %2_d0, %2_d3 - %2_d2);\n"
+                           "    float %2_depthEdge = length(%2_dd) * 100.0;\n"
+                           "    float %2_relativeThreshold = %4 * max(%2_d0, 0.0001);\n"
+                           "    float %2_edge = step(%2_relativeThreshold, %2_depthEdge);\n"
+                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x * %3, 0.0))).rgb);\n"
+                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y * %3))).rgb);\n"
+                           "    float %2_luma = dot(color, float3(0.299, 0.587, 0.114));\n"
+                           "    float %2_detailEdge = saturate((abs(%2_luma - dot(%2_sceneR, float3(0.299,0.587,0.114))) + abs(%2_luma - dot(%2_sceneU, float3(0.299,0.587,0.114)))) * 7.5);\n"
+                           "    %2_edge = saturate(max(%2_edge, %2_detailEdge * %5));\n"
+                           "    float %2_steps = max(2.0, round(%6));\n"
                            "    float3 %2_toon = floor(saturate(color) * (%2_steps - 1.0) + 0.5) / (%2_steps - 1.0);\n"
-                           "    color = lerp(%2_toon, %6, %2_edge * %7);\n")
-                .arg(definition->name, tag, thickness, sensitivity, levels, colorLiteral(outlineColor), strength);
+                           "    color = lerp(%2_toon, %7, saturate(%2_edge * %8));\n")
+                .arg(definition->name, tag, thickness, threshold, detail, levels, colorLiteral(outlineColor), strength);
         }
         else if(effect.typeId == "ambient_occlusion" && project.target == Target::PostFx && hasUv)
         {
@@ -407,19 +424,41 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
             const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
             const QString smear = floatLiteral(parameterFloat(effect, *definition, "smear"));
-            out += QString("    // %1\n"
+            const QString bend = floatLiteral(parameterFloat(effect, *definition, "bend"));
+            const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail"));
+            out += QString("    // %1 - gradient-aligned brush strokes with jittered multi-scale cells\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
-                           "    float2 %2_cell = float2(%3, max(1.0, %3 * (%2_rt.y / max(%2_rt.x, 1.0))));\n"
-                           "    float2 %2_uv0 = (floor(uv * %2_cell) + 0.5) / %2_cell;\n"
-                           "    float2 %2_jitter = (float2(BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 1.3), BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 7.1)) - 0.5) * PostFx_GetRenderTargetSize().zw * %4 * 120.0;\n"
-                           "    float3 %2_a = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_uv0 - %2_jitter)).rgb);\n"
-                           "    float3 %2_b = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_uv0 + %2_jitter)).rgb);\n"
-                           "    float3 %2_paint = lerp(%2_a, %2_b, 0.5 + 0.5 * BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 4.9));\n"
-                           "    float %2_luma = dot(%2_paint, float3(0.2126, 0.7152, 0.0722));\n"
-                           "    float %2_streak = 0.75 + 0.25 * sin((uv.x + uv.y * 0.35) * %3 * 5.5 + %2_luma * 9.0);\n"
-                           "    %2_paint *= %2_streak;\n"
-                           "    color = lerp(color, %2_paint, %5);\n")
-                .arg(definition->name, tag, scale, smear, strength);
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
+                           "    float2 %2_cells = float2(%3, max(1.0, %3 * %2_rt.y / max(%2_rt.x,1.0)));\n"
+                           "    float2 %2_cellId = floor(uv * %2_cells);\n"
+                           "    float2 %2_center = (%2_cellId + 0.5) / %2_cells;\n"
+                           "    float2 %2_jitter = float2(BO3BeginnerHash21(%2_cellId + 2.7), BO3BeginnerHash21(%2_cellId + 8.3)) - 0.5;\n"
+                           "    %2_center += %2_jitter / %2_cells * 0.72;\n"
+                           "    float2 %2_gradStep = %2_texel * lerp(1.0, 4.0, %7);\n"
+                           "    float3 %2_left = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center - float2(%2_gradStep.x,0))).rgb);\n"
+                           "    float3 %2_right = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center + float2(%2_gradStep.x,0))).rgb);\n"
+                           "    float3 %2_up = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center - float2(0,%2_gradStep.y))).rgb);\n"
+                           "    float3 %2_down = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center + float2(0,%2_gradStep.y))).rgb);\n"
+                           "    float2 %2_grad = float2(dot(%2_right-%2_left,float3(0.299,0.587,0.114)), dot(%2_down-%2_up,float3(0.299,0.587,0.114)));\n"
+                           "    float2 %2_normal = normalize(%2_grad + float2(1e-5,0.0));\n"
+                           "    float2 %2_tangent = float2(-%2_normal.y, %2_normal.x);\n"
+                           "    float2 %2_local = (uv - %2_center) * %2_cells;\n"
+                           "    float2 %2_brush = float2(dot(%2_local,%2_normal), dot(%2_local,%2_tangent));\n"
+                           "    %2_brush.x += %2_brush.y * %2_brush.y * %6 * 0.22;\n"
+                           "    float %2_width = 0.30 + BO3BeginnerHash21(%2_cellId + 4.1) * 0.18;\n"
+                           "    float %2_length = 0.75 + BO3BeginnerHash21(%2_cellId + 6.4) * 0.55;\n"
+                           "    float %2_mask = 1.0 - smoothstep(0.78, 1.02, length(float2(%2_brush.x/max(%2_width,0.01), %2_brush.y/max(%2_length,0.01))));\n"
+                           "    float2 %2_smearUv = %2_tangent * %2_texel * (%5 * 12.0);\n"
+                           "    float3 %2_s0 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center - %2_smearUv)).rgb);\n"
+                           "    float3 %2_s1 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center)).rgb);\n"
+                           "    float3 %2_s2 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center + %2_smearUv)).rgb);\n"
+                           "    float3 %2_stroke = (%2_s0 + %2_s1 * 2.0 + %2_s2) * 0.25;\n"
+                           "    float %2_texture = 0.88 + 0.12 * sin((%2_brush.y * 17.0 + %2_brush.x * 4.0) + BO3BeginnerHash21(%2_cellId) * 6.2831853);\n"
+                           "    %2_stroke *= %2_texture;\n"
+                           "    float3 %2_base = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_center)).rgb);\n"
+                           "    float3 %2_paint = lerp(%2_base, %2_stroke, %2_mask);\n"
+                           "    color = lerp(color, %2_paint, %4);\n")
+                .arg(definition->name, tag, scale, strength, smear, bend, detail);
         }
         else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv)
         {
@@ -461,6 +500,291 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_uv).rgb);\n"
                            "    color = lerp(color, %2_sample, %6);\n")
                 .arg(definition->name, tag, scale, speed, amount, strength);
+        }
+        else if(effect.typeId == "psx_dithering" && project.target == Target::PostFx && hasUv)
+        {
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString precision = floatLiteral(parameterFloat(effect, *definition, "color_precision"));
+            out += QString("    // %1 - ordered 4x4 screen-space dithering\n"
+                           "    int %2_dx = ((int)input.position.x) & 3;\n"
+                           "    int %2_dy = ((int)input.position.y) & 3;\n"
+                           "    float %2_d = BO3BeginnerPsxDither[%2_dx][%2_dy];\n"
+                           "    float3 %2_rgb255 = saturate(color) * 255.0;\n"
+                           "    float3 %2_dithered = saturate((%2_rgb255 + (%2_d * 0.5 - 4.0)) / 255.0);\n"
+                           "    float3 %2_lowPrecision = floor(%2_dithered * 31.0 + 0.5) / 31.0;\n"
+                           "    %2_dithered = lerp(%2_dithered, %2_lowPrecision, %3);\n"
+                           "    color = lerp(color, %2_dithered, %4);\n")
+                .arg(definition->name, tag, precision, strength);
+        }
+        else if(effect.typeId == "sharpness" && project.target == Target::PostFx && hasUv)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "threshold"));
+            const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
+            out += QString("    // %1 - edge-aware 8-neighbor sharpen\n"
+                           "    float2 %2_step = PostFx_GetRenderTargetSize().zw * %3;\n"
+                           "    float3 %2_c1 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,-%2_step.y))).rgb);\n"
+                           "    float3 %2_c2 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,-%2_step.y))).rgb);\n"
+                           "    float3 %2_c3 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,-%2_step.y))).rgb);\n"
+                           "    float3 %2_c4 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,0.0))).rgb);\n"
+                           "    float3 %2_c5 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,0.0))).rgb);\n"
+                           "    float3 %2_c6 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,%2_step.y))).rgb);\n"
+                           "    float3 %2_c7 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,%2_step.y))).rgb);\n"
+                           "    float3 %2_c8 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,%2_step.y))).rgb);\n"
+                           "    float3 %2_d1 = %2_c6 + %2_c4 + %2_c1 - %2_c3 - %2_c5 - %2_c8;\n"
+                           "    float3 %2_d2 = %2_c4 + %2_c1 + %2_c2 - %2_c5 - %2_c8 - %2_c7;\n"
+                           "    float3 %2_d3 = %2_c1 + %2_c2 + %2_c3 - %2_c8 - %2_c7 - %2_c6;\n"
+                           "    float3 %2_d4 = %2_c2 + %2_c3 + %2_c5 - %2_c7 - %2_c6 - %2_c4;\n"
+                           "    float %2_edge = length(abs(%2_d1)+abs(%2_d2)+abs(%2_d3)+abs(%2_d4)) / 6.0;\n"
+                           "    float3 %2_neighbor = (%2_c1+%2_c2+%2_c3+%2_c4+%2_c5+%2_c6+%2_c7+%2_c8) * 0.125;\n"
+                           "    float3 %2_sharp = max(color + (color - %2_neighbor) * %4, 0.0);\n"
+                           "    color = lerp(color, %2_sharp, smoothstep(%5, %5 * 2.0 + 0.0001, %2_edge));\n")
+                .arg(definition->name, tag, radius, amount, threshold);
+        }
+        else if(effect.typeId == "pixel_resolution" && project.target == Target::PostFx && hasUv)
+        {
+            const QString width = floatLiteral(parameterFloat(effect, *definition, "width"));
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            out += QString("    // %1\n"
+                           "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
+                           "    float2 %2_virtual = float2(%3, max(1.0, %3 * %2_rt.y / max(%2_rt.x,1.0)));\n"
+                           "    float2 %2_pixelUv = (floor(uv * %2_virtual) + 0.5) / %2_virtual;\n"
+                           "    float3 %2_pixelColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_pixelUv)).rgb);\n"
+                           "    color = lerp(color, %2_pixelColor, %4);\n")
+                .arg(definition->name, tag, width, strength);
+        }
+        else if(effect.typeId == "vhs_tape" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString jitter = floatLiteral(parameterFloat(effect, *definition, "jitter"));
+            const QString chroma = floatLiteral(parameterFloat(effect, *definition, "chroma"));
+            const QString tracking = floatLiteral(parameterFloat(effect, *definition, "tracking"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1 - row jitter, tracking tear and analog color separation\n"
+                           "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
+                           "    float %2_frame = floor(t * %6 * 30.0);\n"
+                           "    float %2_row = floor(uv.y * %2_rt.y * 0.25);\n"
+                           "    float %2_rowNoise = BO3BeginnerHash21(float2(%2_row, %2_frame));\n"
+                           "    float %2_fineNoise = BO3BeginnerHash21(float2(floor(uv.y * %2_rt.y), %2_frame * 1.73));\n"
+                           "    float %2_tearWave = sin(uv.y * 8.0 - t * %6 * 3.77);\n"
+                           "    float %2_tear = smoothstep(0.90, 0.995, %2_tearWave * 0.5 + 0.5) * step(0.68, %2_rowNoise) * %5;\n"
+                           "    float2 %2_vhsUv = uv;\n"
+                           "    %2_vhsUv.x += ((%2_rowNoise - 0.5) * 2.0 + (%2_fineNoise - 0.5)) * %3 * %2_texel.x * 14.0;\n"
+                           "    %2_vhsUv.x -= %2_tear * (0.015 + %3 * 0.018);\n"
+                           "    float2 %2_ca = float2(%4 * %2_texel.x * 10.0, 0.0);\n"
+                           "    float3 %2_base = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_vhsUv)).rgb);\n"
+                           "    float %2_r = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_vhsUv + %2_ca)).rgb).r;\n"
+                           "    float %2_b = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_vhsUv - %2_ca)).rgb).b;\n"
+                           "    float3 %2_vhs = float3(%2_r, %2_base.g, %2_b);\n"
+                           "    %2_vhs *= 0.97 + 0.06 * BO3BeginnerHash21(float2(0.0, %2_row + %2_frame));\n"
+                           "    %2_vhs *= 1.0 - %2_tear * 0.62;\n"
+                           "    color = lerp(color, max(%2_vhs,0.0), %7);\n")
+                .arg(definition->name, tag, jitter, chroma, tracking, speed, strength);
+        }
+        else if(effect.typeId == "vhs_dropouts" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
+            const QString shift = floatLiteral(parameterFloat(effect, *definition, "shift"));
+            out += QString("    // %1 - intermittent damaged-tape dropouts\n"
+                           "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
+                           "    float %2_frame = floor(t * 24.0);\n"
+                           "    float %2_row = floor(uv.y * %2_rt.y / max(2.0, %3));\n"
+                           "    float %2_gate = BO3BeginnerHash21(float2(%2_row, %2_frame));\n"
+                           "    float %2_active = step(0.86, %2_gate);\n"
+                           "    float %2_offset = (BO3BeginnerHash21(float2(%2_row + 9.0, %2_frame)) - 0.5) * %4 * 0.08;\n"
+                           "    float3 %2_shifted = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_offset,0.0))).rgb);\n"
+                           "    float %2_static = BO3BeginnerHash21(floor(input.position.xy) + %2_frame) - 0.5;\n"
+                           "    float3 %2_damaged = max(%2_shifted * (0.75 + %2_static * 0.35), 0.0);\n"
+                           "    color = lerp(color, %2_damaged, %2_active * %5);\n")
+                .arg(definition->name, tag, density, shift, strength);
+        }
+        else if(effect.typeId == "sky_sun" && project.target == Target::Sky)
+        {
+            const QColor sunColor = parameterColor(effect, *definition, "color");
+            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
+            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString glow = floatLiteral(parameterFloat(effect, *definition, "glow"));
+            out += QString("    // %1\n"
+                           "    float %2_az = %3 * 6.2831853;\n"
+                           "    float %2_h = clamp(%4, -0.98, 0.98);\n"
+                           "    float %2_xy = sqrt(max(1.0 - %2_h * %2_h, 0.0));\n"
+                           "    float3 %2_dir = normalize(float3(cos(%2_az) * %2_xy, sin(%2_az) * %2_xy, %2_h));\n"
+                           "    float %2_angle = acos(clamp(dot(d, %2_dir), -1.0, 1.0));\n"
+                           "    float %2_disc = 1.0 - smoothstep(%5, %5 + %6, %2_angle);\n"
+                           "    float %2_halo = pow(saturate(dot(d,%2_dir)), lerp(96.0, 6.0, saturate(%7)));\n"
+                           "    color += %8 * ((%2_disc * %9) + (%2_halo * %9 * %7 * 0.45));\n")
+                .arg(definition->name, tag, azimuth, height, size, softness, glow, colorLiteral(sunColor), brightness);
+        }
+        else if(effect.typeId == "sky_moon" && project.target == Target::Sky)
+        {
+            const QColor moonColor = parameterColor(effect, *definition, "color");
+            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString halo = floatLiteral(parameterFloat(effect, *definition, "halo"));
+            const QString phase = floatLiteral(parameterFloat(effect, *definition, "phase"));
+            out += QString("    // %1 - independently positioned moon disc with crescent phase and halo\n"
+                           "    float %2_az = %3 * 6.2831853;\n"
+                           "    float %2_h = clamp(%4, -0.98, 0.98);\n"
+                           "    float %2_xyLen = sqrt(max(1.0 - %2_h * %2_h, 0.0));\n"
+                           "    float3 %2_dir = normalize(float3(cos(%2_az) * %2_xyLen, sin(%2_az) * %2_xyLen, %2_h));\n"
+                           "    float %2_angle = acos(clamp(dot(d, %2_dir), -1.0, 1.0));\n"
+                           "    float %2_disc = 1.0 - smoothstep(%5, %5 + max(%5*0.18,0.002), %2_angle);\n"
+                           "    float3 %2_right = normalize(float3(-sin(%2_az), cos(%2_az), 0.0));\n"
+                           "    float %2_phaseCoord = dot(d, %2_right) / max(sin(max(%5,0.002)), 0.002);\n"
+                           "    float %2_lit = smoothstep(-0.15, 0.15, %2_phaseCoord + lerp(1.5, -1.5, %6));\n"
+                           "    float %2_moon = %2_disc * lerp(1.0, %2_lit, abs(%6 - 0.5) * 1.8);\n"
+                           "    float %2_halo = pow(saturate(dot(d,%2_dir)), lerp(82.0, 7.0, %7));\n"
+                           "    color += %8 * (%2_moon * %9 + %2_halo * %9 * %7 * 0.20);\n")
+                .arg(definition->name, tag, azimuth, height, size, phase, halo, colorLiteral(moonColor), brightness);
+        }
+        else if(effect.typeId == "sky_haze" && project.target == Target::Sky)
+        {
+            const QColor hazeColor = parameterColor(effect, *definition, "color");
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString width = floatLiteral(parameterFloat(effect, *definition, "width"));
+            out += QString("    // %1\n"
+                           "    float %2_haze = pow(saturate(1.0 - abs(d.z)), %3);\n"
+                           "    color = lerp(color, %4, saturate(%2_haze * %5));\n")
+                .arg(definition->name, tag, width, colorLiteral(hazeColor), strength);
+        }
+        else if(effect.typeId == "sky_stars" && project.target == Target::Sky)
+        {
+            const QColor starColor = parameterColor(effect, *definition, "color");
+            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
+            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString twinkle = floatLiteral(parameterFloat(effect, *definition, "twinkle"));
+            out += QString("    // %1 - direction-space star field\n"
+                           "    float3 %2_sp = d * %3;\n"
+                           "    float3 %2_cell = floor(%2_sp);\n"
+                           "    float3 %2_local = frac(%2_sp) - 0.5;\n"
+                           "    float %2_rnd = BO3BeginnerHash31(%2_cell);\n"
+                           "    float %2_star = step(0.985, %2_rnd) * (1.0 - smoothstep(%4, %4 * 2.2, length(%2_local)));\n"
+                           "    float %2_tw = lerp(1.0, 0.65 + 0.35 * sin(t * 2.7 + %2_rnd * 41.0), %5);\n"
+                           "    color += %6 * (%2_star * %7 * %2_tw);\n")
+                .arg(definition->name, tag, density, size, twinkle, colorLiteral(starColor), brightness);
+        }
+        else if(effect.typeId == "sky_clouds" && project.target == Target::Sky)
+        {
+            const QColor cloudColor = parameterColor(effect, *definition, "color");
+            const QString opacity = floatLiteral(parameterFloat(effect, *definition, "opacity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
+            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1 - lightweight seamless direction-space cloud layers\n"
+                           "    float3 %2_cp = d * %3 + float3(t * %6 * 0.035, -t * %6 * 0.021, t * %6 * 0.011);\n"
+                           "    float %2_n1 = BO3BeginnerFbm3(%2_cp);\n"
+                           "    float %2_n2 = BO3BeginnerFbm3(%2_cp * 1.83 + float3(4.1,1.7,-2.4));\n"
+                           "    float %2_cloud = smoothstep(%4, min(%4 + max(%5,0.01), 1.0), %2_n1 * 0.72 + %2_n2 * 0.28);\n"
+                           "    float %2_skyMask = smoothstep(-0.08, 0.22, d.z);\n"
+                           "    float %2_light = 0.68 + 0.32 * BO3BeginnerFbm3(%2_cp + float3(0.7,-0.4,0.9));\n"
+                           "    color = lerp(color, %7 * %2_light, saturate(%2_cloud * %2_skyMask * %8));\n")
+                .arg(definition->name, tag, scale, coverage, softness, speed, colorLiteral(cloudColor), opacity);
+        }
+        else if(effect.typeId == "sky_realistic_clouds" && project.target == Target::Sky)
+        {
+            const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
+            const QColor lightColor = parameterColor(effect, *definition, "light_color");
+            const QString opacity = floatLiteral(parameterFloat(effect, *definition, "opacity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1 - compact volumetric raymarch using warped multi-octave density\n"
+                           "    float %2_trans = 1.0;\n"
+                           "    float3 %2_accum = 0.0;\n"
+                           "    float %2_upper = smoothstep(-0.10, 0.18, d.z);\n"
+                           "    [loop] for(int %2_i = 0; %2_i < 18; ++%2_i)\n"
+                           "    {\n"
+                           "        float %2_dist = 1.25 + float(%2_i) * 0.23;\n"
+                           "        float3 %2_p = d * (%2_dist * %3) + float3(t * %5 * 0.055, -t * %5 * 0.031, t * %5 * 0.018);\n"
+                           "        float %2_base = BO3BeginnerFbm3(%2_p);\n"
+                           "        float %2_detail = BO3BeginnerFbm3(%2_p * 2.1 + float3(2.4,-1.7,3.6));\n"
+                           "        float %2_density = smoothstep(%4, min(%4 + 0.16,1.0), %2_base * 0.78 + %2_detail * 0.22) * %2_upper;\n"
+                           "        float %2_alpha = saturate(%2_density * %6 * 0.13);\n"
+                           "        float %2_light = saturate(0.28 + 0.92 * BO3BeginnerFbm3(%2_p + float3(0.65,-0.45,0.8)));\n"
+                           "        float3 %2_cloudColor = lerp(%7, %8, %2_light);\n"
+                           "        %2_accum += %2_cloudColor * (%2_alpha * %2_trans);\n"
+                           "        %2_trans *= (1.0 - %2_alpha);\n"
+                           "    }\n"
+                           "    color = color * %2_trans + %2_accum;\n")
+                .arg(definition->name, tag, scale, coverage, speed, opacity, colorLiteral(shadowColor), colorLiteral(lightColor));
+        }
+        else if(effect.typeId == "sky_mountains" && project.target == Target::Sky)
+        {
+            const QColor nearColor = parameterColor(effect, *definition, "near_color");
+            const QColor farColor = parameterColor(effect, *definition, "far_color");
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString roughness = floatLiteral(parameterFloat(effect, *definition, "roughness"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            out += QString("    // %1 - seam-free ridged horizon mountains from direction-space noise\n"
+                           "    float2 %2_hd = normalize(d.xy + float2(1e-6,0.0));\n"
+                           "    float %2_nNear = BO3BeginnerFbm3(float3(%2_hd * %3, 1.7));\n"
+                           "    float %2_nFar = BO3BeginnerFbm3(float3(%2_hd * (%3 * 0.63) + float2(2.8,-1.9), 4.2));\n"
+                           "    float %2_nearHeight = %4 + (pow(saturate(%2_nNear), 1.7) - 0.38) * %5;\n"
+                           "    float %2_farHeight = %4 * 0.68 + (pow(saturate(%2_nFar), 1.9) - 0.42) * (%5 * 0.62);\n"
+                           "    float %2_farMask = 1.0 - smoothstep(%2_farHeight, %2_farHeight + %6, d.z);\n"
+                           "    float %2_nearMask = 1.0 - smoothstep(%2_nearHeight, %2_nearHeight + %6, d.z);\n"
+                           "    color = lerp(color, %7, saturate(%2_farMask));\n"
+                           "    color = lerp(color, %8, saturate(%2_nearMask));\n")
+                .arg(definition->name, tag, scale, height, roughness, softness, colorLiteral(farColor), colorLiteral(nearColor));
+        }
+        else if(effect.typeId == "sky_aurora" && project.target == Target::Sky)
+        {
+            const QColor colorA = parameterColor(effect, *definition, "color_a");
+            const QColor colorB = parameterColor(effect, *definition, "color_b");
+            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
+            out += QString("    // %1 - compact layered aurora volume inspired by BO3 direction-space sky references\n"
+                           "    float %2_az = %3 * 6.2831853;\n"
+                           "    float2 %2_xy = BO3BeginnerRotate2(d.xy, -%2_az);\n"
+                           "    float %2_upper = smoothstep(0.015,0.18,d.z) * (1.0 - smoothstep(0.86,1.0,d.z));\n"
+                           "    float3 %2_auroraAccum = 0.0;\n"
+                           "    float %2_auroraWeight = 0.0;\n"
+                           "    [loop] for(int %2_i = 0; %2_i < 10; ++%2_i)\n"
+                           "    {\n"
+                           "        float %2_fi = float(%2_i);\n"
+                           "        float %2_layer = (%2_fi + 0.5) * 0.10;\n"
+                           "        float2 %2_ap = float2(%2_xy.x * %4 + %2_xy.y * 1.35, d.z * 3.25 + %2_xy.y * (%4 * 0.28));\n"
+                           "        %2_ap += float2(%2_layer * 0.53 + sin(t * %5 * 0.21 + %2_fi) * 0.035, %2_layer * 0.19);\n"
+                           "        float %2_n = BO3BeginnerAuroraNoise(%2_ap, t * %5 + %2_layer * 1.7);\n"
+                           "        float %2_ribbon = pow(saturate(%2_n), 1.55) * %2_upper;\n"
+                           "        float %2_fade = exp2(-%2_fi * 0.17) * smoothstep(0.0, 0.18, %2_layer);\n"
+                           "        float %2_phase = 0.5 + 0.5 * sin(%2_ap.x * 0.82 + t * %5 * 0.70 + %2_layer * 5.0);\n"
+                           "        float3 %2_layerColor = lerp(%6, %7, %2_phase);\n"
+                           "        %2_auroraAccum += %2_layerColor * (%2_ribbon * %2_fade);\n"
+                           "        %2_auroraWeight += %2_ribbon * %2_fade;\n"
+                           "    }\n"
+                           "    float %2_glow = pow(saturate(%2_auroraWeight * 0.35), 0.62);\n"
+                           "    color += (%2_auroraAccum * 0.26 + lerp(%6,%7,0.35) * %2_glow * 0.22) * %8;\n")
+                .arg(definition->name, tag, azimuth, scale, speed, colorLiteral(colorA), colorLiteral(colorB), intensity);
+        }
+        else if(effect.typeId == "sky_nebula" && project.target == Target::Sky)
+        {
+            const QColor colorA = parameterColor(effect, *definition, "color_a");
+            const QColor colorB = parameterColor(effect, *definition, "color_b");
+            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString drift = floatLiteral(parameterFloat(effect, *definition, "drift"));
+            out += QString("    // %1 - direction-space folded fractal regions\n"
+                           "    float3 %2_drift = float3(sin(t * 0.071), sin(t * 0.053 + 1.7), cos(t * 0.043 - 0.8)) * %3;\n"
+                           "    float3 %2_np = d * %4 + %2_drift;\n"
+                           "    float %2_f1 = BO3BeginnerNebulaField(%2_np + float3(0.8,-0.2,0.4), 0.7);\n"
+                           "    float %2_f2 = BO3BeginnerNebulaField(%2_np.yzx * 1.13 + float3(-0.5,1.1,-0.7), 2.1);\n"
+                           "    float %2_neb = max(%2_f1, %2_f2 * 0.84);\n"
+                           "    float3 %2_nebColor = lerp(%5, %6, saturate(%2_f2 * 1.2));\n"
+                           "    color += %2_nebColor * (%2_neb * %7);\n")
+                .arg(definition->name, tag, drift, scale, colorLiteral(colorA), colorLiteral(colorB), intensity);
         }
         else if(effect.typeId == "grid_rings" && hasUv)
         {
@@ -511,10 +835,17 @@ QString optionalHelpers(const Project& project)
         (project.target != Target::Material && projectUsesEffect(project, "noise")) ||
         projectUsesEffect(project, "film_grain") ||
         projectUsesEffect(project, "paint_strokes") ||
-        projectUsesEffect(project, "red_paint_splatter");
+        projectUsesEffect(project, "red_paint_splatter") ||
+        projectUsesEffect(project, "vhs_tape") ||
+        projectUsesEffect(project, "vhs_dropouts");
     const bool needsHash31 =
         (project.target == Target::Material && projectUsesEffect(project, "noise")) ||
-        projectUsesEffect(project, "dissolve");
+        projectUsesEffect(project, "dissolve") ||
+        projectUsesEffect(project, "sky_clouds") ||
+        projectUsesEffect(project, "sky_realistic_clouds") ||
+        projectUsesEffect(project, "sky_mountains") ||
+        projectUsesEffect(project, "sky_stars") ||
+        projectUsesEffect(project, "sky_nebula");
     const bool needsHash11 = projectUsesEffect(project, "flicker");
 
     if(needsHash21)
@@ -550,6 +881,144 @@ float BO3BeginnerHash11(float p)
     p *= p + 33.33;
     p *= p + p;
     return frac(p);
+}
+)HLSL");
+    }
+    if(projectUsesEffect(project, "film_grain"))
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerGrainHash(float2 p)
+{
+    p = frac(p * float2(0.1031, 0.1030));
+    p += dot(p, p.yx + 33.33);
+    return frac((p.x + p.y) * p.x * p.y);
+}
+
+float BO3BeginnerGrainLayer(float2 uv, float grainSize, float angle, float phase, float speed)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    float2 pixelPosition = uv * PostFx_GetRenderTargetSize().xy;
+    float2 rotated = float2(
+        c * pixelPosition.x - s * pixelPosition.y,
+        s * pixelPosition.x + c * pixelPosition.y);
+    rotated /= max(grainSize, 0.001);
+    float framePhase = floor(GetTime() * 30.0 * speed + phase);
+    float2 frameOffset = float2(framePhase, framePhase * 1.37);
+    return BO3BeginnerGrainHash(floor(rotated) + frameOffset) * 2.0 - 1.0;
+}
+)HLSL");
+    }
+    if(projectUsesEffect(project, "psx_dithering"))
+    {
+        out += QStringLiteral(R"HLSL(
+static const float4x4 BO3BeginnerPsxDither = float4x4(
+     0.0,  8.0,  2.0, 10.0,
+    12.0,  4.0, 14.0,  6.0,
+     3.0, 11.0,  1.0,  9.0,
+    15.0,  7.0, 13.0,  5.0);
+)HLSL");
+    }
+    const bool needsSkyNoise =
+        projectUsesEffect(project, "sky_clouds") ||
+        projectUsesEffect(project, "sky_realistic_clouds") ||
+        projectUsesEffect(project, "sky_mountains") ||
+        projectUsesEffect(project, "sky_nebula");
+    if(needsSkyNoise)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerNoise3(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = BO3BeginnerHash31(i + float3(0,0,0));
+    float n100 = BO3BeginnerHash31(i + float3(1,0,0));
+    float n010 = BO3BeginnerHash31(i + float3(0,1,0));
+    float n110 = BO3BeginnerHash31(i + float3(1,1,0));
+    float n001 = BO3BeginnerHash31(i + float3(0,0,1));
+    float n101 = BO3BeginnerHash31(i + float3(1,0,1));
+    float n011 = BO3BeginnerHash31(i + float3(0,1,1));
+    float n111 = BO3BeginnerHash31(i + float3(1,1,1));
+    float n00 = lerp(n000, n100, f.x);
+    float n10 = lerp(n010, n110, f.x);
+    float n01 = lerp(n001, n101, f.x);
+    float n11 = lerp(n011, n111, f.x);
+    return lerp(lerp(n00, n10, f.y), lerp(n01, n11, f.y), f.z);
+}
+
+float BO3BeginnerFbm3(float3 p)
+{
+    float sum = 0.0;
+    float amp = 0.55;
+    [unroll] for(int i = 0; i < 5; ++i)
+    {
+        sum += BO3BeginnerNoise3(p) * amp;
+        p = p.yzx * 2.03 + float3(1.7, 3.1, 2.4);
+        amp *= 0.50;
+    }
+    return sum;
+}
+)HLSL");
+    }
+
+    if(projectUsesEffect(project, "sky_aurora"))
+    {
+        out += QStringLiteral(R"HLSL(
+float2 BO3BeginnerRotate2(float2 p, float a)
+{
+    float c = cos(a), s = sin(a);
+    return float2(c*p.x - s*p.y, s*p.x + c*p.y);
+}
+
+float BO3BeginnerTri(float x)
+{
+    return abs(frac(x) - 0.5);
+}
+
+float2 BO3BeginnerTri2(float2 p)
+{
+    return float2(BO3BeginnerTri(p.x + BO3BeginnerTri(p.y)),
+                  BO3BeginnerTri(p.y + BO3BeginnerTri(p.x)));
+}
+
+float BO3BeginnerAuroraNoise(float2 p, float time)
+{
+    float sum = 0.0;
+    float amp = 0.62;
+    float2 q = p;
+    [unroll] for(int i = 0; i < 5; ++i)
+    {
+        float2 warp = BO3BeginnerTri2(q * 1.73) - 0.5;
+        q += BO3BeginnerRotate2(warp, time * (0.10 + i * 0.025)) * (0.72 / (1.0 + i));
+        sum += (1.0 - saturate(BO3BeginnerTri(q.x + BO3BeginnerTri(q.y)) * 2.0)) * amp;
+        q = BO3BeginnerRotate2(q * 1.31 + float2(0.37, -0.22), -0.31);
+        amp *= 0.48;
+    }
+    return saturate(sum * 0.82);
+}
+)HLSL");
+    }
+
+    if(projectUsesEffect(project, "sky_nebula"))
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerNebulaField(float3 p, float seed)
+{
+    float accum = 0.0;
+    float prev = 0.0;
+    float weightSum = 0.0;
+    [unroll] for(int i = 0; i < 12; ++i)
+    {
+        float mag = max(dot(p,p), 1e-4);
+        p = abs(p) / mag + float3(-0.47, -0.39, -1.34 + seed * 0.03);
+        float w = exp(-float(i) / 5.8);
+        float delta = abs(mag - prev);
+        accum += w * exp(-6.4 * pow(max(delta,0.0), 2.1));
+        weightSum += w;
+        prev = mag;
+    }
+    return saturate(4.2 * accum / max(weightSum,1e-4) - 0.55);
 }
 )HLSL");
     }
@@ -731,7 +1200,7 @@ float4 ps_main(const PixelShaderInput input) : SV_TARGET0
     float3 color = lerp(%3, %4, smoothstep(0.0, 0.62, up));
     color = lerp(color, %5, pow(horizon, 5.0) * 0.72);
 %6
-    return float4(saturate(color), 1.0);
+    return float4(clamp(color, float3(0.0, 0.0, 0.0), float3(65024.0, 65024.0, 65024.0)), 1.0);
 }
 )HLSL").arg(effectStackMarker(project), helpers, colorLiteral(ground), colorLiteral(zenith), colorLiteral(horizon), effects);
 }
@@ -813,18 +1282,19 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {FloatParam("amount", "Strength", "Noise intensity.", 0.0, 0.75, 0.005, 0.05),
                    FloatParam("scale", "Scale", "How fine or coarse the noise pattern is.", 2.0, 1200.0, 1.0, 320.0),
                    FloatParam("speed", "Speed", "How quickly a new noise pattern appears.", 0.0, 4.0, 0.01, 0.35)}),
-        EffectDef("film_grain", "Film Grain", "Add finer animated grain with a more natural film-like breakup in darker areas.", "Atmosphere",
+        EffectDef("film_grain", "Film Grain", "Layer fine, medium and coarse moving grain that follows the photographed image instead of looking like digital stripes.", "Atmosphere",
                   {Target::PostFx},
-                  {FloatParam("amount", "Strength", "How visible the grain is.", 0.0, 0.30, 0.005, 0.038),
-                   FloatParam("scale", "Grain Size", "Higher values make the grain finer.", 120.0, 1800.0, 1.0, 940.0),
-                   FloatParam("speed", "Speed", "How quickly the grain changes.", 0.0, 4.0, 0.01, 1.0)}),
-        EffectDef("cartoon_outlines", "Cartoon Outlines", "Use scene depth and contrast to create cel-style outlines and flatter shading.", "Depth & Scene",
+                  {FloatParam("amount", "Strength", "How strongly the grain modulates the photographed image.", 0.0, 2.0, 0.01, 0.28),
+                   FloatParam("grain_size", "Grain Size", "Approximate grain particle size in screen pixels.", 0.55, 4.0, 0.05, 1.35),
+                   FloatParam("speed", "Speed", "How quickly new film-grain frames appear.", 0.0, 3.0, 0.01, 1.0)}),
+        EffectDef("cartoon_outlines", "Cartoon Outlines", "Create cleaner cel-style line work from BO3 scene depth, with optional image-detail edges and toon color bands.", "Depth & Scene",
                   {Target::PostFx},
-                  {ColorParam("color", "Outline Color", "Color of the cartoon line work.", "#0A0A0A"),
-                   FloatParam("strength", "Strength", "How strongly outlines replace the scene.", 0.0, 1.0, 0.01, 0.85),
-                   FloatParam("thickness", "Line Width", "How wide the sampled outline becomes.", 0.5, 4.0, 0.05, 1.2),
-                   FloatParam("depth_sensitivity", "Depth Sensitivity", "How quickly depth changes become line art.", 0.2, 3.0, 0.05, 1.0),
-                   FloatParam("levels", "Toon Levels", "How many brightness bands remain in the cel-shaded result.", 2.0, 8.0, 1.0, 4.0)}),
+                  {ColorParam("color", "Outline Color", "Color of the cartoon line work.", "#090909"),
+                   FloatParam("strength", "Outline Strength", "How strongly the detected lines replace the image.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("thickness", "Line Width", "Width of the diagonal depth samples in screen pixels.", 1.0, 6.0, 0.1, 2.0),
+                   FloatParam("depth_threshold", "Depth Threshold", "Higher values require a stronger depth change before drawing a line.", 0.5, 12.0, 0.1, 5.0),
+                   FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.18),
+                   FloatParam("levels", "Toon Levels", "How many color bands remain in the cel-shaded scene.", 2.0, 10.0, 1.0, 5.0)}),
         EffectDef("ambient_occlusion", "Ambient Occlusion", "Darken places where nearby depth values crowd together, adding extra scene depth.", "Depth & Scene",
                   {Target::PostFx},
                   {FloatParam("amount", "Strength", "How strongly the shading darkens occluded areas.", 0.0, 1.0, 0.01, 0.45),
@@ -852,15 +1322,41 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx},
                   {FloatParam("amount", "Channel Offset", "How far the red and blue channels separate.", 0.0, 0.025, 0.0005, 0.004),
                    FloatParam("strength", "Strength", "How much of the channel separation is added.", 0.0, 1.0, 0.01, 0.65)}),
-        EffectDef("posterize", "Posterize", "Reduce the image into clean color bands for comic, stylized and PSX-like looks.", "LG-Inspired",
+        EffectDef("posterize", "Posterize", "Reduce the image into clean color bands for comic, stylized and PSX-like looks.", "Retro & Display",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("levels", "Levels", "How many distinct color bands remain.", 2.0, 16.0, 1.0, 5.0),
                    FloatParam("strength", "Strength", "Blend amount between the original and posterized result.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("fisheye", "Fisheye Lens", "Bend the screen outward like a curved lens, inspired by BO3-safe postfx experiments.", "LG-Inspired",
+        EffectDef("fisheye", "Fisheye Lens", "Bend the screen outward like a curved lens, inspired by BO3-safe postfx experiments.", "Movement & Distortion",
                   {Target::PostFx},
                   {FloatParam("amount", "Curvature", "How strongly the lens bends the screen.", -0.45, 0.85, 0.01, 0.18),
                    FloatParam("zoom", "Zoom", "Scale compensation to keep more or less of the image visible.", 0.5, 1.5, 0.01, 1.0),
                    FloatParam("strength", "Strength", "Blend between the original and fisheye image.", 0.0, 1.0, 0.01, 1.0)}),
+
+        EffectDef("psx_dithering", "PSX Dithering", "Add ordered 4x4 screen dithering with optional low color precision for a classic console look.", "Retro & Display",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "How strongly the dithered image replaces the original.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("color_precision", "Low Color Precision", "0 keeps full color precision; 1 quantizes toward a 5-bit-per-channel look.", 0.0, 1.0, 0.01, 0.65)}),
+        EffectDef("sharpness", "Sharpness", "Sharpen real image detail with an edge-aware 8-neighbor filter instead of a simple brightness boost.", "Color & Look",
+                  {Target::PostFx},
+                  {FloatParam("amount", "Amount", "Strength of the local detail boost.", 0.0, 3.0, 0.01, 0.65),
+                   FloatParam("threshold", "Edge Threshold", "Ignore very small changes so flat areas stay clean.", 0.0, 1.0, 0.005, 0.055),
+                   FloatParam("radius", "Radius", "Sampling radius in screen pixels.", 0.5, 3.0, 0.05, 1.0)}),
+        EffectDef("pixel_resolution", "Pixel Resolution", "Lower the virtual screen resolution while preserving the full output size.", "Retro & Display",
+                  {Target::PostFx},
+                  {FloatParam("width", "Virtual Width", "Approximate horizontal pixel count used for the low-resolution image.", 80.0, 1920.0, 1.0, 320.0),
+                   FloatParam("strength", "Strength", "Blend between the full-resolution and pixel-resolution image.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("vhs_tape", "VHS Tape", "Add row jitter, tracking tears and analog color separation without turning the whole picture into random static.", "Retro & Display",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "Overall amount of the VHS treatment.", 0.0, 1.0, 0.01, 0.65),
+                   FloatParam("jitter", "Horizontal Jitter", "How strongly tape-line instability shifts the image.", 0.0, 3.0, 0.01, 0.85),
+                   FloatParam("chroma", "Color Bleed", "Horizontal red/blue channel separation.", 0.0, 3.0, 0.01, 0.75),
+                   FloatParam("tracking", "Tracking Tear", "How strongly occasional horizontal tears distort the image.", 0.0, 2.0, 0.01, 0.70),
+                   FloatParam("speed", "Tape Speed", "Animation speed of the analog instability.", 0.05, 3.0, 0.01, 1.0)}),
+        EffectDef("vhs_dropouts", "VHS Dropouts", "Add intermittent damaged-tape rows, image shifts and static bursts.", "Retro & Display",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "How visible the damaged tape rows become.", 0.0, 1.0, 0.01, 0.55),
+                   FloatParam("density", "Band Height", "Approximate height of dropout bands in pixels.", 2.0, 40.0, 1.0, 9.0),
+                   FloatParam("shift", "Horizontal Shift", "How far damaged rows can pull sideways.", 0.0, 2.0, 0.01, 0.70)}),
 
         EffectDef("pulse", "Animated Pulse", "Rhythmically brighten and dim the result.", "Animation",
                   {Target::PostFx, Target::Material, Target::Sky},
@@ -881,11 +1377,13 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {FloatParam("amount", "Warp Amount", "How far the image bends.", 0.0, 0.06, 0.001, 0.012),
                    FloatParam("frequency", "Wave Count", "How many ripples fit across the image.", 1.0, 32.0, 0.1, 8.0),
                    FloatParam("speed", "Speed", "How quickly the ripples travel.", -5.0, 5.0, 0.01, 0.8)}),
-        EffectDef("paint_strokes", "Paint Strokes", "Turn the screen into chunky brush-like color blocks for a painted look.", "Stylized Screen",
+        EffectDef("paint_strokes", "Paint Strokes", "Rebuild the screen from jittered brush strokes that follow local image gradients instead of blocky pixel cells.", "Stylized Screen",
                   {Target::PostFx},
-                  {FloatParam("strength", "Strength", "How much the painted version replaces the original scene.", 0.0, 1.0, 0.01, 0.85),
-                   FloatParam("scale", "Brush Size", "Higher values create more and smaller paint cells.", 6.0, 120.0, 1.0, 28.0),
-                   FloatParam("smear", "Smear", "How much neighboring color gets dragged into each brush stroke.", 0.0, 2.0, 0.01, 0.85)}),
+                  {FloatParam("strength", "Strength", "How much the painted reconstruction replaces the original scene.", 0.0, 1.0, 0.01, 0.88),
+                   FloatParam("scale", "Brush Density", "Higher values create more, smaller brush strokes.", 8.0, 96.0, 1.0, 34.0),
+                   FloatParam("smear", "Paint Smear", "How far color is pulled along each brush direction.", 0.0, 2.0, 0.01, 0.85),
+                   FloatParam("bend", "Stroke Bend", "Curve the brush shape instead of keeping every stroke straight.", -1.0, 1.0, 0.01, 0.22),
+                   FloatParam("detail", "Edge Detail", "Use a wider local gradient to orient strokes around larger forms.", 0.0, 1.0, 0.01, 0.45)}),
         EffectDef("red_paint_splatter", "Red Paint Splatter", "Overlay procedural red paint splashes and drips across the screen.", "Stylized Screen",
                   {Target::PostFx},
                   {ColorParam("color", "Paint Color", "Color of the splatter overlay.", "#9E1424"),
@@ -897,6 +1395,76 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("scale", "Wave Scale", "How many waves fit across the screen.", 0.5, 20.0, 0.05, 6.0),
                    FloatParam("speed", "Speed", "How quickly the water motion animates.", -4.0, 4.0, 0.01, 0.85),
                    FloatParam("strength", "Strength", "Blend amount between the original scene and the distorted version.", 0.0, 1.0, 0.01, 1.0)}),
+
+        EffectDef("sky_sun", "Sun & Glow", "Place a procedural sun anywhere in the BO3 sky and control its disc, softness and surrounding glow.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Sun Color", "Color of the sun and its halo.", "#FFD59A"),
+                   FloatParam("azimuth", "Horizontal Position", "Move the sun around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
+                   FloatParam("height", "Height", "Vertical position of the sun in direction space.", -0.85, 0.95, 0.01, 0.28),
+                   FloatParam("size", "Disc Size", "Angular radius of the bright sun disc.", 0.005, 0.22, 0.0025, 0.045),
+                   FloatParam("softness", "Edge Softness", "Width of the sun-disc edge transition.", 0.001, 0.12, 0.002, 0.012),
+                   FloatParam("brightness", "Brightness", "HDR brightness of the sun.", 0.0, 8.0, 0.05, 2.4),
+                   FloatParam("glow", "Glow", "Strength and width of the surrounding halo.", 0.0, 1.0, 0.01, 0.45)}),
+        EffectDef("sky_moon", "Moon & Halo", "Place an independent moon in the sky, including crescent phase and a soft halo.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Moon Color", "Color of the moon and halo.", "#DCE8FF"),
+                   FloatParam("azimuth", "Horizontal Position", "Move the moon around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.62),
+                   FloatParam("height", "Height", "Vertical position of the moon.", -0.85, 0.95, 0.01, 0.48),
+                   FloatParam("size", "Disc Size", "Angular radius of the moon disc.", 0.008, 0.20, 0.002, 0.055),
+                   FloatParam("phase", "Moon Phase", "0 and 1 create opposite crescents; 0.5 is close to full.", 0.0, 1.0, 0.01, 0.50),
+                   FloatParam("brightness", "Brightness", "HDR brightness of the moon.", 0.0, 6.0, 0.05, 1.35),
+                   FloatParam("halo", "Halo", "Strength and width of the moon glow.", 0.0, 1.0, 0.01, 0.32)}),
+        EffectDef("sky_haze", "Horizon Haze", "Add atmospheric haze around the horizon to blend mountains, clouds and distant sky layers together.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Haze Color", "Atmospheric color along the horizon.", "#A6B9CC"),
+                   FloatParam("strength", "Strength", "How strongly the haze colors the horizon.", 0.0, 1.0, 0.01, 0.30),
+                   FloatParam("width", "Vertical Width", "Higher values keep the haze closer to the horizon.", 0.5, 12.0, 0.1, 4.0)}),
+        EffectDef("sky_stars", "Procedural Stars", "Scatter small direction-space stars across the sky without a texture map.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Star Color", "Base color of the star field.", "#DDEBFF"),
+                   FloatParam("density", "Density", "Higher values create a denser star grid.", 40.0, 420.0, 1.0, 180.0),
+                   FloatParam("size", "Star Size", "Radius of each star inside its procedural cell.", 0.03, 0.30, 0.005, 0.10),
+                   FloatParam("brightness", "Brightness", "HDR brightness of the stars.", 0.0, 6.0, 0.05, 1.15),
+                   FloatParam("twinkle", "Twinkle", "Amount of animated brightness variation.", 0.0, 1.0, 0.01, 0.25)}),
+        EffectDef("sky_clouds", "Cloud Layers", "Add lightweight seamless procedural clouds that move across the sky.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Cloud Color", "Base color of the clouds.", "#DDE6EF"),
+                   FloatParam("opacity", "Opacity", "How strongly the clouds cover the sky behind them.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("scale", "Cloud Scale", "Size and frequency of the cloud formations.", 0.8, 12.0, 0.05, 3.4),
+                   FloatParam("coverage", "Coverage", "Higher values leave more open sky between cloud masses.", 0.15, 0.85, 0.01, 0.52),
+                   FloatParam("softness", "Softness", "Feathering around cloud edges.", 0.02, 0.35, 0.01, 0.14),
+                   FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts.", -3.0, 3.0, 0.01, 0.22)}),
+        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build denser, layered clouds with a compact BO3-friendly raymarch for a more realistic sky.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("shadow_color", "Shadow Color", "Color inside the darker cloud cavities.", "#40536B"),
+                   ColorParam("light_color", "Light Color", "Color on the brighter parts of the cloud volume.", "#E8EDF2"),
+                   FloatParam("opacity", "Density", "Overall cloud-volume density.", 0.0, 1.5, 0.01, 0.80),
+                   FloatParam("scale", "Formation Scale", "Scale of the 3D cloud volume.", 0.5, 8.0, 0.05, 2.25),
+                   FloatParam("coverage", "Coverage", "Higher values make the volume more broken up.", 0.15, 0.85, 0.01, 0.48),
+                   FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts.", -2.0, 2.0, 0.01, 0.20)}),
+        EffectDef("sky_mountains", "Mountain Silhouettes", "Generate layered mountain ranges around the entire horizon without a longitude seam.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("near_color", "Near Mountains", "Color of the closer mountain range.", "#0C111B"),
+                   ColorParam("far_color", "Distant Mountains", "Color of the farther mountain range.", "#26344C"),
+                   FloatParam("height", "Horizon Height", "Average height of the mountain ridge.", -0.25, 0.45, 0.01, 0.03),
+                   FloatParam("roughness", "Peak Height", "How tall and jagged the mountains become.", 0.02, 0.65, 0.01, 0.24),
+                   FloatParam("scale", "Mountain Scale", "Number and width of peaks around the horizon.", 1.0, 18.0, 0.1, 6.5),
+                   FloatParam("softness", "Edge Softness", "Anti-aliasing/atmospheric softness at the mountain edge.", 0.001, 0.08, 0.002, 0.015)}),
+        EffectDef("sky_aurora", "Aurora Borealis", "Create layered moving aurora curtains with procedural triangular-domain warping instead of flat sine bands.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color_a", "Primary Color", "Main aurora color.", "#39F2A0"),
+                   ColorParam("color_b", "Secondary Color", "Secondary color mixed through the moving ribbons.", "#6688FF"),
+                   FloatParam("intensity", "Brightness", "HDR brightness of the aurora curtains.", 0.0, 5.0, 0.01, 1.15),
+                   FloatParam("scale", "Ribbon Detail", "Frequency and complexity of the aurora folds.", 0.5, 12.0, 0.05, 4.2),
+                   FloatParam("speed", "Movement Speed", "How quickly the ribbons flow and deform.", -3.0, 3.0, 0.01, 0.45),
+                   FloatParam("azimuth", "Horizontal Position", "Rotate the aurora around the sky.", 0.0, 1.0, 0.01, 0.18)}),
+        EffectDef("sky_nebula", "Fractal Nebula", "Add drifting folded-fractal color structures directly in BO3 sky direction space.", "Space & Cosmic",
+                  {Target::Sky},
+                  {ColorParam("color_a", "Primary Color", "First nebula color.", "#365CFF"),
+                   ColorParam("color_b", "Secondary Color", "Second color inside the fractal structure.", "#A03BCE"),
+                   FloatParam("intensity", "Brightness", "Brightness of the nebula field.", 0.0, 4.0, 0.01, 0.85),
+                   FloatParam("scale", "Scale", "Size and complexity of the nebula regions.", 0.35, 3.0, 0.01, 0.82),
+                   FloatParam("drift", "Drift", "How far the fractal domain slowly moves over time.", 0.0, 1.0, 0.01, 0.18)}),
 
         EffectDef("edge_glow", "Edge Glow", "Add a camera-facing rim glow around the edges of a model.", "Material & Glow",
                   {Target::Material},
@@ -981,7 +1549,9 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target)
         return {{"blank", "Blank / Original Scene"}, {"cinematic", "Cinematic"}, {"retro_crt", "Retro CRT"}};
     if(target == Target::Material)
         return {{"blank", "Blank Surface"}, {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
-    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"dream_sky", "Dream Sky"}};
+    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"mountain_dawn", "Mountain Dawn"},
+                {"cloudy_day", "Cloudy Day"}, {"starry_night", "Starry Night"},
+                {"aurora_night", "Aurora Night"}, {"dream_sky", "Dream Sky"}, {"space_nebula", "Space Nebula"}};
 }
 
 Project makePreset(const QString& presetId, Target target)
@@ -1009,7 +1579,7 @@ Project makePreset(const QString& presetId, Target target)
         project.name = "Retro CRT";
         add("saturation", {{"amount", 0.84}});
         add("scanlines", {{"amount", 0.18}, {"density", 190.0}, {"speed", 0.20}});
-        add("film_grain", {{"amount", 0.035}, {"scale", 760.0}, {"speed", 1.0}});
+        add("film_grain", {{"amount", 0.22}, {"grain_size", 1.30}, {"speed", 1.0}});
         add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
         add("vignette", {{"strength", 0.28}, {"size", 0.68}, {"softness", 0.45}});
     }
@@ -1038,21 +1608,71 @@ Project makePreset(const QString& presetId, Target target)
     else if(target == Target::Sky && id == "sunset")
     {
         project.name = "Sunset Sky";
-        project.settings["zenithColor"] = "#193B85";
-        project.settings["horizonColor"] = "#FF8059";
-        project.settings["groundColor"] = "#120B18";
+        project.settings["zenithColor"] = "#17336F";
+        project.settings["horizonColor"] = "#F47A52";
+        project.settings["groundColor"] = "#120A16";
+        add("sky_sun", {{"color", "#FFD39B"}, {"azimuth", 0.14}, {"height", 0.12}, {"size", 0.050}, {"brightness", 2.9}, {"glow", 0.62}});
+        add("sky_clouds", {{"color", "#E5B7A2"}, {"opacity", 0.42}, {"scale", 3.0}, {"coverage", 0.56}, {"speed", 0.12}});
         add("saturation", {{"amount", 1.18}});
-        add("contrast", {{"amount", 1.08}});
+        add("contrast", {{"amount", 1.06}});
+    }
+    else if(target == Target::Sky && id == "mountain_dawn")
+    {
+        project.name = "Mountain Dawn";
+        project.settings["zenithColor"] = "#345A83";
+        project.settings["horizonColor"] = "#E9A06E";
+        project.settings["groundColor"] = "#10131C";
+        add("sky_sun", {{"color", "#FFE0A6"}, {"azimuth", 0.07}, {"height", 0.05}, {"brightness", 2.2}, {"glow", 0.55}});
+        add("sky_haze", {{"color", "#D8AF92"}, {"strength", 0.32}, {"width", 4.8}});
+        add("sky_mountains", {{"near_color", "#11141C"}, {"far_color", "#40516A"}, {"height", 0.04}, {"roughness", 0.27}, {"scale", 6.8}});
+        add("sky_clouds", {{"color", "#D8DFE6"}, {"opacity", 0.35}, {"coverage", 0.60}, {"speed", 0.10}});
+    }
+    else if(target == Target::Sky && id == "cloudy_day")
+    {
+        project.name = "Cloudy Day";
+        project.settings["zenithColor"] = "#536C83";
+        project.settings["horizonColor"] = "#A9BAC7";
+        project.settings["groundColor"] = "#27323D";
+        add("sky_realistic_clouds", {{"shadow_color", "#38495B"}, {"light_color", "#E6EBEF"}, {"opacity", 0.92}, {"scale", 2.1}, {"coverage", 0.46}, {"speed", 0.16}});
+    }
+    else if(target == Target::Sky && id == "starry_night")
+    {
+        project.name = "Starry Night";
+        project.settings["zenithColor"] = "#07132E";
+        project.settings["horizonColor"] = "#182847";
+        project.settings["groundColor"] = "#03050B";
+        add("sky_stars", {{"density", 210.0}, {"size", 0.085}, {"brightness", 1.35}, {"twinkle", 0.32}});
+        add("sky_moon", {{"color", "#DCE8FF"}, {"azimuth", 0.68}, {"height", 0.48}, {"size", 0.050}, {"phase", 0.56}, {"brightness", 1.45}, {"halo", 0.38}});
+        add("sky_mountains", {{"near_color", "#05070B"}, {"far_color", "#10182A"}, {"height", -0.02}, {"roughness", 0.20}, {"scale", 7.5}});
+    }
+    else if(target == Target::Sky && id == "aurora_night")
+    {
+        project.name = "Aurora Night";
+        project.settings["zenithColor"] = "#061428";
+        project.settings["horizonColor"] = "#102238";
+        project.settings["groundColor"] = "#02050A";
+        add("sky_stars", {{"density", 170.0}, {"brightness", 0.80}, {"twinkle", 0.18}});
+        add("sky_aurora", {{"color_a", "#39EFA0"}, {"color_b", "#6278FF"}, {"intensity", 1.25}, {"scale", 4.5}, {"speed", 0.42}, {"azimuth", 0.18}});
+        add("sky_mountains", {{"near_color", "#04070A"}, {"far_color", "#0C1722"}, {"height", -0.04}, {"roughness", 0.17}, {"scale", 6.0}});
     }
     else if(target == Target::Sky && id == "dream_sky")
     {
         project.name = "Dream Sky";
         project.settings["zenithColor"] = "#24124F";
-        project.settings["horizonColor"] = "#B85BBE";
+        project.settings["horizonColor"] = "#8D4F9B";
         project.settings["groundColor"] = "#070814";
-        add("tint", {{"color", "#8FA7FF"}, {"amount", 0.22}});
-        add("saturation", {{"amount", 1.32}});
-        add("pulse", {{"amount", 0.06}, {"speed", 0.22}});
+        add("sky_stars", {{"color", "#DCE5FF"}, {"density", 155.0}, {"brightness", 0.70}, {"twinkle", 0.45}});
+        add("sky_nebula", {{"color_a", "#3D62FF"}, {"color_b", "#B443CA"}, {"intensity", 0.55}, {"scale", 0.86}, {"drift", 0.20}});
+        add("tint", {{"color", "#8FA7FF"}, {"amount", 0.12}});
+    }
+    else if(target == Target::Sky && id == "space_nebula")
+    {
+        project.name = "Space Nebula";
+        project.settings["zenithColor"] = "#020817";
+        project.settings["horizonColor"] = "#071229";
+        project.settings["groundColor"] = "#01030A";
+        add("sky_nebula", {{"color_a", "#245DFF"}, {"color_b", "#A333D0"}, {"intensity", 1.10}, {"scale", 0.76}, {"drift", 0.16}});
+        add("sky_stars", {{"density", 240.0}, {"size", 0.08}, {"brightness", 1.25}, {"twinkle", 0.18}});
     }
     return project;
 }
