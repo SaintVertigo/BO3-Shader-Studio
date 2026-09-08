@@ -209,6 +209,137 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                     .arg(definition->name, tag, scale, timeExpr, amount);
             }
         }
+        else if(effect.typeId == "film_grain" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1\n"
+                           "    float %2_grain = BO3BeginnerHash21(floor(uv * %3) + floor(t * %4 * 59.0));\n"
+                           "    float %2_lumaMask = 0.45 + 0.55 * saturate(1.0 - dot(saturate(color), float3(0.2126, 0.7152, 0.0722)));\n"
+                           "    color += (%2_grain - 0.5) * %5 * %2_lumaMask;\n")
+                .arg(definition->name, tag, scale, speed, amount);
+        }
+        else if(effect.typeId == "uv_scroll" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString speedX = floatLiteral(parameterFloat(effect, *definition, "speed_x"));
+            const QString speedY = floatLiteral(parameterFloat(effect, *definition, "speed_y"));
+            out += QString("    // %1\n"
+                           "    float2 %2_scrollUv = frac(uv + float2(%3, %4) * t);\n"
+                           "    float3 %2_scrollBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_scrollColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_scrollUv).rgb);\n"
+                           "    color += (%2_scrollColor - %2_scrollBase) * %5;\n")
+                .arg(definition->name, tag, speedX, speedY, amount);
+        }
+        else if(effect.typeId == "wave_ripple" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString frequency = floatLiteral(parameterFloat(effect, *definition, "frequency"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1\n"
+                           "    float2 %2_rippleP = uv - 0.5;\n"
+                           "    float %2_rippleD = max(length(%2_rippleP), 0.0001);\n"
+                           "    float %2_rippleWave = sin((%2_rippleD * %3 - t * %4) * 6.2831853);\n"
+                           "    float2 %2_rippleUv = saturate(uv + (%2_rippleP / %2_rippleD) * %2_rippleWave * %5);\n"
+                           "    float3 %2_rippleBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_rippleColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_rippleUv).rgb);\n"
+                           "    color += (%2_rippleColor - %2_rippleBase);\n")
+                .arg(definition->name, tag, frequency, speed, amount);
+        }
+        else if(effect.typeId == "flicker" && hasTime)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1\n"
+                           "    float %2_flicker = BO3BeginnerHash11(floor(t * %3 * 30.0));\n"
+                           "    color *= lerp(1.0 - %4, 1.0 + %4, %2_flicker);\n")
+                .arg(definition->name, tag, speed, amount);
+        }
+        else if(effect.typeId == "chromatic_aberration" && project.target == Target::PostFx && hasUv)
+        {
+            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            out += QString("    // %1\n"
+                           "    float2 %2_chromaOffset = float2(%3, 0.0);\n"
+                           "    float3 %2_chromaBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_chromaR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + %2_chromaOffset)).rgb);\n"
+                           "    float3 %2_chromaB = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - %2_chromaOffset)).rgb);\n"
+                           "    float3 %2_chroma = float3(%2_chromaR.r, %2_chromaBase.g, %2_chromaB.b);\n"
+                           "    color += (%2_chroma - %2_chromaBase) * %4;\n")
+                .arg(definition->name, tag, amount, strength);
+        }
+        else if(effect.typeId == "edge_glow" && project.target == Target::Material)
+        {
+            const QColor glowColor = parameterColor(effect, *definition, "color");
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString power = floatLiteral(parameterFloat(effect, *definition, "power"));
+            out += QString("    // %1\n"
+                           "    float %2_rim = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), %3);\n"
+                           "    color += %4 * (%2_rim * %5);\n")
+                .arg(definition->name, tag, power, colorLiteral(glowColor), strength);
+        }
+        else if(effect.typeId == "emission" && project.target == Target::Material)
+        {
+            const QColor emissionColor = parameterColor(effect, *definition, "color");
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            out += QString("    // %1\n    color += %2 * %3;\n")
+                .arg(definition->name, colorLiteral(emissionColor), strength);
+        }
+        else if(effect.typeId == "dissolve" && project.target == Target::Material)
+        {
+            const QColor edgeColor = parameterColor(effect, *definition, "edge_color");
+            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString edgeWidth = floatLiteral(parameterFloat(effect, *definition, "edge_width"));
+            out += QString("    // %1\n"
+                           "    float %2_dissolveNoise = BO3BeginnerHash31(floor(surfacePosition * (0.01 * %3)));\n"
+                           "    float %2_dissolveEdge = 1.0 - smoothstep(%4, min(%4 + %5, 1.0), %2_dissolveNoise);\n"
+                           "    clip(%2_dissolveNoise - %4);\n"
+                           "    color += %6 * (%2_dissolveEdge * 1.6);\n")
+                .arg(definition->name, tag, scale, threshold, edgeWidth, colorLiteral(edgeColor));
+        }
+        else if(effect.typeId == "gradient")
+        {
+            const QColor bottom = parameterColor(effect, *definition, "bottom_color");
+            const QColor top = parameterColor(effect, *definition, "top_color");
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            out += QString("    // %1\n"
+                           "    float3 %2_gradient = lerp(%3, %4, saturate(beginnerVertical));\n"
+                           "    color = lerp(color, color * (%2_gradient * 2.0), %5);\n")
+                .arg(definition->name, tag, colorLiteral(bottom), colorLiteral(top), strength);
+        }
+        else if(effect.typeId == "grid_rings" && hasUv)
+        {
+            const QColor patternColor = parameterColor(effect, *definition, "color");
+            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString rings = floatLiteral(parameterFloat(effect, *definition, "rings"));
+            if(project.target == Target::Material)
+            {
+                out += QString("    // %1 (seamless local 3D pattern)\n"
+                               "    float3 %2_gridP = surfacePosition * (0.01 * %3);\n"
+                               "    float3 %2_gridCell = min(frac(%2_gridP), 1.0 - frac(%2_gridP));\n"
+                               "    float %2_grid = 1.0 - smoothstep(0.025, 0.085, min(%2_gridCell.x, min(%2_gridCell.y, %2_gridCell.z)));\n"
+                               "    float %2_ringWave = 0.5 + 0.5 * cos(length(surfacePosition.xy) * (0.01 * %3) * 6.2831853);\n"
+                               "    float %2_ring = smoothstep(0.82, 0.98, %2_ringWave);\n"
+                               "    float %2_pattern = lerp(%2_grid, %2_ring, %4);\n"
+                               "    color += %5 * (%2_pattern * %6);\n")
+                    .arg(definition->name, tag, scale, rings, colorLiteral(patternColor), strength);
+            }
+            else
+            {
+                out += QString("    // %1\n"
+                               "    float2 %2_gridP = uv * %3;\n"
+                               "    float2 %2_gridCell = min(frac(%2_gridP), 1.0 - frac(%2_gridP));\n"
+                               "    float %2_grid = 1.0 - smoothstep(0.025, 0.085, min(%2_gridCell.x, %2_gridCell.y));\n"
+                               "    float %2_ringWave = 0.5 + 0.5 * cos(length(uv - 0.5) * %3 * 6.2831853);\n"
+                               "    float %2_ring = smoothstep(0.82, 0.98, %2_ringWave);\n"
+                               "    float %2_pattern = lerp(%2_grid, %2_ring, %4);\n"
+                               "    color += %5 * (%2_pattern * %6);\n")
+                    .arg(definition->name, tag, scale, rings, colorLiteral(patternColor), strength);
+            }
+        }
     }
     return out;
 }
@@ -223,22 +354,17 @@ bool projectUsesEffect(const Project& project, const QString& id)
 QString optionalHelpers(const Project& project)
 {
     QString out;
-    if(projectUsesEffect(project, "noise"))
+    const bool needsHash21 =
+        (project.target != Target::Material && projectUsesEffect(project, "noise")) ||
+        projectUsesEffect(project, "film_grain");
+    const bool needsHash31 =
+        (project.target == Target::Material && projectUsesEffect(project, "noise")) ||
+        projectUsesEffect(project, "dissolve");
+    const bool needsHash11 = projectUsesEffect(project, "flicker");
+
+    if(needsHash21)
     {
-        if(project.target == Target::Material)
-        {
-            out += QStringLiteral(R"HLSL(
-float BO3BeginnerHash31(float3 p)
-{
-    p = frac(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return frac((p.x + p.y) * p.z);
-}
-)HLSL");
-        }
-        else
-        {
-            out += QStringLiteral(R"HLSL(
+        out += QStringLiteral(R"HLSL(
 float BO3BeginnerHash21(float2 p)
 {
     p = frac(p * float2(123.34, 456.21));
@@ -246,7 +372,31 @@ float BO3BeginnerHash21(float2 p)
     return frac(p.x * p.y);
 }
 )HLSL");
-        }
+    }
+
+    if(needsHash31)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerHash31(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+)HLSL");
+    }
+
+    if(needsHash11)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerHash11(float p)
+{
+    p = frac(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return frac(p);
+}
+)HLSL");
     }
     return out;
 }
@@ -299,6 +449,7 @@ float4 ps_main(PS_INPUT input) : SV_Target
 {
     float2 uv = saturate(input.texcoord);
     float t = GetTime();
+    float beginnerVertical = uv.y;
     float3 color = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, uv).rgb);
 %3
     color = max(color, 0.0);
@@ -319,6 +470,7 @@ QString generateMaterial(const Project& project)
 // BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE
 
 #include "lib/globals.hlsl"
+#include "lib/transform.hlsl"
 #include "lib/vertdecl_vertex.hlsl"
 #include "lib/vertdecl_vertex_tangentspace.hlsl"
 #include "lib/gpu_skin.hlsl"
@@ -360,6 +512,8 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
 {
     float2 uv = input.texCoords.xy;
     float3 surfacePosition = input.localPosition.xyz;
+    float3 surfaceNormal = normalize(input.normal.xyz);
+    float3 surfaceViewDir = normalize(Transform_GetCameraWorldPosition() - input.worldPosition.xyz);
     float t = GetTime();
     float3 color = %3;
 %4
@@ -375,6 +529,7 @@ QString generateSky(const Project& project)
     const QColor zenith = settingColor(project, "zenithColor", QColor("#102E68"));
     const QColor horizon = settingColor(project, "horizonColor", QColor("#E17658"));
     const QColor ground = settingColor(project, "groundColor", QColor("#060B18"));
+    const QString helpers = optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, false);
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
@@ -409,19 +564,20 @@ struct PixelShaderInput
 
 // No authored vs_main on purpose: the BO3 Sky package adapter selects the
 // proven stock vs_sky stage, which supplies the real engine skyDirection.
-
+%2
 float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 {
     float3 d = normalize(input.skyDirection.xyz);
     float t = gameTime.w;
     float horizon = saturate(1.0 - abs(d.z));
     float up = saturate(d.z * 0.5 + 0.5);
-    float3 color = lerp(%2, %3, smoothstep(0.0, 0.62, up));
-    color = lerp(color, %4, pow(horizon, 5.0) * 0.72);
-%5
+    float beginnerVertical = up;
+    float3 color = lerp(%3, %4, smoothstep(0.0, 0.62, up));
+    color = lerp(color, %5, pow(horizon, 5.0) * 0.72);
+%6
     return float4(saturate(color), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), colorLiteral(ground), colorLiteral(zenith), colorLiteral(horizon), effects);
+)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(ground), colorLiteral(zenith), colorLiteral(horizon), effects);
 }
 
 } // namespace
@@ -471,7 +627,7 @@ bool targetFromId(const QString& id, Target& target)
 const QVector<EffectDefinition>& effectDefinitions()
 {
     static const QVector<EffectDefinition> definitions = {
-        EffectDef("tint", "Color Tint", "Blend the shader toward a chosen color without replacing the underlying detail.", "Color & Look",
+        EffectDef("tint", "Color Tint", "Blend the shader toward a chosen color while keeping the original detail.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("color", "Color", "Tint color.", "#73A7FF"),
                    FloatParam("amount", "Strength", "How strongly the tint affects the result.", 0.0, 1.0, 0.01, 0.35)}),
@@ -490,25 +646,80 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("invert", "Invert Colors", "Invert the current colors, with adjustable strength.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Strength", "0 is unchanged; 1 is fully inverted.", 0.0, 1.0, 0.01, 1.0)}),
+
         EffectDef("vignette", "Vignette", "Darken the edges of a screen effect while keeping the center clear.", "Atmosphere",
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "How strongly the edges darken.", 0.0, 1.0, 0.01, 0.45),
                    FloatParam("size", "Size", "How much of the center remains clear.", 0.10, 0.95, 0.01, 0.70),
                    FloatParam("softness", "Softness", "Width of the edge transition.", 0.05, 1.0, 0.01, 0.40)}),
+        EffectDef("noise", "Procedural Noise", "Add animated procedural noise without needing a texture image.", "Atmosphere",
+                  {Target::PostFx, Target::Material},
+                  {FloatParam("amount", "Strength", "Noise intensity.", 0.0, 0.75, 0.005, 0.05),
+                   FloatParam("scale", "Scale", "How fine or coarse the noise pattern is.", 2.0, 1200.0, 1.0, 320.0),
+                   FloatParam("speed", "Speed", "How quickly a new noise pattern appears.", 0.0, 4.0, 0.01, 0.35)}),
+        EffectDef("film_grain", "Film Grain", "Add fine moving grain that is strongest in darker parts of the game image.", "Atmosphere",
+                  {Target::PostFx},
+                  {FloatParam("amount", "Strength", "How visible the grain is.", 0.0, 0.30, 0.005, 0.045),
+                   FloatParam("scale", "Grain Size", "Higher values make the grain finer.", 120.0, 1800.0, 1.0, 720.0),
+                   FloatParam("speed", "Speed", "How quickly the grain changes.", 0.0, 4.0, 0.01, 1.0)}),
+
         EffectDef("scanlines", "Scanlines", "Add animated horizontal lines for CRT, hologram, visor and monitor looks.", "Retro & Display",
                   {Target::PostFx, Target::Material},
                   {FloatParam("amount", "Strength", "How dark the scanlines become.", 0.0, 0.75, 0.01, 0.12),
                    FloatParam("density", "Density", "Number of line cycles across the surface.", 8.0, 800.0, 1.0, 160.0),
                    FloatParam("speed", "Speed", "How quickly the line pattern moves.", -4.0, 4.0, 0.01, 0.25)}),
+        EffectDef("chromatic_aberration", "Chromatic Aberration", "Separate the red and blue channels near edges for a lens or glitch look.", "Retro & Display",
+                  {Target::PostFx},
+                  {FloatParam("amount", "Channel Offset", "How far the red and blue channels separate.", 0.0, 0.025, 0.0005, 0.004),
+                   FloatParam("strength", "Strength", "How much of the channel separation is added.", 0.0, 1.0, 0.01, 0.65)}),
+
         EffectDef("pulse", "Animated Pulse", "Rhythmically brighten and dim the result.", "Animation",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Amount", "Brightness swing around the original value.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("speed", "Speed", "Pulses per second.", 0.05, 5.0, 0.01, 0.75)}),
-        EffectDef("noise", "Procedural Noise", "Add lightweight animated grain/noise without requiring a texture image.", "Atmosphere",
+        EffectDef("flicker", "Random Flicker", "Add irregular animated brightness changes for damaged screens, energy and horror effects.", "Animation",
+                  {Target::PostFx, Target::Material, Target::Sky},
+                  {FloatParam("amount", "Strength", "How strongly brightness flickers.", 0.0, 0.80, 0.01, 0.12),
+                   FloatParam("speed", "Speed", "How frequently the random value changes.", 0.05, 8.0, 0.01, 1.2)}),
+
+        EffectDef("uv_scroll", "Screen Scroll", "Slide the game image horizontally and vertically over time.", "Movement & Distortion",
+                  {Target::PostFx},
+                  {FloatParam("speed_x", "Horizontal Speed", "Positive moves right; negative moves left.", -1.0, 1.0, 0.01, 0.06),
+                   FloatParam("speed_y", "Vertical Speed", "Positive moves down; negative moves up.", -1.0, 1.0, 0.01, 0.0),
+                   FloatParam("amount", "Strength", "Blend between the original scene and the scrolling scene.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("wave_ripple", "Wave / Ripple", "Warp the game image outward in animated circular waves.", "Movement & Distortion",
+                  {Target::PostFx},
+                  {FloatParam("amount", "Warp Amount", "How far the image bends.", 0.0, 0.06, 0.001, 0.012),
+                   FloatParam("frequency", "Wave Count", "How many ripples fit across the image.", 1.0, 32.0, 0.1, 8.0),
+                   FloatParam("speed", "Speed", "How quickly the ripples travel.", -5.0, 5.0, 0.01, 0.8)}),
+
+        EffectDef("edge_glow", "Edge Glow", "Add a camera-facing rim glow around the edges of a model.", "Material & Glow",
+                  {Target::Material},
+                  {ColorParam("color", "Glow Color", "Color of the rim light.", "#6FE8FF"),
+                   FloatParam("strength", "Strength", "How bright the edge glow becomes.", 0.0, 5.0, 0.01, 1.25),
+                   FloatParam("power", "Edge Width", "Lower values make a wider rim; higher values tighten it.", 0.5, 8.0, 0.05, 2.5)}),
+        EffectDef("emission", "Emission", "Add BO3-friendly HDR color so a material can look self-lit and energetic.", "Material & Glow",
+                  {Target::Material},
+                  {ColorParam("color", "Emission Color", "Color emitted by the surface.", "#45DFFF"),
+                   FloatParam("strength", "Brightness", "HDR emission strength. Values above 1 can glow strongly in BO3.", 0.0, 8.0, 0.05, 1.4)}),
+        EffectDef("dissolve", "Dissolve", "Cut away parts of a material with a procedural pattern and a bright edge.", "Material & Glow",
+                  {Target::Material},
+                  {FloatParam("amount", "Dissolve Amount", "0 keeps the surface; higher values remove more of it.", 0.0, 0.95, 0.01, 0.28),
+                   FloatParam("scale", "Pattern Scale", "Size of the dissolve pattern.", 4.0, 400.0, 1.0, 90.0),
+                   FloatParam("edge_width", "Edge Width", "Width of the bright transition around dissolving areas.", 0.01, 0.25, 0.005, 0.08),
+                   ColorParam("edge_color", "Edge Color", "Color along the dissolving edge.", "#FF8A3D")}),
+
+        EffectDef("gradient", "Color Gradient", "Blend a top and bottom color through the screen or sky while keeping its detail.", "Patterns",
+                  {Target::PostFx, Target::Sky},
+                  {ColorParam("bottom_color", "Bottom Color", "Color toward the bottom.", "#5740A8"),
+                   ColorParam("top_color", "Top Color", "Color toward the top.", "#63D8D0"),
+                   FloatParam("strength", "Strength", "How strongly the gradient colors the result.", 0.0, 1.0, 0.01, 0.40)}),
+        EffectDef("grid_rings", "Grid / Rings", "Overlay a procedural grid or rings without requiring an image texture.", "Patterns",
                   {Target::PostFx, Target::Material},
-                  {FloatParam("amount", "Strength", "Noise intensity.", 0.0, 0.75, 0.005, 0.05),
-                   FloatParam("scale", "Scale", "How fine or coarse the noise pattern is.", 2.0, 1200.0, 1.0, 320.0),
-                   FloatParam("speed", "Speed", "How quickly a new noise pattern appears.", 0.0, 4.0, 0.01, 0.35)})
+                  {ColorParam("color", "Pattern Color", "Color of the lines.", "#6FE8FF"),
+                   FloatParam("strength", "Strength", "Brightness of the pattern.", 0.0, 3.0, 0.01, 0.45),
+                   FloatParam("scale", "Scale", "How many pattern cells or rings are visible.", 2.0, 80.0, 0.1, 12.0),
+                   FloatParam("rings", "Grid ↔ Rings", "0 is a grid; 1 is rings; values between blend both.", 0.0, 1.0, 0.01, 0.0)})
     };
     return definitions;
 }
@@ -593,7 +804,8 @@ Project makePreset(const QString& presetId, Target target)
         project.name = "Retro CRT";
         add("saturation", {{"amount", 0.84}});
         add("scanlines", {{"amount", 0.18}, {"density", 190.0}, {"speed", 0.20}});
-        add("noise", {{"amount", 0.035}, {"scale", 420.0}, {"speed", 0.55}});
+        add("film_grain", {{"amount", 0.035}, {"scale", 760.0}, {"speed", 1.0}});
+        add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
         add("vignette", {{"strength", 0.28}, {"size", 0.68}, {"softness", 0.45}});
     }
     else if(target == Target::Material && id == "neon_surface")
@@ -601,7 +813,9 @@ Project makePreset(const QString& presetId, Target target)
         project.name = "Neon Surface";
         project.settings["baseColor"] = "#1949A8";
         add("tint", {{"color", "#52E8FF"}, {"amount", 0.55}});
-        add("pulse", {{"amount", 0.20}, {"speed", 0.65}});
+        add("emission", {{"color", "#45DFFF"}, {"strength", 1.35}});
+        add("edge_glow", {{"color", "#8FF5FF"}, {"strength", 1.10}, {"power", 2.2}});
+        add("pulse", {{"amount", 0.16}, {"speed", 0.65}});
         add("saturation", {{"amount", 1.35}});
     }
     else if(target == Target::Material && id == "hologram")
@@ -609,9 +823,12 @@ Project makePreset(const QString& presetId, Target target)
         project.name = "Hologram";
         project.settings["baseColor"] = "#1E6B84";
         add("tint", {{"color", "#7CF5FF"}, {"amount", 0.66}});
+        add("emission", {{"color", "#4DE7FF"}, {"strength", 0.90}});
+        add("edge_glow", {{"color", "#9AFAFF"}, {"strength", 1.35}, {"power", 2.0}});
         add("scanlines", {{"amount", 0.16}, {"density", 92.0}, {"speed", 0.55}});
         add("noise", {{"amount", 0.045}, {"scale", 260.0}, {"speed", 0.75}});
-        add("pulse", {{"amount", 0.10}, {"speed", 1.10}});
+        add("flicker", {{"amount", 0.10}, {"speed", 1.4}});
+        add("pulse", {{"amount", 0.08}, {"speed", 1.10}});
     }
     else if(target == Target::Sky && id == "sunset")
     {
