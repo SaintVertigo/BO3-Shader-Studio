@@ -1983,7 +1983,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
-        run("texture-free converted Material periodicizes closed-mesh U", [&]() -> QString
+        run("converted Material periodicizes closed-mesh U and keeps GLSL orientation", [&]() -> QString
         {
             QStringList notes;
             QSet<int> channels;
@@ -1996,15 +1996,21 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                !material.contains("BO3GLSL_PeriodicMaterialUWeight") ||
                !material.contains("shiftedFragCoord") ||
                material.contains("seamWidthUv"))
-                return "texture-free procedural Material did not receive full-interval periodic U mapping";
+                return "procedural Material did not receive full-interval periodic U mapping";
+            if(material.contains("1.0 - surfaceUv.y") || material.contains("1.0-surfaceUv.y"))
+                return "converted Material wrapper still vertically flips GLSL UV orientation";
 
             QSet<int> texturedChannels;
             texturedChannels.insert(0);
             const QString textured = bo3::glsl::makeBo3MaterialFromGlsl(
                 "void mainImage(out float4 c,in float2 p){c=GLSL_TEXTURE(iChannel0,p/iResolution.xy);}",
                 texturedChannels, varyings, 0);
-            if(textured.contains("BO3GLSL_EvaluateMaterialMainImage"))
-                return "textured Material unexpectedly received procedural U periodicization";
+            if(!textured.contains("BO3GLSL_EvaluateMaterialMainImage") ||
+               !textured.contains("BO3GLSL_PeriodicMaterialUWeight") ||
+               !textured.contains("shiftedFragCoord"))
+                return "textured/iChannel Material did not receive closed-mesh periodic U mapping";
+            if(textured.contains("1.0 - surfaceUv.y") || textured.contains("1.0-surfaceUv.y"))
+                return "textured/iChannel Material wrapper still vertically flips GLSL UV orientation";
             return {};
         });
 

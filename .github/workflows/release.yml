@@ -9,6 +9,9 @@ on:
       - '**/*.md'
       - 'docs/**'
       - '.gitignore'
+      # CI/release-plumbing-only edits do not change the application binary,
+      # so do not compile or publish a tester update for them by themselves.
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -69,6 +72,12 @@ jobs:
 
           $fastTester = $false
           $leanUpdate = $false
+          # Manual/full releases validate everything. Automatic tester pushes
+          # are narrowed below from the changed-file set.
+          $runGlsl = $true
+          $runShadertoy = $true
+          $runPostfx = $true
+          $runPackage = $true
 
           if ($env:EVENT_NAME -eq 'workflow_dispatch') {
             if (-not [string]::IsNullOrWhiteSpace($env:MANUAL_DISPLAY_VERSION)) {
@@ -81,9 +90,17 @@ jobs:
             # Pushes to main are automatic tester updates. They use compiler
             # caching and, when runtime dependencies have not changed, a small
             # delta-style update payload instead of resending the Qt runtime.
+            # Regression suites are selected from the changed-file set so a
+            # converter-only patch avoids unrelated BO3 package coverage while
+            # still running GLSL, Shadertoy, and PostFX tests owned by the
+            # converter module.
             $channel = 'tester'
             $fastTester = $true
             $leanUpdate = $true
+            $runGlsl = $false
+            $runShadertoy = $false
+            $runPostfx = $false
+            $runPackage = $false
             $shortSha = $env:COMMIT_SHA.Substring(0, 7)
             $commitMessage = $env:COMMIT_MESSAGE
             if ([string]::IsNullOrWhiteSpace($commitMessage)) { $commitMessage = 'Automatic tester update.' }
@@ -104,18 +121,111 @@ jobs:
               $changed = @(git diff --name-only $before $env:COMMIT_SHA)
               Write-Host 'Changed files:'
               $changed | ForEach-Object { Write-Host "  $_" }
+
+              function Enable-AllRegressions {
+                $script:runGlsl = $true
+                $script:runShadertoy = $true
+                $script:runPostfx = $true
+                $script:runPackage = $true
+              }
+
               foreach ($path in $changed) {
                 $normalized = $path.Replace('\','/')
-                if ($normalized -eq 'BO3HLSLPreviewer.pro' -or
-                    $normalized -eq '.github/workflows/release.yml') {
+
+                # Build-layout changes can alter runtime contents and source
+                # boundaries. Keep the full update payload and full validation.
+                if ($normalized -eq 'BO3HLSLPreviewer.pro') {
                   $leanUpdate = $false
-                  break
+                  Enable-AllRegressions
+                  continue
+                }
+
+                # The workflow/package plumbing itself does not change shader
+                # semantics, so it needs a build/package smoke path but no
+                # shader regression suite.
+                if ($normalized -eq '.github/workflows/release.yml' -or
+                    $normalized -match '^tools/' -or
+                    $normalized -eq 'version.json') {
+                  if ($normalized -eq '.github/workflows/release.yml') { $leanUpdate = $false }
+                  continue
+                }
+
+                # GLSL conversion and optimization. This module also owns the
+                # generated Material/PostFX/Sky wrappers, so converter changes
+                # must keep PostFX export coverage in addition to GLSL and
+                # Shadertoy conversion tests.
+                if ($normalized -match '^src/glsl_converter_core\.(cpp|h)$' -or
+                    $normalized -match '^tests/glsl_converter/') {
+                  $runGlsl = $true
+                  $runShadertoy = $true
+                  $runPostfx = $true
+                  continue
+                }
+
+                if ($normalized -match '^src/shadertoy_project\.(cpp|h)$' -or
+                    $normalized -match '^tests/shadertoy_project_converter/') {
+                  $runShadertoy = $true
+                  continue
+                }
+
+                # BO3 package/adapters/reflection/techset/export contract.
+                if ($normalized -match '^src/bo3_' -or
+                    $normalized -match '^src/preview_package_session\.(cpp|h)$' -or
+                    $normalized -match '^tests/bo3_package/' -or
+                    $normalized -match '^bo3_compat/' -or
+                    $normalized -match '^export_templates/') {
+                  $runPackage = $true
+                  if ($normalized -match 'postfx') { $runPostfx = $true }
+                  continue
+                }
+
+                # PostFX-specific preview/export behavior.
+                if ($normalized -match '^src/hlsl_preview_mode\.(cpp|h)$' -or
+                    $normalized -match '^tests/postfx') {
+                  $runPostfx = $true
+                  continue
+                }
+
+                # Renderer and main-window changes are broad/cross-target. They
+                # are less common than converter fixes, so keep all suites here.
+                if ($normalized -match '^src/(preview_renderer|main_window|main)\.(cpp|h)$') {
+                  Enable-AllRegressions
+                  continue
+                }
+
+                # Updater, model import, live capture, and TinyEXR changes are
+                # compile/runtime features outside the shader regression suites.
+                if ($normalized -match '^src/(github_update|model_import|live_window_capture|tinyexr_impl)\.(cpp|h)$') {
+                  continue
+                }
+
+                # Shared include resolution can influence several shader paths.
+                if ($normalized -eq 'src/shader_include_handler.h') {
+                  Enable-AllRegressions
+                  continue
+                }
+
+                # Known data/sample/resource-only changes do not require shader
+                # semantic regression runs.
+                if ($normalized -match '^(resources|presets|shaders|updates)/') {
+                  continue
+                }
+
+                # Any unclassified source/test/build file gets the conservative
+                # full suite instead of accidentally skipping relevant coverage.
+                if ($normalized -match '^(src|tests)/' -or
+                    $normalized -match '\.(cpp|h|hpp|c|cc|pro)$') {
+                  Enable-AllRegressions
                 }
               }
             }
             else {
-              Write-Host 'Previous commit is unavailable; using a full runtime update payload for safety.'
+              Write-Host 'Previous commit is unavailable; using a full runtime update payload and full regressions for safety.'
               $leanUpdate = $false
+              $runGlsl = $true
+              $runShadertoy = $true
+              $runPostfx = $true
+              $runPackage = $true
             }
           }
 
@@ -132,6 +242,10 @@ jobs:
           "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append
           "BO3_FAST_TESTER=$([int]$fastTester)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "BO3_LEAN_UPDATE=$([int]$leanUpdate)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_RUN_GLSL=$([int]$runGlsl)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_RUN_SHADERTOY=$([int]$runShadertoy)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_RUN_POSTFX=$([int]$runPostfx)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BO3_RUN_PACKAGE=$([int]$runPackage)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           $notesPath = Join-Path $env:RUNNER_TEMP 'bo3_release_notes.md'
           if ([string]::IsNullOrWhiteSpace($notes)) {
@@ -145,6 +259,7 @@ jobs:
           Write-Host "Internal ordering version: $updateVersion"
           Write-Host "Fast tester compile cache: $fastTester"
           Write-Host "Lean tester update payload: $leanUpdate"
+          Write-Host "Regression selection: GLSL=$runGlsl Shadertoy=$runShadertoy PostFX=$runPostfx Package=$runPackage"
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -199,28 +314,31 @@ jobs:
             sccache --show-stats
           }
 
-      # Keep all four regression suites on tester updates. The speedup comes
-      # from compiler caching plus much smaller packaging/upload work, rather
-      # than sacrificing validation coverage.
+      # Automatic tester pushes run only the regression suites relevant to the
+      # changed subsystem. Manual/stable releases still select all four above.
       - name: Run GLSL regression suite
+        if: env.BO3_RUN_GLSL == '1'
         id: glsl_regression
         continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --regression-all
 
       - name: Run Shadertoy regression suite
+        if: env.BO3_RUN_SHADERTOY == '1'
         id: shadertoy_regression
         continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --shadertoy-regression-all
 
       - name: Run PostFX export regression suite
+        if: env.BO3_RUN_POSTFX == '1'
         id: postfx_regression
         continue-on-error: true
         shell: cmd
         run: dist\BO3HLSLPreviewer.exe --postfx-export-regression-all
 
       - name: Run BO3 package regression suite
+        if: env.BO3_RUN_PACKAGE == '1'
         id: package_regression
         continue-on-error: true
         shell: cmd
@@ -231,6 +349,10 @@ jobs:
         shell: pwsh
         env:
           BUILD_RESULT: ${{ steps.build_runtime.outcome }}
+          RUN_GLSL: ${{ env.BO3_RUN_GLSL }}
+          RUN_SHADERTOY: ${{ env.BO3_RUN_SHADERTOY }}
+          RUN_POSTFX: ${{ env.BO3_RUN_POSTFX }}
+          RUN_PACKAGE: ${{ env.BO3_RUN_PACKAGE }}
           GLSL_RESULT: ${{ steps.glsl_regression.outcome }}
           SHADERTOY_RESULT: ${{ steps.shadertoy_regression.outcome }}
           POSTFX_RESULT: ${{ steps.postfx_regression.outcome }}
@@ -241,22 +363,36 @@ jobs:
             throw "Windows runtime build failed before regression testing. Expand the 'Build Windows runtime' step for the compiler/build error; skipped suites are not test failures."
           }
 
-          $results = [ordered]@{
-            GLSL = $env:GLSL_RESULT
-            Shadertoy = $env:SHADERTOY_RESULT
-            PostFX = $env:POSTFX_RESULT
-            'BO3 package' = $env:PACKAGE_RESULT
-          }
-          $results.GetEnumerator() | ForEach-Object { Write-Host ("{0}: {1}" -f $_.Key, $_.Value) }
+          $checks = @(
+            [pscustomobject]@{ Name='GLSL';        Enabled=($env:RUN_GLSL -eq '1');       Result=$env:GLSL_RESULT },
+            [pscustomobject]@{ Name='Shadertoy';  Enabled=($env:RUN_SHADERTOY -eq '1');  Result=$env:SHADERTOY_RESULT },
+            [pscustomobject]@{ Name='PostFX';      Enabled=($env:RUN_POSTFX -eq '1');     Result=$env:POSTFX_RESULT },
+            [pscustomobject]@{ Name='BO3 package'; Enabled=($env:RUN_PACKAGE -eq '1');   Result=$env:PACKAGE_RESULT }
+          )
 
-          $notRun = @($results.GetEnumerator() | Where-Object { $_.Value -in @('skipped','cancelled','') })
+          foreach ($check in $checks) {
+            if ($check.Enabled) {
+              Write-Host ("{0}: {1}" -f $check.Name, $check.Result)
+            }
+            else {
+              Write-Host ("{0}: not selected for this scoped tester change" -f $check.Name)
+            }
+          }
+
+          $selected = @($checks | Where-Object { $_.Enabled })
+          if ($selected.Count -eq 0) {
+            Write-Host 'No shader regression suite was required for this change; successful Windows build is the smoke gate.'
+            exit 0
+          }
+
+          $notRun = @($selected | Where-Object { $_.Result -in @('skipped','cancelled','') })
           if ($notRun.Count -gt 0) {
-            throw ("Regression suites did not run: " + (($notRun | ForEach-Object { $_.Key }) -join ', '))
+            throw ("Selected regression suites did not run: " + (($notRun | ForEach-Object { $_.Name }) -join ', '))
           }
 
-          $failed = @($results.GetEnumerator() | Where-Object { $_.Value -ne 'success' })
+          $failed = @($selected | Where-Object { $_.Result -ne 'success' })
           if ($failed.Count -gt 0) {
-            throw ("Regression suites failed: " + (($failed | ForEach-Object { $_.Key }) -join ', '))
+            throw ("Selected regression suites failed: " + (($failed | ForEach-Object { $_.Name }) -join ', '))
           }
 
       - name: Create release package
