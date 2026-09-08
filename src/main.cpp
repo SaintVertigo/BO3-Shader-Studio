@@ -7668,7 +7668,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
-        run("texture-free converted Material bridges closed-mesh UV seams", [&]() -> QString
+        run("texture-free converted Material periodicizes closed-mesh U", [&]() -> QString
         {
             QStringList notes;
             QSet<int> channels;
@@ -7678,8 +7678,10 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 "void mainImage(out float4 c,in float2 p){float2 uv=p/iResolution.x;c=float4(noise(uv),0.0,0.0,1.0);}";
             const QString material = makeBo3MaterialFromGlsl(core, channels, varyings, 0);
             if(!material.contains("BO3GLSL_EvaluateMaterialMainImage") ||
-               !material.contains("seamWidthUv") || !material.contains("oppositeFragCoord"))
-                return "texture-free procedural Material did not receive the closed-mesh seam bridge";
+               !material.contains("BO3GLSL_PeriodicMaterialUWeight") ||
+               !material.contains("shiftedFragCoord") ||
+               material.contains("seamWidthUv"))
+                return "texture-free procedural Material did not receive full-interval periodic U mapping";
 
             QSet<int> texturedChannels;
             texturedChannels.insert(0);
@@ -7687,7 +7689,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 "void mainImage(out float4 c,in float2 p){c=GLSL_TEXTURE(iChannel0,p/iResolution.xy);}",
                 texturedChannels, varyings, 0);
             if(textured.contains("BO3GLSL_EvaluateMaterialMainImage"))
-                return "textured Material unexpectedly received procedural seam blending";
+                return "textured Material unexpectedly received procedural U periodicization";
             return {};
         });
 
@@ -20619,12 +20621,12 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             : QString();
 
         // Texture-free procedural GLSL is frequently authored as a non-tiling
-        // 2D image. Mapping that directly to a closed mesh makes U=0 and U=1
-        // meet with unrelated colors, producing an obvious longitudinal seam.
-        // Bridge only a narrow strip at the wrap and evaluate the opposite edge
-        // there. Most of the material remains byte-for-byte equivalent to the
-        // original UV evaluation, while the two sides of the closed-mesh seam
-        // converge to the same value. Textured/image materials keep exact UVs.
+        // 2D image. A narrow blend band only hides the exact U wrap and creates
+        // a visible wedge on a sphere. Instead, make the procedural evaluation
+        // genuinely periodic in U: smoothly blend the authored sample with a
+        // copy shifted by one virtual canvas width. The endpoint value and first
+        // derivative then match at U=0/U=1, so closed meshes have no special
+        // seam strip. Textured/image materials keep their exact authored UVs.
         const bool proceduralSeamBridge = channels.isEmpty() && !needsGenericSampler &&
             !converted.contains(QRegularExpression(
                 R"(\b(?:Texture1D|Texture2D|Texture3D|TextureCube|SamplerState)\b)",
@@ -20639,28 +20641,26 @@ float4 BO3GLSL_EvaluateMaterialMainImage(float2 fragCoord)
     return c;
 }
 
+float BO3GLSL_PeriodicMaterialUWeight(float u)
+{
+    // Quintic smootherstep: value and slope are identical at both ends.
+    u = saturate(u);
+    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+}
+
 float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
 {
-    // Procedural closed-mesh mapping. Preserve the authored UV evaluation away
-    // from the wrap, but cross-fade the two U edges in a narrow band so a
-    // non-periodic mainImage does not create a visible sphere/model seam.
+    // Seamless procedural closed-mesh mapping. Do not create a localized seam
+    // band: periodicize the full U interval by cross-fading two adjacent copies
+    // of mainImage. At U=0 and U=1 both sides evaluate the same authored point,
+    // with a matching first derivative, so the sphere/model wrap disappears.
     float2 surfaceUv = input.texCoords.xy;
     float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
-    float4 fragColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
-
-    const float seamWidthUv = 0.02;
-    float wrappedU = frac(surfaceUv.x);
-    float seamDistanceUv = min(wrappedU, 1.0 - wrappedU);
-    if (seamDistanceUv < seamWidthUv)
-    {
-        float2 oppositeFragCoord = fragCoord;
-        oppositeFragCoord.x += (wrappedU < 0.5)
-            ? BO3_GLSL_MATERIAL_RESOLUTION.x
-            : -BO3_GLSL_MATERIAL_RESOLUTION.x;
-        float4 oppositeColor = BO3GLSL_EvaluateMaterialMainImage(oppositeFragCoord);
-        float oppositeWeight = 0.5 * (1.0 - smoothstep(0.0, seamWidthUv, seamDistanceUv));
-        fragColor = lerp(fragColor, oppositeColor, oppositeWeight);
-    }
+    float2 shiftedFragCoord = fragCoord + float2(BO3_GLSL_MATERIAL_RESOLUTION.x, 0.0);
+    float4 authoredColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
+    float4 shiftedColor = BO3GLSL_EvaluateMaterialMainImage(shiftedFragCoord);
+    float periodicWeight = BO3GLSL_PeriodicMaterialUWeight(frac(surfaceUv.x));
+    float4 fragColor = lerp(shiftedColor, authoredColor, periodicWeight);
 
     // Restore the primary coordinate for any wrapper-side logic that follows.
     GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
