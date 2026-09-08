@@ -1105,9 +1105,19 @@ public:
 
         int passed = 0;
         int failed = 0;
+        int fastFxcSkipped = 0;
+        qint64 slowestMs = 0;
+        QString slowestCase;
         for (const QString& path : selectedFiles)
         {
             const GlslRegressionCaseResult result = runGlslRegressionCaseFile(path, fastValidation);
+            if(result.fastFxcSkipped)
+                ++fastFxcSkipped;
+            if(result.elapsedMs > slowestMs)
+            {
+                slowestMs = result.elapsedMs;
+                slowestCase = result.fileName;
+            }
             if(!hlslOutputPath.isEmpty())
             {
                 QFile outputFile(hlslOutputPath);
@@ -1154,7 +1164,20 @@ public:
         }
 
         if (runAll)
+        {
+            if(fastValidation && fastFxcSkipped > 0)
+            {
+                WriteCliOutput(QString("Fast Tester policy: %1 oversized macro fixture(s) converted/asserted but FXC-deferred to full/manual CI.\n")
+                                   .arg(fastFxcSkipped));
+            }
+            if(fastValidation && slowestMs > 0)
+            {
+                WriteCliOutput(QString("Slowest case in this shard: %1 (%2 ms)\n")
+                                   .arg(slowestCase)
+                                   .arg(slowestMs));
+            }
             WriteCliOutput(QString("Result: %1 passed, %2 failed\n").arg(passed).arg(failed));
+        }
         return failed == 0 ? 0 : 1;
     }
 
@@ -6657,6 +6680,8 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
     {
         QString fileName;
         bool passed = false;
+        bool fastFxcSkipped = false;
+        qint64 elapsedMs = 0;
         QString failure;
         QString hlsl;
         QStringList converterNotes;
@@ -6743,6 +6768,8 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
     {
         GlslRegressionCaseResult result;
         result.fileName = QFileInfo(path).fileName();
+        QElapsedTimer caseTimer;
+        caseTimer.start();
 
         QFile file(path);
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -6861,6 +6888,26 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
             return result;
         }
 
+        // A few corpus fixtures intentionally contain enormous macro libraries.
+        // They are valuable converter stress tests, but invoking FXC on the full
+        // expanded output dominates automatic Tester CI (one fixture alone can
+        // take well over two minutes).  A fixture may opt out of *fast Tester*
+        // FXC with BO3_FAST_REGRESSION_SKIP_FXC while still running the complete
+        // conversion pipeline and every BO3_EXPECT_* assertion above.  Manual/full
+        // releases ignore this directive and continue to compile the fixture with
+        // production-like O3 validation.
+        const bool fastSkipFxc = fastValidation &&
+            glsl.contains(QRegularExpression(
+                "^\\s*//\\s*BO3_FAST_REGRESSION_SKIP_FXC(?:\\s*:.*)?$",
+                QRegularExpression::MultilineOption));
+        if(fastSkipFxc)
+        {
+            result.passed = true;
+            result.fastFxcSkipped = true;
+            result.elapsedMs = caseTimer.elapsed();
+            return result;
+        }
+
         QString diagnostics;
         result.passed = compileGlslValidationHlsl(result.hlsl, diagnostics, fastValidation);
         if (!result.passed)
@@ -6868,6 +6915,7 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
             result.failure = diagnostics.isEmpty() ? QString("Unknown FXC failure.") : diagnostics;
             result.errorLine = firstGeneratedHlslDiagnosticLine(result.failure);
         }
+        result.elapsedMs = caseTimer.elapsed();
         return result;
     }
 
