@@ -120,7 +120,6 @@
 #include <QTemporaryDir>
 #include <QToolBar>
 #include <QToolButton>
-#include <QTransform>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QUrl>
@@ -1026,13 +1025,6 @@ public:
         liveCompileTimer_.setInterval(550);
         connect(&liveCompileTimer_, &QTimer::timeout, this, [this]{ compileEditor(); });
 
-        beginnerLiveCompileTimer_.setSingleShot(true);
-        beginnerLiveCompileTimer_.setInterval(90);
-        connect(&beginnerLiveCompileTimer_, &QTimer::timeout, this, [this]
-        {
-            if(beginnerUiMode_ && beginnerProjectActive_) compileEditor();
-        });
-
         sourceValuesRefreshTimer_.setSingleShot(true);
         sourceValuesRefreshTimer_.setInterval(220);
         connect(&sourceValuesRefreshTimer_, &QTimer::timeout, this, [this]{ refreshSourceValueControls(); });
@@ -1554,19 +1546,8 @@ public:
                !beginner::supportsTarget(*gradient, beginner::Target::Sky) ||
                beginner::supportsTarget(*gradient, beginner::Target::Material))
                 return "Beginner Color Gradient target gating is incorrect.";
-
-            const beginner::EffectDefinition* skySun = beginner::effectDefinition("sky_sun");
-            const beginner::EffectDefinition* skyClouds = beginner::effectDefinition("sky_clouds");
-            const beginner::EffectDefinition* skyMountains = beginner::effectDefinition("sky_mountains");
-            if(!skySun || !skyClouds || !skyMountains ||
-               !beginner::supportsTarget(*skySun, beginner::Target::Sky) ||
-               !beginner::supportsTarget(*skyClouds, beginner::Target::Sky) ||
-               !beginner::supportsTarget(*skyMountains, beginner::Target::Sky) ||
-               beginner::supportsTarget(*skySun, beginner::Target::PostFx) ||
-               beginner::supportsTarget(*skyClouds, beginner::Target::Material))
-                return "Beginner procedural Sky effect target gating is incorrect.";
-            if(beginner::effectDefinitions().size() < 28)
-                return "Beginner V4 effect library is incomplete.";
+            if(beginner::effectDefinitions().size() < 20)
+                return "Beginner V3 effect library is incomplete.";
 
             for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             {
@@ -13506,11 +13487,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(id == "retro_crt") return "Scanlines + film grain + color split";
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
-        if(id == "sunset") return "Low sun + warm haze + moving clouds";
-        if(id == "dream_sky") return "Stars + nebula + purple-blue atmosphere";
-        if(id == "mountain_dawn") return "Sunrise + clouds + layered mountains";
-        if(id == "starry_night") return "Moon + twinkling procedural stars";
-        if(id == "aurora_night") return "Aurora ribbons + stars + dark mountains";
+        if(id == "sunset") return "Warm horizon + deep blue sky";
+        if(id == "dream_sky") return "Purple-blue sky + gentle pulse";
         return "Ready-made BO3-safe starting look";
     }
 
@@ -13646,6 +13624,48 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             for(int radius = 7; radius < 55; radius += 10)
                 painter.drawEllipse(inner.center(), radius * 1.7, radius * 0.58);
         }
+        else if(id == "cartoon_outlines")
+        {
+            painter.fillRect(inner, QColor("#F0D9A8"));
+            painter.setPen(QPen(QColor("#141414"), 4.0));
+            painter.setBrush(QColor("#7DB8E8"));
+            painter.drawRoundedRect(QRectF(inner.left() + 18, inner.top() + 18, inner.width() - 36, inner.height() - 36), 14, 14);
+            painter.drawLine(QPointF(inner.left() + 20, inner.center().y()), QPointF(inner.right() - 20, inner.center().y()));
+            painter.drawEllipse(QPointF(inner.center().x(), inner.center().y()), 18, 14);
+        }
+        else if(id == "ambient_occlusion")
+        {
+            painter.fillRect(inner, QColor("#D4D9DE"));
+            QRadialGradient gradient(inner.center(), inner.width() * 0.36);
+            gradient.setColorAt(0.0, QColor("#F3F5F7"));
+            gradient.setColorAt(0.48, QColor("#BAC3CC"));
+            gradient.setColorAt(0.82, QColor("#515B66"));
+            gradient.setColorAt(1.0, QColor("#E9EDF1"));
+            painter.setBrush(gradient);
+            painter.setPen(Qt::NoPen);
+            painter.drawEllipse(QRectF(inner.center().x() - 34, inner.top() + 10, 68, inner.height() - 20));
+        }
+        else if(id == "depth_fog")
+        {
+            QLinearGradient g(inner.topLeft(), inner.bottomRight());
+            g.setColorAt(0.0, QColor("#243650"));
+            g.setColorAt(0.55, QColor("#6B87A8"));
+            g.setColorAt(1.0, QColor("#C9D6E6"));
+            painter.fillRect(inner, g);
+            painter.setPen(QPen(QColor(255,255,255,120), 2.0));
+            painter.drawLine(QPointF(inner.left() + 16, inner.bottom() - 20), QPointF(inner.center().x() - 8, inner.center().y() + 6));
+            painter.drawLine(QPointF(inner.left() + 32, inner.bottom() - 20), QPointF(inner.center().x() + 10, inner.center().y() + 6));
+        }
+        else if(id == "luminance_tint")
+        {
+            QLinearGradient g(inner.topLeft(), inner.topRight());
+            g.setColorAt(0.0, QColor("#4F65B4"));
+            g.setColorAt(0.5, QColor("#20252D"));
+            g.setColorAt(1.0, QColor("#FFD280"));
+            painter.fillRect(inner, g);
+            painter.setPen(QPen(QColor(255,255,255,120), 1.2));
+            painter.drawLine(QPointF(inner.center().x(), inner.top()+8), QPointF(inner.center().x(), inner.bottom()-8));
+        }
         else if(id == "chromatic_aberration")
         {
             painter.fillRect(inner, QColor("#10151A"));
@@ -13654,6 +13674,62 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             painter.setBrush(QColor(255, 65, 78, 180)); painter.drawRoundedRect(shape.translated(-7, 0), 8, 8);
             painter.setBrush(QColor(60, 220, 150, 180)); painter.drawRoundedRect(shape, 8, 8);
             painter.setBrush(QColor(64, 120, 255, 180)); painter.drawRoundedRect(shape.translated(7, 0), 8, 8);
+        }
+        else if(id == "posterize")
+        {
+            const int bars = 6;
+            for(int i = 0; i < bars; ++i)
+            {
+                const double t = i / double(bars - 1);
+                painter.fillRect(QRectF(inner.left() + inner.width() * t, inner.top(), inner.width() / bars + 1.0, inner.height()),
+                                 QColor::fromHslF(0.58 - t * 0.18, 0.55, 0.28 + t * 0.45));
+            }
+        }
+        else if(id == "fisheye")
+        {
+            painter.fillRect(inner, QColor("#101820"));
+            painter.setPen(QPen(QColor("#79D8FF"), 1.5));
+            for(int x = static_cast<int>(inner.left()) + 8; x < inner.right(); x += 18)
+                painter.drawLine(QPointF(x, inner.top() + 4), QPointF(inner.center().x() + (x - inner.center().x()) * 0.7, inner.bottom() - 4));
+            painter.drawEllipse(QRectF(inner.left() + 10, inner.top() + 8, inner.width() - 20, inner.height() - 16));
+        }
+        else if(id == "paint_strokes")
+        {
+            fillLinear(QColor("#3B5875"), QColor("#B98B61"));
+            painter.setPen(Qt::NoPen);
+            for(int i = 0; i < 9; ++i)
+            {
+                const int w = 22 + (i % 3) * 10;
+                const int h = 9 + (i % 2) * 6;
+                const int x = static_cast<int>(inner.left()) + 8 + (i * 23) % static_cast<int>(inner.width() - w - 8);
+                const int y = static_cast<int>(inner.top()) + 8 + (i * 17) % static_cast<int>(inner.height() - h - 8);
+                painter.setBrush(QColor::fromHsl((210 + i * 9) % 360, 90, 110 + (i % 4) * 18, 210));
+                painter.drawRoundedRect(QRectF(x, y, w, h), 5, 5);
+            }
+        }
+        else if(id == "red_paint_splatter")
+        {
+            painter.fillRect(inner, QColor("#140C10"));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor("#B61E2C"));
+            painter.drawEllipse(QRectF(inner.left() + 18, inner.top() + 18, 42, 28));
+            painter.drawEllipse(QRectF(inner.center().x() - 12, inner.center().y() - 18, 58, 36));
+            painter.drawEllipse(QRectF(inner.right() - 54, inner.top() + 28, 24, 20));
+            painter.drawRect(QRectF(inner.center().x() + 5, inner.center().y() + 8, 6, 26));
+            painter.drawRect(QRectF(inner.left() + 40, inner.center().y(), 5, 20));
+        }
+        else if(id == "water_distortion")
+        {
+            fillLinear(QColor("#12324B"), QColor("#1E7FA2"));
+            painter.setPen(QPen(QColor(190, 244, 255, 180), 2.0));
+            for(int y = static_cast<int>(inner.top()) + 14; y < inner.bottom() - 8; y += 12)
+            {
+                QPainterPath path;
+                path.moveTo(inner.left(), y);
+                for(int x = static_cast<int>(inner.left()); x <= inner.right(); x += 8)
+                    path.lineTo(x, y + std::sin((x - inner.left()) * 0.12 + y * 0.08) * 3.5);
+                painter.drawPath(path);
+            }
         }
         else if(id == "edge_glow")
         {
@@ -13703,103 +13779,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 painter.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y));
             painter.setPen(QPen(QColor("#C1F7FF"), 1.5));
             painter.drawEllipse(inner.center(), 24, 17);
-        }
-        else if(id == "sky_sun" || id == "sky_moon")
-        {
-            fillLinear(QColor("#18356C"), QColor("#E38A63"), true);
-            const QColor body = id == "sky_sun" ? QColor("#FFE2A4") : QColor("#E5EEFF");
-            QRadialGradient glow(QPointF(inner.right() - 55, inner.top() + 20), 24);
-            glow.setColorAt(0.0, body);
-            glow.setColorAt(0.28, body);
-            glow.setColorAt(1.0, QColor(body.red(), body.green(), body.blue(), 0));
-            painter.fillRect(inner, QBrush(glow));
-        }
-        else if(id == "sky_clouds")
-        {
-            fillLinear(QColor("#416A98"), QColor("#A6C7DB"), true);
-            painter.setPen(Qt::NoPen);
-            for(int i = 0; i < 8; ++i)
-            {
-                const qreal x = inner.left() + 12 + (i * 31) % static_cast<int>(inner.width() - 24);
-                const qreal y = inner.top() + 13 + (i * 17) % 24;
-                painter.setBrush(QColor(235, 241, 245, 150));
-                painter.drawEllipse(QPointF(x, y), 21 + (i % 3) * 5, 7 + (i % 2) * 3);
-            }
-        }
-        else if(id == "sky_mountains")
-        {
-            fillLinear(QColor("#36527A"), QColor("#D68770"), true);
-            QPainterPath farPath;
-            farPath.moveTo(inner.left(), inner.bottom());
-            for(int i = 0; i <= 12; ++i)
-            {
-                const qreal x = inner.left() + inner.width() * i / 12.0;
-                const qreal y = inner.center().y() + 5 - std::abs(std::sin(i * 1.73)) * 15;
-                farPath.lineTo(x, y);
-            }
-            farPath.lineTo(inner.right(), inner.bottom());
-            farPath.closeSubpath();
-            painter.fillPath(farPath, QColor("#334158"));
-            QPainterPath nearPath;
-            nearPath.moveTo(inner.left(), inner.bottom());
-            for(int i = 0; i <= 10; ++i)
-            {
-                const qreal x = inner.left() + inner.width() * i / 10.0;
-                const qreal y = inner.center().y() + 12 - std::abs(std::sin(i * 2.21 + 0.4)) * 22;
-                nearPath.lineTo(x, y);
-            }
-            nearPath.lineTo(inner.right(), inner.bottom());
-            nearPath.closeSubpath();
-            painter.fillPath(nearPath, QColor("#111723"));
-        }
-        else if(id == "sky_stars")
-        {
-            fillLinear(QColor("#080D22"), QColor("#182C5A"), true);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor("#EAF3FF"));
-            for(int i = 0; i < 34; ++i)
-            {
-                const qreal x = inner.left() + 5 + (i * 47) % static_cast<int>(inner.width() - 10);
-                const qreal y = inner.top() + 4 + (i * 29) % static_cast<int>(inner.height() - 8);
-                const qreal r = (i % 7 == 0) ? 1.8 : 0.8;
-                painter.drawEllipse(QPointF(x, y), r, r);
-            }
-        }
-        else if(id == "sky_haze")
-        {
-            fillLinear(QColor("#1B3C6A"), QColor("#263A5B"), true);
-            QLinearGradient haze(inner.topLeft(), inner.bottomLeft());
-            haze.setColorAt(0.25, QColor(255, 160, 112, 0));
-            haze.setColorAt(0.55, QColor(255, 160, 112, 190));
-            haze.setColorAt(0.80, QColor(255, 160, 112, 0));
-            painter.fillRect(inner, QBrush(haze));
-        }
-        else if(id == "sky_aurora")
-        {
-            painter.fillRect(inner, QColor("#071427"));
-            painter.setPen(QPen(QColor(72, 255, 190, 185), 5.0));
-            QPainterPath path;
-            path.moveTo(inner.left(), inner.bottom() - 12);
-            for(int i = 0; i <= 20; ++i)
-            {
-                const qreal x = inner.left() + inner.width() * i / 20.0;
-                const qreal y = inner.center().y() + std::sin(i * 0.65) * 10.0;
-                path.lineTo(x, y);
-            }
-            painter.drawPath(path);
-            painter.setPen(QPen(QColor(112, 110, 255, 120), 3.0));
-            QTransform translated;
-            translated.translate(0.0, -8.0);
-            painter.drawPath(translated.map(path));
-        }
-        else if(id == "sky_nebula")
-        {
-            painter.fillRect(inner, QColor("#090B22"));
-            QRadialGradient n1(QPointF(inner.left() + inner.width() * 0.35, inner.center().y()), inner.width() * 0.32);
-            n1.setColorAt(0.0, QColor(132, 72, 255, 210));
-            n1.setColorAt(0.5, QColor(219, 74, 205, 100));
-            n1.setColorAt(1.0, QColor(0, 0, 0, 0));
-            painter.fillRect(inner, QBrush(n1));
         }
         else
         {
@@ -14281,20 +14260,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(immediateCompile)
         {
             liveCompileTimer_.stop();
-            beginnerLiveCompileTimer_.stop();
             compileEditor();
         }
-        else if(beginnerUiMode_)
+        else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
         {
-            // Beginner sliders are continuously live. Do not restart this timer on
-            // every mouse-move event: the old debounce only fired after dragging
-            // stopped. The dedicated short throttle compiles the newest generated
-            // HLSL while the slider is still moving, without queueing stale frames.
-            if(!beginnerLiveCompileTimer_.isActive())
-                beginnerLiveCompileTimer_.start();
-        }
-        else if(!liveCompile_ || liveCompile_->isChecked())
-        {
+            // Beginner mode is always live: the user should see slider changes
+            // immediately even if Advanced mode previously disabled Live Update.
             liveCompileTimer_.start();
         }
     }
@@ -19393,7 +19364,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QDoubleSpinBox* vectorBoxes_[8][4]{};
     QLabel* vectorInfo_ = nullptr;
     std::unique_ptr<HlslHighlighter> highlighter_;
-    QTimer liveCompileTimer_, beginnerLiveCompileTimer_, sourceValuesRefreshTimer_, fileWatchTimer_, performanceTimer_;
+    QTimer liveCompileTimer_, sourceValuesRefreshTimer_, fileWatchTimer_, performanceTimer_;
     QMap<QString, QAction*> themeActions_;
     QMap<QString, QKeySequence> shortcutDefaults_;
     QMap<QString, QShortcut*> shortcuts_;
