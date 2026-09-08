@@ -15,4 +15,7 @@
         <file alias="12_learning_projects.md">../docs/learning/12_learning_projects.md</file>
         <file alias="13_community_resources.md">../docs/learning/13_community_resources.md</file>
     </qresource>
+    <qresource prefix="/preview">
+        <file alias="beginner_depth_game_scene.jpg">preview/beginner_depth_game_scene.jpg</file>
+    </qresource>
 </RCC>

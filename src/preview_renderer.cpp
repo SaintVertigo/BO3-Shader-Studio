@@ -1547,150 +1547,118 @@ public:
     {
         if(liveCaptureSource_) StopLiveCapture();
 
+        // Beginner depth preview deliberately uses a real in-game BO3 screenshot
+        // for color, paired with a hand-authored Float-Z approximation of the same
+        // corridor. It is not a capture of BO3's original depth buffer, but it is
+        // far more useful for judging the *look* of outlines/AO/fog than the old
+        // abstract boxes-and-grid scene. Actual BO3 export still binds live floatZ.
+        QImage sourceImage(QStringLiteral(":/preview/beginner_depth_game_scene.jpg"));
+        if(sourceImage.isNull())
+        {
+            error = L"Could not load the built-in BO3 game depth-preview screenshot resource.";
+            return false;
+        }
+
+        sourceImage = sourceImage.convertToFormat(QImage::Format_RGBA8888);
         constexpr UINT w = 1280;
         constexpr UINT h = 720;
+        if(sourceImage.width() != static_cast<int>(w) || sourceImage.height() != static_cast<int>(h))
+            sourceImage = sourceImage.scaled(static_cast<int>(w), static_cast<int>(h), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
         constexpr float zNear = 0.1f;
         constexpr float depthHackSplit = 63.0f / 64.0f;
-
         std::vector<uint8_t> color(static_cast<size_t>(w) * h * 4u, 255u);
-        std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
-        std::vector<float> worldDepth(static_cast<size_t>(w) * h, 2500.0f);
+        std::memcpy(color.data(), sourceImage.constBits(), color.size());
 
-        auto encodeRawDepth = [&](float distance)
+        std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
+        std::vector<float> worldDepth(static_cast<size_t>(w) * h, 1200.0f);
+        std::vector<uint8_t> depthHackMask(static_cast<size_t>(w) * h, 0u);
+
+        auto encodeWorldRawDepth = [&](float distance)
         {
             const float safeDistance = std::max(distance, zNear + 0.001f);
             const float processed = std::clamp(zNear / safeDistance, 0.0000001f, 0.999f);
             return std::min(processed * depthHackSplit, depthHackSplit - 0.000001f);
         };
-        auto writePixel = [&](UINT x, UINT y, float distance, float r, float g, float b)
+        auto encodeDepthHackedRawDepth = [&](float distance)
         {
-            if(x >= w || y >= h) return;
-            const size_t p = static_cast<size_t>(y) * w + x;
-            if(distance > worldDepth[p]) return;
-            worldDepth[p] = distance;
-            const size_t i = p * 4u;
-            auto byte = [](float v) -> uint8_t {
-                return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
-            };
-            color[i + 0] = byte(r);
-            color[i + 1] = byte(g);
-            color[i + 2] = byte(b);
-            color[i + 3] = 255;
+            const float safeDistance = std::max(distance, zNear + 0.001f);
+            const float processed = std::clamp(zNear / safeDistance, 0.0000001f, 0.999f);
+            return std::clamp((processed + 63.0f) / 64.0f,
+                              depthHackSplit + 0.000001f, 0.999999f);
         };
 
-        const float horizon = 0.43f;
+        // Perspective reconstruction for the corridor screenshot. The vanishing
+        // point is at the bright opening in the far room. Distances are chosen in
+        // BO3-like linear units so the Beginner Float-Z decoder exercises the same
+        // near/mid/far ranges as it will in game.
+        const float vpX = 0.675f;
+        const float vpY = 0.435f;
         for(UINT y = 0; y < h; ++y)
         {
             const float fy = static_cast<float>(y) / static_cast<float>(h - 1);
             for(UINT x = 0; x < w; ++x)
             {
                 const float fx = static_cast<float>(x) / static_cast<float>(w - 1);
-                float distance = 1800.0f;
-                float r = 0.24f, g = 0.29f, b = 0.34f;
+                const size_t pidx = static_cast<size_t>(y) * w + x;
 
-                if(fy < horizon)
+                float distance = 900.0f;
+                if(fy >= vpY)
                 {
-                    const float ceilingT = std::clamp((horizon - fy) / horizon, 0.0f, 1.0f);
-                    distance = 1050.0f + ceilingT * 650.0f;
-                    const float panel = (static_cast<int>(fx * 14.0f) + static_cast<int>(fy * 18.0f)) & 1;
-                    r = 0.22f + panel * 0.025f;
-                    g = 0.27f + panel * 0.025f;
-                    b = 0.31f + panel * 0.030f;
+                    const float floorT = std::clamp((fy - vpY) / (1.0f - vpY), 0.0f, 1.0f);
+                    distance = 4.0f + 1180.0f * (1.0f - floorT) * (1.0f - floorT);
                 }
                 else
                 {
-                    const float floorT = std::clamp((fy - horizon) / (1.0f - horizon), 0.0f, 1.0f);
-                    distance = 42.0f + 1500.0f * (1.0f - floorT) * (1.0f - floorT);
-                    const float lane = std::abs(fx - 0.5f);
-                    const float shade = 0.20f + floorT * 0.18f - lane * 0.07f;
-                    r = shade * 0.92f;
-                    g = shade;
-                    b = shade * 1.04f;
-                    const float perspectiveX = (fx - 0.5f) / std::max(0.18f, 1.0f - floorT * 0.78f);
-                    const float gridX = std::abs(std::fmod(std::abs(perspectiveX) * 12.0f, 1.0f) - 0.5f);
-                    const float gridY = std::abs(std::fmod(std::sqrt(std::max(floorT, 0.0f)) * 18.0f, 1.0f) - 0.5f);
-                    if(gridX > 0.47f || gridY > 0.47f)
-                    {
-                        r += 0.10f; g += 0.11f; b += 0.12f;
-                    }
+                    const float ceilingT = std::clamp((vpY - fy) / std::max(vpY, 0.001f), 0.0f, 1.0f);
+                    distance = 7.0f + 1160.0f * (1.0f - ceilingT) * (1.0f - ceilingT);
                 }
 
-                // Side walls converge toward the vanishing point and create real
-                // depth discontinuities for outlines/AO.
-                const float converge = 0.18f + std::max(0.0f, fy - horizon) * 0.34f;
-                if(fx < converge)
+                // Side-wall perspective: pixels farther from the vanishing point
+                // become progressively closer to the camera.
+                const float sideNorm = std::clamp(std::abs(fx - vpX) / 0.70f, 0.0f, 1.0f);
+                const float sideDistance = 7.0f + 1050.0f * (1.0f - sideNorm) * (1.0f - sideNorm);
+                if(fx < 0.48f || fx > 0.88f)
+                    distance = std::min(distance, sideDistance);
+
+                // Large scene props visible in the screenshot. These extra depth
+                // discontinuities make AO/contact shadows and cartoon silhouettes
+                // readable against a real BO3 image rather than a synthetic grid.
+                if(fx > 0.31f && fx < 0.48f && fy > 0.49f && fy < 0.76f)
+                    distance = std::min(distance, 18.0f + (0.76f - fy) * 55.0f);
+                if(fx > 0.49f && fx < 0.60f && fy > 0.49f && fy < 0.64f)
+                    distance = std::min(distance, 34.0f);
+                if(fx > 0.73f && fx < 0.88f && fy > 0.48f && fy < 0.70f)
+                    distance = std::min(distance, 28.0f + (0.70f - fy) * 45.0f);
+
+                // Bright far opening / exterior.
+                if(fx > 0.605f && fx < 0.735f && fy > 0.31f && fy < 0.515f)
+                    distance = 1450.0f;
+
+                // Approximate the first-person weapon/arms as BO3 depth-hacked
+                // geometry. Beginner depth effects intentionally ignore this mask,
+                // matching the killfeed shader's world-vs-viewmodel Float-Z split.
+                const bool viewmodel =
+                    (fy > 0.84f && fx > 0.50f) ||
+                    (fy > 0.72f && fx > 0.63f) ||
+                    (fy > 0.62f && fy < 0.75f && fx > 0.57f && fx < 0.80f) ||
+                    (fy > 0.76f && fx > 0.53f && fx < 0.72f);
+                if(viewmodel)
                 {
-                    const float edgeT = std::clamp(fx / std::max(converge, 0.001f), 0.0f, 1.0f);
-                    distance = 170.0f + edgeT * 900.0f;
-                    r = 0.25f + 0.06f * edgeT;
-                    g = 0.30f + 0.06f * edgeT;
-                    b = 0.34f + 0.07f * edgeT;
-                }
-                else if(fx > 1.0f - converge)
-                {
-                    const float edgeT = std::clamp((1.0f - fx) / std::max(converge, 0.001f), 0.0f, 1.0f);
-                    distance = 170.0f + edgeT * 900.0f;
-                    r = 0.21f + 0.05f * edgeT;
-                    g = 0.27f + 0.07f * edgeT;
-                    b = 0.33f + 0.09f * edgeT;
+                    depthHackMask[pidx] = 1u;
+                    distance = 0.65f;
                 }
 
-                writePixel(x, y, distance, r, g, b);
+                worldDepth[pidx] = distance;
             }
         }
 
-        auto drawRect = [&](int x0, int y0, int x1, int y1, float distance,
-                            float r, float g, float b)
+        for(size_t pidx = 0; pidx < worldDepth.size(); ++pidx)
         {
-            x0 = std::clamp(x0, 0, static_cast<int>(w));
-            x1 = std::clamp(x1, 0, static_cast<int>(w));
-            y0 = std::clamp(y0, 0, static_cast<int>(h));
-            y1 = std::clamp(y1, 0, static_cast<int>(h));
-            for(int y = y0; y < y1; ++y)
-                for(int x = x0; x < x1; ++x)
-                {
-                    const float nx = (x - x0) / std::max(1.0f, static_cast<float>(x1 - x0));
-                    const float ny = (y - y0) / std::max(1.0f, static_cast<float>(y1 - y0));
-                    const float light = 0.86f + 0.16f * (1.0f - nx) + 0.05f * (1.0f - ny);
-                    writePixel(static_cast<UINT>(x), static_cast<UINT>(y), distance,
-                               r * light, g * light, b * light);
-                }
-        };
-
-        // Near/mid/far objects give depth effects multiple contact scales.
-        drawRect(150, 365, 310, 665, 95.0f, 0.34f, 0.41f, 0.48f);
-        drawRect(335, 430, 520, 615, 210.0f, 0.46f, 0.33f, 0.24f);
-        drawRect(805, 390, 990, 585, 320.0f, 0.20f, 0.42f, 0.48f);
-        drawRect(1040, 330, 1140, 520, 560.0f, 0.42f, 0.37f, 0.24f);
-        drawRect(575, 330, 665, 470, 760.0f, 0.36f, 0.40f, 0.43f);
-
-        // Rounded sphere with per-pixel depth curvature.
-        const float cx = 730.0f, cy = 330.0f, radius = 92.0f, centerDepth = 180.0f;
-        for(int y = static_cast<int>(cy - radius); y <= static_cast<int>(cy + radius); ++y)
-        {
-            for(int x = static_cast<int>(cx - radius); x <= static_cast<int>(cx + radius); ++x)
-            {
-                if(x < 0 || y < 0 || x >= static_cast<int>(w) || y >= static_cast<int>(h)) continue;
-                const float dx = (x - cx) / radius;
-                const float dy = (y - cy) / radius;
-                const float rr = dx * dx + dy * dy;
-                if(rr > 1.0f) continue;
-                const float nz = std::sqrt(std::max(0.0f, 1.0f - rr));
-                const float d = centerDepth - nz * 34.0f;
-                const float lighting = 0.32f + 0.68f * std::clamp(nz * 0.72f - dx * 0.26f - dy * 0.18f, 0.0f, 1.0f);
-                writePixel(static_cast<UINT>(x), static_cast<UINT>(y), d,
-                           0.18f * lighting, 0.50f * lighting, 0.72f * lighting);
-            }
-        }
-
-        // Bright far doorway gives fog and outline tests an obvious distant target.
-        drawRect(602, 240, 682, 335, 1150.0f, 0.76f, 0.84f, 0.88f);
-        drawRect(613, 251, 671, 335, 1450.0f, 0.90f, 0.92f, 0.86f);
-
-        for(size_t p = 0; p < worldDepth.size(); ++p)
-        {
-            const float raw = encodeRawDepth(worldDepth[p]);
-            const size_t i = p * 4u;
+            const float raw = depthHackMask[pidx]
+                ? encodeDepthHackedRawDepth(worldDepth[pidx])
+                : encodeWorldRawDepth(worldDepth[pidx]);
+            const size_t i = pidx * 4u;
             rawDepth[i + 0] = raw;
             rawDepth[i + 1] = raw;
             rawDepth[i + 2] = raw;
@@ -1708,7 +1676,7 @@ public:
         sourceHeight_ = depthHeight_ = h;
         sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
         sourceHdrPeakLuminance_ = 1.0f;
-        sourceHdrMeanLuminance_ = 0.26f;
+        sourceHdrMeanLuminance_ = 0.24f;
         depthUserLoaded_ = false;
         builtInDepthScene_ = true;
         ResetTemporalExposureState();

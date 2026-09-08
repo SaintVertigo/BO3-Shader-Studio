@@ -678,22 +678,42 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_sun" && project.target == Target::Sky)
         {
             const QColor sunColor = parameterColor(effect, *definition, "color");
-            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
-            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
             const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
             const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
             const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
             const QString glow = floatLiteral(parameterFloat(effect, *definition, "glow"));
-            out += QString("    // %1\n"
-                           "    float %2_az = %3 * 6.2831853;\n"
-                           "    float %2_h = clamp(%4, -0.98, 0.98);\n"
-                           "    float %2_xy = sqrt(max(1.0 - %2_h * %2_h, 0.0));\n"
-                           "    float3 %2_dir = normalize(float3(cos(%2_az) * %2_xy, sin(%2_az) * %2_xy, %2_h));\n"
-                           "    float %2_angle = acos(clamp(dot(d, %2_dir), -1.0, 1.0));\n"
-                           "    float %2_disc = 1.0 - smoothstep(%5, %5 + %6, %2_angle);\n"
-                           "    float %2_halo = pow(saturate(dot(d,%2_dir)), lerp(96.0, 6.0, saturate(%7)));\n"
-                           "    color += %8 * ((%2_disc * %9) + (%2_halo * %9 * %7 * 0.45));\n")
-                .arg(definition->name, tag, azimuth, height, size, softness, glow, colorLiteral(sunColor), brightness);
+            const QString atmosphere = floatLiteral(parameterFloat(effect, *definition, "atmosphere"));
+            const QString haze = floatLiteral(parameterFloat(effect, *definition, "haze"));
+            out += QString("    // %1 - BO3 HLSL rewrite of the supplied StillTravelling-style Rayleigh/Mie sun + time-of-day atmosphere\n"
+                           "    float %2_mu = clamp(dot(d, beginnerSunDir), -1.0, 1.0);\n"
+                           "    float %2_mu2 = %2_mu * %2_mu;\n"
+                           "    const float %2_g = 0.45;\n"
+                           "    const float %2_g2 = %2_g * %2_g;\n"
+                           "    float %2_phaseR = 0.0596831 * (1.0 + %2_mu2);\n"
+                           "    float %2_phaseM = 0.1193662 * (1.0 - %2_g2) * (1.0 + %2_mu2) /\n"
+                           "        max((2.0 + %2_g2) * pow(max(1.0 + %2_g2 - 2.0 * %2_g * %2_mu, 0.0001), 1.5), 0.0001);\n"
+                           "    float %2_horizonPath = rcp(max(abs(d.z) + 0.075, 0.075));\n"
+                           "    float3 %2_betaR = float3(5.8, 13.5, 33.1);\n"
+                           "    float3 %2_rayleigh = %2_betaR * (%2_phaseR * %2_horizonPath * 0.040);\n"
+                           "    float %2_mie = %2_phaseM * %2_horizonPath * 0.58;\n"
+                           "    float %2_sunHeight01 = saturate(beginnerSunElevation * 2.15 + 0.15);\n"
+                           "    float3 %2_warmSun = lerp(float3(1.0, 0.16, 0.025), %3, smoothstep(0.0, 0.34, %2_sunHeight01));\n"
+                           "    float3 %2_daySky = %2_rayleigh * lerp(float3(0.60, 0.30, 0.16), float3(0.055, 0.090, 0.14), %2_sunHeight01);\n"
+                           "    %2_daySky += %2_warmSun * (%2_mie * (0.16 + %4 * 0.22));\n"
+                           "    float %2_horizonGlow = exp(-abs(d.z) * lerp(3.2, 9.0, saturate(%5))) *\n"
+                           "        pow(saturate(%2_mu * 0.5 + 0.5), 4.0);\n"
+                           "    %2_daySky += %2_warmSun * (%2_horizonGlow * (0.30 + %5 * 0.85));\n"
+                           "    float3 %2_nightSky = lerp(float3(0.003,0.006,0.018), float3(0.012,0.025,0.075), saturate(d.z * 0.5 + 0.5));\n"
+                           "    float %2_twilight = saturate(1.0 - abs(beginnerSunElevation) * 7.0) * (1.0 - beginnerDaylight * 0.35);\n"
+                           "    float3 %2_twilightSky = lerp(%2_nightSky, float3(0.52,0.10,0.035) + %2_daySky * 0.40, %2_twilight);\n"
+                           "    float3 %2_atmosphere = lerp(%2_twilightSky, %2_daySky, beginnerDaylight);\n"
+                           "    color = lerp(color, max(%2_atmosphere, 0.0), saturate(%6));\n"
+                           "    float %2_angle = acos(clamp(%2_mu, -1.0, 1.0));\n"
+                           "    float %2_disc = 1.0 - smoothstep(%7, %7 + %8, %2_angle);\n"
+                           "    float %2_halo = pow(saturate(%2_mu), lerp(220.0, 7.0, saturate(%4)));\n"
+                           "    float %2_sunVisible = smoothstep(-0.035, 0.012, beginnerSunElevation);\n"
+                           "    color += %3 * (%2_disc * %9 + %2_halo * %9 * %4 * 0.28) * %2_sunVisible;\n")
+                .arg(definition->name, tag, colorLiteral(sunColor), glow, haze, atmosphere, size, softness, brightness);
         }
         else if(effect.typeId == "sky_moon" && project.target == Target::Sky)
         {
@@ -757,16 +777,22 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
             const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
             const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
-            out += QString("    // %1 - lightweight seamless direction-space cloud layers\n"
+            out += QString("    // %1 - perspective cloud sheet with directional wind and sun response\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
-                           "    float3 %2_wind = float3(cos(%2_windAngle), sin(%2_windAngle), 0.12);\n"
-                           "    float3 %2_cp = d * %3 + %2_wind * (t * %6 * 0.045);\n"
+                           "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
+                           "    float %2_layerHeight = 1.35 + %8 * 2.2;\n"
+                           "    float %2_cloudT = %2_layerHeight / max(d.z, 0.035);\n"
+                           "    float2 %2_world = d.xy * %2_cloudT;\n"
+                           "    float3 %2_cp = float3((%2_world + %2_wind * (t * %6 * 0.32)) * (%3 * 0.22), 0.65);\n"
                            "    float %2_n1 = BO3BeginnerFbm3(%2_cp);\n"
-                           "    float %2_n2 = BO3BeginnerFbm3(%2_cp * 1.83 + float3(4.1,1.7,-2.4));\n"
-                           "    float %2_cloud = smoothstep(%4, min(%4 + max(%5,0.01), 1.0), %2_n1 * 0.72 + %2_n2 * 0.28);\n"
-                           "    float %2_skyMask = smoothstep(%8 - 0.18, %8 + 0.22, d.z);\n"
-                           "    float %2_light = 0.68 + 0.32 * BO3BeginnerFbm3(%2_cp + float3(0.7,-0.4,0.9));\n"
-                           "    float3 %2_cloudColor = %7 * %2_light * %10;\n"
+                           "    float %2_n2 = BO3BeginnerFbm3(%2_cp * 2.03 + float3(4.1,1.7,-2.4));\n"
+                           "    float %2_density = %2_n1 * 0.73 + %2_n2 * 0.27;\n"
+                           "    float %2_cloud = smoothstep(%4, min(%4 + max(%5,0.01), 1.0), %2_density);\n"
+                           "    float %2_skyMask = smoothstep(0.018, 0.095, d.z);\n"
+                           "    float %2_sunFacing = saturate(dot(normalize(float3(%2_wind * 0.15, 0.98)), beginnerSunDir) * 0.5 + 0.5);\n"
+                           "    float %2_internalLight = 0.62 + 0.38 * BO3BeginnerFbm3(%2_cp + beginnerSunDir * 0.42);\n"
+                           "    float3 %2_cloudColor = %7 * %10 * lerp(0.68, 1.16, %2_internalLight * lerp(0.55,1.0,beginnerDaylight));\n"
+                           "    %2_cloudColor *= lerp(0.72, 1.12, %2_sunFacing * beginnerDaylight);\n"
                            "    color = lerp(color, %2_cloudColor, saturate(%2_cloud * %2_skyMask * %11));\n")
                 .arg(definition->name)
                 .arg(tag)
@@ -791,22 +817,35 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
             const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
             const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
-            out += QString("    // %1 - compact volumetric raymarch using warped multi-octave density\n"
+            out += QString("    // %1 - BO3 HLSL slab raymarch adapted from the supplied StillTravelling atmospheric/cloud reference\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
-                           "    float3 %2_wind = float3(cos(%2_windAngle), sin(%2_windAngle), 0.08);\n"
+                           "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
+                           "    float %2_cloudBase = 1.25 + %8 * 2.6;\n"
+                           "    float %2_cloudTop = %2_cloudBase + 1.55;\n"
+                           "    float %2_viewZ = max(d.z, 0.028);\n"
+                           "    float %2_t0 = %2_cloudBase / %2_viewZ;\n"
+                           "    float %2_t1 = %2_cloudTop / %2_viewZ;\n"
                            "    float %2_trans = 1.0;\n"
                            "    float3 %2_accum = 0.0;\n"
-                           "    float %2_upper = smoothstep(%8 - 0.22, %8 + 0.18, d.z);\n"
-                           "    [loop] for(int %2_i = 0; %2_i < 18; ++%2_i)\n"
+                           "    float %2_upper = smoothstep(0.015, 0.080, d.z);\n"
+                           "    [loop] for(int %2_i = 0; %2_i < 16; ++%2_i)\n"
                            "    {\n"
-                           "        float %2_dist = 1.25 + float(%2_i) * 0.23;\n"
-                           "        float3 %2_p = d * (%2_dist * %3) + %2_wind * (t * %5 * 0.060) + float3(0.0,0.0,%8*1.4);\n"
-                           "        float %2_base = BO3BeginnerFbm3(%2_p);\n"
-                           "        float %2_detail = BO3BeginnerFbm3(%2_p * 2.1 + float3(2.4,-1.7,3.6));\n"
-                           "        float %2_density = smoothstep(%4, min(%4 + 0.16,1.0), %2_base * 0.78 + %2_detail * 0.22) * %2_upper;\n"
-                           "        float %2_alpha = saturate(%2_density * %6 * 0.13);\n"
-                           "        float %2_light = saturate(0.28 + 0.92 * BO3BeginnerFbm3(%2_p + float3(0.65,-0.45,0.8)));\n"
+                           "        float %2_q = (float(%2_i) + 0.5) / 16.0;\n"
+                           "        float %2_dist = lerp(%2_t0, %2_t1, %2_q);\n"
+                           "        float3 %2_world = d * %2_dist;\n"
+                           "        %2_world.xy += %2_wind * (t * %5 * 0.40);\n"
+                           "        float3 %2_p = %2_world * (%3 * 0.28);\n"
+                           "        float %2_baseN = BO3BeginnerFbm3(%2_p);\n"
+                           "        float %2_detailN = BO3BeginnerFbm3(%2_p * 2.15 + float3(2.4,-1.7,3.6));\n"
+                           "        float %2_heightShape = sin(%2_q * 3.14159265);\n"
+                           "        float %2_field = (%2_baseN * 0.76 + %2_detailN * 0.24) * (0.72 + %2_heightShape * 0.40);\n"
+                           "        float %2_density = smoothstep(%4, min(%4 + 0.15,1.0), %2_field) * %2_heightShape * %2_upper;\n"
+                           "        float %2_lightProbe = BO3BeginnerFbm3((%2_world + beginnerSunDir * 0.55) * (%3 * 0.28));\n"
+                           "        float %2_selfShadow = saturate(0.52 + (%2_field - %2_lightProbe) * 3.1);\n"
+                           "        float %2_sunAmount = lerp(0.35, 1.0, beginnerDaylight) * saturate(beginnerSunDir.z * 0.55 + 0.65);\n"
+                           "        float %2_light = saturate(%2_selfShadow * 0.78 + %2_sunAmount * 0.42);\n"
                            "        float3 %2_cloudColor = lerp(%10, %11, %2_light) * %7;\n"
+                           "        float %2_alpha = saturate(%2_density * %6 * 0.115);\n"
                            "        %2_accum += %2_cloudColor * (%2_alpha * %2_trans);\n"
                            "        %2_trans *= (1.0 - %2_alpha);\n"
                            "    }\n"
@@ -892,6 +931,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color += %2_nebColor * (%2_neb * %7);\n")
                 .arg(definition->name, tag, drift, scale, colorLiteral(colorA), colorLiteral(colorB), intensity);
         }
+        else if(effect.typeId == "sky_water" && project.target == Target::Sky)
+        {
+            // Direction reflection and water finishing are applied once around the
+            // entire sky stack in generateSky(), so every sky effect participates
+            // in the reflection instead of reflecting only one layer.
+            out += QString("    // %1 - whole-sky still-water reflection; lower-direction mirroring adapted from the supplied Shadertoy reference\n")
+                .arg(definition->name);
+        }
         else if(effect.typeId == "grid_rings" && hasUv)
         {
             const QColor patternColor = parameterColor(effect, *definition, "color");
@@ -932,6 +979,13 @@ bool projectUsesEffect(const Project& project, const QString& id)
     for(const Effect& effect : project.effects)
         if(effect.enabled && effect.typeId == id) return true;
     return false;
+}
+
+const Effect* firstEnabledEffect(const Project& project, const QString& id)
+{
+    for(const Effect& effect : project.effects)
+        if(effect.enabled && effect.typeId == id) return &effect;
+    return nullptr;
 }
 
 QString optionalHelpers(const Project& project)
@@ -1324,10 +1378,74 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
 QString generateSky(const Project& project)
 {
     const QColor zenith = settingColor(project, "zenithColor", QColor("#102E68"));
-    const QColor horizon = settingColor(project, "horizonColor", QColor("#E17658"));
+    const QColor horizonColor = settingColor(project, "horizonColor", QColor("#E17658"));
     const QColor ground = settingColor(project, "groundColor", QColor("#060B18"));
     const QString helpers = optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, false);
+
+    double sunTime = 14.0;
+    double sunAzimuth = 0.12;
+    double sunArcHeight = 0.86;
+    if(const Effect* sun = firstEnabledEffect(project, "sky_sun"))
+    {
+        if(const EffectDefinition* def = effectDefinition("sky_sun"))
+        {
+            sunTime = parameterFloat(*sun, *def, "time_of_day");
+            sunAzimuth = parameterFloat(*sun, *def, "azimuth");
+            sunArcHeight = parameterFloat(*sun, *def, "height");
+        }
+    }
+
+    QString waterDirectionPrelude = QStringLiteral(
+        "    float3 rawSkyDirection = normalize(input.skyDirection.xyz);\n"
+        "    float beginnerWaterMask = 0.0;\n"
+        "    float3 d = rawSkyDirection;\n");
+    QString waterFinalize;
+    if(const Effect* water = firstEnabledEffect(project, "sky_water"))
+    {
+        if(const EffectDefinition* def = effectDefinition("sky_water"))
+        {
+            const QColor tint = parameterColor(*water, *def, "tint");
+            const QString reflection = floatLiteral(parameterFloat(*water, *def, "reflection"));
+            const QString ripple = floatLiteral(parameterFloat(*water, *def, "ripple"));
+            const QString scale = floatLiteral(parameterFloat(*water, *def, "scale"));
+            const QString speed = floatLiteral(parameterFloat(*water, *def, "speed"));
+            const QString horizonBlend = floatLiteral(parameterFloat(*water, *def, "horizon"));
+            waterDirectionPrelude = QString(
+                "    float3 rawSkyDirection = normalize(input.skyDirection.xyz);\n"
+                "    float beginnerWaterMask = 1.0 - smoothstep(-%1, %1, rawSkyDirection.z);\n"
+                "    float3 beginnerReflectedDirection = rawSkyDirection;\n"
+                "    beginnerReflectedDirection.z = abs(beginnerReflectedDirection.z);\n"
+                "    float2 beginnerWaterAxis = normalize(rawSkyDirection.xy + float2(1e-5,0.0));\n"
+                "    float beginnerWaterPhaseA = dot(beginnerWaterAxis, float2(0.83,0.56)) * %2 + t * %3 * 1.7;\n"
+                "    float beginnerWaterPhaseB = dot(beginnerWaterAxis, float2(-0.42,0.91)) * (%2 * 1.73) - t * %3 * 1.1;\n"
+                "    float2 beginnerWaterRipple = float2(sin(beginnerWaterPhaseA), cos(beginnerWaterPhaseB)) * (%4 * 0.0065);\n"
+                "    beginnerWaterRipple *= smoothstep(0.0,0.22,abs(rawSkyDirection.z));\n"
+                "    beginnerReflectedDirection.xy += beginnerWaterRipple;\n"
+                "    beginnerReflectedDirection = normalize(beginnerReflectedDirection);\n"
+                "    float3 d = normalize(lerp(rawSkyDirection, beginnerReflectedDirection, beginnerWaterMask));\n")
+                .arg(horizonBlend, scale, speed, ripple);
+            waterFinalize = QString(
+                "    // Still-water reflection: all sky effects above were evaluated with a mirrored lower direction.\n"
+                "    float beginnerFresnel = pow(saturate(1.0 - abs(rawSkyDirection.z)), 3.0);\n"
+                "    float3 beginnerWaterColor = color * %1;\n"
+                "    beginnerWaterColor = lerp(beginnerWaterColor, beginnerWaterColor * %2, 0.28 + beginnerFresnel * 0.18);\n"
+                "    color = lerp(color, beginnerWaterColor, beginnerWaterMask);\n")
+                .arg(reflection, colorLiteral(tint));
+        }
+    }
+
+    const QString sharedSun = QString(
+        "    // Shared time-of-day sun direction. Clouds and atmosphere use the same light path.\n"
+        "    float beginnerTimeOfDay = %1;\n"
+        "    float beginnerSolarPhase = (beginnerTimeOfDay - 6.0) * (6.28318530718 / 24.0);\n"
+        "    float beginnerSunElevation = sin(beginnerSolarPhase) * %2;\n"
+        "    float beginnerSunAzimuth = %3 * 6.28318530718 + cos(beginnerSolarPhase) * 1.15;\n"
+        "    float beginnerSunHorizontal = sqrt(max(1.0 - beginnerSunElevation * beginnerSunElevation, 0.0));\n"
+        "    float3 beginnerSunDir = normalize(float3(cos(beginnerSunAzimuth) * beginnerSunHorizontal, sin(beginnerSunAzimuth) * beginnerSunHorizontal, beginnerSunElevation));\n"
+        "    float beginnerDaylight = smoothstep(-0.10, 0.075, beginnerSunElevation);\n")
+        .arg(floatLiteral(sunTime), floatLiteral(sunArcHeight), floatLiteral(sunAzimuth));
+
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
 // BO3_BEGINNER_TARGET: SKY
@@ -1364,17 +1482,18 @@ struct PixelShaderInput
 %2
 float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 {
-    float3 d = normalize(input.skyDirection.xyz);
     float t = gameTime.w;
+%3%4
     float horizon = saturate(1.0 - abs(d.z));
     float up = saturate(d.z * 0.5 + 0.5);
     float beginnerVertical = up;
-    float3 color = lerp(%3, %4, smoothstep(0.0, 0.62, up));
-    color = lerp(color, %5, pow(horizon, 5.0) * 0.72);
-%6
+    float3 color = lerp(%5, %6, smoothstep(0.0, 0.62, up));
+    color = lerp(color, %7, pow(horizon, 5.0) * 0.72);
+%8%9
     return float4(clamp(color, float3(0.0, 0.0, 0.0), float3(65024.0, 65024.0, 65024.0)), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(ground), colorLiteral(zenith), colorLiteral(horizon), effects);
+)HLSL").arg(effectStackMarker(project), helpers, waterDirectionPrelude, sharedSun,
+             colorLiteral(ground), colorLiteral(zenith), colorLiteral(horizonColor), effects, waterFinalize);
 }
 
 } // namespace
@@ -1575,15 +1694,18 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("speed", "Speed", "How quickly the water motion animates.", -4.0, 4.0, 0.01, 0.85),
                    FloatParam("strength", "Strength", "Blend amount between the original scene and the distorted version.", 0.0, 1.0, 0.01, 1.0)}),
 
-        EffectDef("sky_sun", "Sun & Glow", "Place a procedural sun anywhere in the BO3 sky and control its disc, softness and surrounding glow.", "Sky & Environment",
+        EffectDef("sky_sun", "Atmospheric Sun / Time", "Move the sun through a full day/night cycle. Its position now drives a Rayleigh/Mie-inspired sky, horizon color and realistic halo instead of only drawing a flat disc.", "Sky & Environment",
                   {Target::Sky},
-                  {ColorParam("color", "Sun Color", "Color of the sun and its halo.", "#FFD59A"),
-                   FloatParam("azimuth", "Horizontal Position", "Move the sun around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
-                   FloatParam("height", "Height", "Vertical position of the sun in direction space.", -0.85, 0.95, 0.01, 0.28),
-                   FloatParam("size", "Disc Size", "Angular radius of the bright sun disc.", 0.005, 0.22, 0.0025, 0.045),
-                   FloatParam("softness", "Edge Softness", "Width of the sun-disc edge transition.", 0.001, 0.12, 0.002, 0.012),
-                   FloatParam("brightness", "Brightness", "HDR brightness of the sun.", 0.0, 8.0, 0.05, 2.4),
-                   FloatParam("glow", "Glow", "Strength and width of the surrounding halo.", 0.0, 1.0, 0.01, 0.45)}),
+                  {ColorParam("color", "Sun Color", "Base daylight color of the sun. Sunrise and sunset warm it automatically.", "#FFF1D2"),
+                   FloatParam("time_of_day", "Time of Day", "Move the sun through the day. 6 = sunrise, 12 = noon, 18 = sunset, 0/24 = midnight.", 0.0, 24.0, 0.05, 14.0),
+                   FloatParam("azimuth", "Sun Direction", "Rotate the sun path around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
+                   FloatParam("height", "Sun Arc Height", "Maximum elevation of the sun at midday.", 0.20, 0.98, 0.01, 0.86),
+                   FloatParam("size", "Disc Size", "Angular radius of the bright sun disc.", 0.003, 0.12, 0.001, 0.022),
+                   FloatParam("softness", "Disc Softness", "Width of the sun-disc edge transition.", 0.0005, 0.05, 0.001, 0.005),
+                   FloatParam("brightness", "Sun Brightness", "HDR brightness of the sun disc and halo.", 0.0, 10.0, 0.05, 4.2),
+                   FloatParam("glow", "Mie Glow", "Width and strength of forward-scattered light around the sun.", 0.0, 1.0, 0.01, 0.58),
+                   FloatParam("atmosphere", "Atmosphere", "How strongly the sun position recolors the entire sky.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("haze", "Horizon Haze", "Warm atmospheric haze near the horizon and around the sun.", 0.0, 1.0, 0.01, 0.48)}),
         EffectDef("sky_moon", "Moon & Halo", "Place an independent moon in the sky, including crescent phase and a soft halo.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("color", "Moon Color", "Color of the moon and halo.", "#DCE8FF"),
@@ -1627,6 +1749,15 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("coverage", "Coverage", "Higher values make the volume more broken up.", 0.15, 0.85, 0.01, 0.48),
                    FloatParam("direction", "Wind Direction", "Direction the cloud volume moves, in degrees around the horizon.", 0.0, 360.0, 1.0, 35.0),
                    FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts. Negative values reverse it.", -2.0, 2.0, 0.01, 0.20)}),
+        EffectDef("sky_water", "Still Water Reflection", "Turn the lower hemisphere into a still-water reflection of the complete procedural sky, with subtle animated ripples and tint.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("tint", "Water Tint", "Color mixed into the reflected lower hemisphere.", "#183344"),
+                   FloatParam("reflection", "Reflection", "Brightness of the mirrored sky in the water.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("ripple", "Ripple Amount", "Small angular distortion applied to the reflected sky.", 0.0, 1.0, 0.01, 0.10),
+                   FloatParam("scale", "Ripple Scale", "Size/frequency of the water ripples.", 1.0, 48.0, 0.5, 13.0),
+                   FloatParam("speed", "Ripple Speed", "How quickly the still-water surface moves.", -2.0, 2.0, 0.01, 0.18),
+                   FloatParam("horizon", "Horizon Blend", "Softness of the transition where sky meets water.", 0.001, 0.12, 0.002, 0.025)}),
+
         EffectDef("sky_mountains", "Mountain Silhouettes", "Generate layered mountain ranges around the entire horizon without a longitude seam.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("near_color", "Near Mountains", "Color of the closer mountain range.", "#0C111B"),
@@ -1734,8 +1865,8 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target)
         return {{"blank", "Blank / Original Scene"}, {"cinematic", "Cinematic"}, {"retro_crt", "Retro CRT"}};
     if(target == Target::Material)
         return {{"blank", "Blank Surface"}, {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
-    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"mountain_dawn", "Mountain Dawn"},
-                {"cloudy_day", "Cloudy Day"}, {"starry_night", "Starry Night"},
+    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"lake_sunset", "Still Water Sunset"},
+                {"mountain_dawn", "Mountain Dawn"}, {"cloudy_day", "Cloudy Day"}, {"starry_night", "Starry Night"},
                 {"aurora_night", "Aurora Night"}, {"dream_sky", "Dream Sky"}, {"space_nebula", "Space Nebula"}};
 }
 
@@ -1796,10 +1927,20 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["zenithColor"] = "#17336F";
         project.settings["horizonColor"] = "#F47A52";
         project.settings["groundColor"] = "#120A16";
-        add("sky_sun", {{"color", "#FFD39B"}, {"azimuth", 0.14}, {"height", 0.12}, {"size", 0.050}, {"brightness", 2.9}, {"glow", 0.62}});
-        add("sky_clouds", {{"color", "#E5B7A2"}, {"opacity", 0.42}, {"scale", 3.0}, {"coverage", 0.56}, {"speed", 0.12}});
+        add("sky_sun", {{"color", "#FFF1D2"}, {"time_of_day", 17.35}, {"azimuth", 0.14}, {"height", 0.86}, {"size", 0.020}, {"brightness", 4.8}, {"glow", 0.68}, {"atmosphere", 0.96}, {"haze", 0.72}});
+        add("sky_clouds", {{"color", "#E8C2B0"}, {"brightness", 1.05}, {"opacity", 0.46}, {"height", 0.10}, {"scale", 2.8}, {"coverage", 0.54}, {"direction", 18.0}, {"speed", 0.12}});
         add("saturation", {{"amount", 1.18}});
         add("contrast", {{"amount", 1.06}});
+    }
+    else if(target == Target::Sky && id == "lake_sunset")
+    {
+        project.name = "Still Water Sunset";
+        project.settings["zenithColor"] = "#17336F";
+        project.settings["horizonColor"] = "#F47A52";
+        project.settings["groundColor"] = "#0A1722";
+        add("sky_sun", {{"color", "#FFF0D0"}, {"time_of_day", 17.25}, {"azimuth", 0.12}, {"height", 0.88}, {"size", 0.019}, {"brightness", 5.2}, {"glow", 0.72}, {"atmosphere", 1.0}, {"haze", 0.76}});
+        add("sky_realistic_clouds", {{"shadow_color", "#684B52"}, {"light_color", "#F2C4A0"}, {"brightness", 1.05}, {"opacity", 0.68}, {"height", 0.09}, {"scale", 1.75}, {"coverage", 0.54}, {"direction", 22.0}, {"speed", 0.10}});
+        add("sky_water", {{"tint", "#16384A"}, {"reflection", 0.78}, {"ripple", 0.085}, {"scale", 14.0}, {"speed", 0.16}, {"horizon", 0.022}});
     }
     else if(target == Target::Sky && id == "mountain_dawn")
     {
@@ -1807,7 +1948,7 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["zenithColor"] = "#345A83";
         project.settings["horizonColor"] = "#E9A06E";
         project.settings["groundColor"] = "#10131C";
-        add("sky_sun", {{"color", "#FFE0A6"}, {"azimuth", 0.07}, {"height", 0.05}, {"brightness", 2.2}, {"glow", 0.55}});
+        add("sky_sun", {{"color", "#FFF0D0"}, {"time_of_day", 6.8}, {"azimuth", 0.07}, {"height", 0.84}, {"size", 0.019}, {"brightness", 4.0}, {"glow", 0.60}, {"atmosphere", 0.94}, {"haze", 0.62}});
         add("sky_haze", {{"color", "#D8AF92"}, {"strength", 0.32}, {"width", 4.8}});
         add("sky_mountains", {{"near_color", "#11141C"}, {"far_color", "#40516A"}, {"height", 0.04}, {"roughness", 0.27}, {"scale", 6.8}});
         add("sky_clouds", {{"color", "#D8DFE6"}, {"opacity", 0.35}, {"coverage", 0.60}, {"speed", 0.10}});
@@ -1818,6 +1959,7 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["zenithColor"] = "#536C83";
         project.settings["horizonColor"] = "#A9BAC7";
         project.settings["groundColor"] = "#27323D";
+        add("sky_sun", {{"color", "#F4F6F8"}, {"time_of_day", 13.2}, {"azimuth", 0.30}, {"height", 0.88}, {"size", 0.012}, {"brightness", 2.0}, {"glow", 0.26}, {"atmosphere", 0.72}, {"haze", 0.30}});
         add("sky_realistic_clouds", {{"shadow_color", "#38495B"}, {"light_color", "#E6EBEF"}, {"opacity", 0.92}, {"scale", 2.1}, {"coverage", 0.46}, {"speed", 0.16}});
     }
     else if(target == Target::Sky && id == "starry_night")

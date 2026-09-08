@@ -1548,10 +1548,14 @@ public:
             if(!skyHlsl.contains("BO3BeginnerAuroraNoise") ||
                !skyHlsl.contains("BO3BeginnerFbm3") ||
                !skyHlsl.contains("BO3BeginnerNebulaField") ||
-               !skyHlsl.contains("compact volumetric raymarch") ||
+               !skyHlsl.contains("beginnerTimeOfDay") ||
+               !skyHlsl.contains("beginnerSunDir") ||
+               !skyHlsl.contains("cloudBase") ||
                !skyHlsl.contains("windAngle") ||
+               !skyHlsl.contains("beginnerWaterMask") ||
+               !skyHlsl.contains("beginnerReflectedDirection") ||
                !skyHlsl.contains("cloudColor"))
-                return "Beginner Sky quality modules are missing from generated BO3 coverage HLSL.";
+                return "Beginner Sky atmosphere/cloud/water modules are missing from generated BO3 coverage HLSL.";
             if(skyHlsl.contains("return float4(saturate(color)") ||
                !skyHlsl.contains("65024.0"))
                 return "Beginner Sky final output is still clipping procedural HDR effects to 0..1.";
@@ -13872,6 +13876,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 if(id=="sky_realistic_clouds") { painter.setBrush(QColor(74,91,110,90)); painter.drawEllipse(QRectF(x-14,y+2,42,15)); }
             }
         }
+        else if(id == "sky_water")
+        {
+            QLinearGradient sky(inner.topLeft(), inner.bottomLeft());
+            sky.setColorAt(0.0, QColor("#244E7A"));
+            sky.setColorAt(0.48, QColor("#E58B61"));
+            sky.setColorAt(0.52, QColor("#5C6670"));
+            sky.setColorAt(1.0, QColor("#122C3B"));
+            painter.fillRect(inner, sky);
+            painter.setPen(QPen(QColor(210,230,235,105),1.2));
+            const qreal hy=inner.center().y();
+            painter.drawLine(QPointF(inner.left(),hy),QPointF(inner.right(),hy));
+            for(int i=0;i<5;++i)
+            {
+                const qreal y=hy+8+i*9;
+                QPainterPath wave; wave.moveTo(inner.left(),y);
+                for(int x=0;x<=50;++x)
+                {
+                    const qreal px=inner.left()+x*inner.width()/50.0;
+                    wave.lineTo(px,y+std::sin(x*0.42+i)*1.8);
+                }
+                painter.drawPath(wave);
+            }
+            QRadialGradient sun(QPointF(inner.right()-45,inner.top()+25),26);
+            sun.setColorAt(0,QColor("#FFF1C5")); sun.setColorAt(0.22,QColor("#FFD181")); sun.setColorAt(1,QColor(255,180,80,0));
+            painter.fillRect(inner,QBrush(sun));
+        }
         else if(id == "sky_mountains")
         {
             fillLinear(QColor("#527397"), QColor("#D6A582"), true);
@@ -14039,7 +14069,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         std::wstring error;
         if(!preview_->renderer().UseBuiltInDepthScene(error))
         {
-            if(showMessage) QMessageBox::warning(this, "3D Depth Scene", ToQString(error));
+            if(showMessage) QMessageBox::warning(this, "Game Depth Preview", ToQString(error));
             return;
         }
         sourceImagePath_.clear();
@@ -14047,7 +14077,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         rebuildBeginnerEffectParameters();
         updateBeginnerBuilderSummary();
         if(showMessage)
-            statusBar()->showMessage("Using built-in 3D Depth Scene — color and Float-Z now match automatically.", 4200);
+            statusBar()->showMessage("Using BO3 Game Depth Preview — an in-game screenshot with matched preview Float-Z is active.", 4200);
     }
 
     void updateBeginnerBuilderSummary()
@@ -14075,6 +14105,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             beginnerDepthToolbarAction_->setVisible(!beginnerUiMode_);
         if(beginnerDepthSceneToolbarAction_)
             beginnerDepthSceneToolbarAction_->setVisible(beginnerUiMode_ && beginnerProjectUsesSceneDepth());
+        if(beginnerLiveGameToolbarAction_)
+            beginnerLiveGameToolbarAction_->setVisible(beginnerUiMode_ && beginnerProjectActive_ &&
+                beginnerProject_.target == beginner::Target::PostFx);
         if(loadModelQuickButton_)
             loadModelQuickButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::Material);
     }
@@ -14302,19 +14335,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const bool builtInDepth = preview_ && preview_->renderer().BuiltInDepthSceneActive();
             auto* depthNotice = new QLabel();
             if(builtInDepth)
-                depthNotice->setText("3D Depth Scene active. The preview image and Float-Z depth are generated together, so outlines, AO and fog can be judged in real 3D space.");
+                depthNotice->setText("BO3 Game Depth Preview active. The in-game screenshot is paired with preview Float-Z so outlines, AO and fog can be judged on a game-like scene.");
             else if(hasDepth)
                 depthNotice->setText("Matching custom depth is loaded for this preview image. BO3 supplies live Float-Z automatically after export.");
             else
-                depthNotice->setText("This effect needs real scene depth. A normal screenshot contains color only, so use the built-in 3D Depth Scene for an accurate preview.");
+                depthNotice->setText("This effect needs scene depth. A normal screenshot contains color only, so use BO3 Game Depth Preview to test it on an in-game image with matched preview depth.");
             depthNotice->setWordWrap(true);
             depthNotice->setObjectName(hasDepth ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
 
-            auto* depthScene = new QPushButton(builtInDepth ? "3D Depth Scene Active" : "Use 3D Depth Scene");
+            auto* depthScene = new QPushButton(builtInDepth ? "Game Depth Preview Active" : "Use Game Depth Preview");
             depthScene->setEnabled(!builtInDepth);
             depthScene->setObjectName(builtInDepth ? "" : "PrimaryAction");
-            depthScene->setToolTip("Use Shader Studio's built-in color + Float-Z test scene. No depth-map file is required.");
+            depthScene->setToolTip("Use Shader Studio's BO3 in-game screenshot with paired preview Float-Z. No depth-map file is required.");
             beginnerEffectParamsLayout_->addWidget(depthScene);
             connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
 
@@ -15483,8 +15516,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         sourceButton->setMinimumWidth(104);
         sourceButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide 3D depth; depth effects can use the built-in 3D Depth Scene instead.");
+        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide 3D depth; depth effects can use BO3 Game Depth Preview instead.");
         beginnerPreviewImageToolbarAction_ = toolbar->addWidget(sourceButton);
+
+        beginnerLiveGameToolbarAction_ = toolbar->addAction("Live Game");
+        beginnerLiveGameToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+        beginnerLiveGameToolbarAction_->setToolTip(
+            "Capture a running BO3 window and apply the current Beginner PostFX shader live. "
+            "This is an external Windows Graphics Capture preview; no code is injected into the game.");
+        beginnerLiveGameToolbarAction_->setVisible(false);
+
         auto* depthButton = new QToolButton();
         depthButton->setDefaultAction(depthAction);
         depthButton->setText("Load Depth Map");
@@ -15494,9 +15535,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         depthButton->setToolTip("Load the depth texture used by DepthSampler / t1.");
         beginnerDepthToolbarAction_ = toolbar->addWidget(depthButton);
 
-        beginnerDepthSceneToolbarAction_ = toolbar->addAction("3D Depth Scene");
+        beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Use Shader Studio's built-in color + Float-Z scene for depth effects. No external depth map is required.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Use an in-game BO3 screenshot paired with Shader Studio preview Float-Z for depth effects. No external depth map is required.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -15649,6 +15690,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(sourceAction, &QAction::triggered, this, [this]{ openTexture(false); });
         connect(depthAction, &QAction::triggered, this, [this]{ openTexture(true); });
         connect(beginnerDepthSceneToolbarAction_, &QAction::triggered, this, [this]{ activateBuiltInDepthPreview(); });
+        connect(beginnerLiveGameToolbarAction_, &QAction::triggered, this, [this]{
+            if(preview_ && preview_->renderer().LiveCaptureActive()) stopLiveCapture();
+            else selectLiveCaptureWindow();
+        });
         connect(includeAction, &QAction::triggered, this, [this]{ chooseIncludeRoot(); });
         connect(selectTechsetAction, &QAction::triggered, this, [this]{ selectAssociatedTechset(); });
         connect(exportBo3Action, &QAction::triggered, this, [this]{ exportToBO3(); });
@@ -17515,6 +17560,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 (beginnerProjectActive_ && beginnerProject_.target == beginner::Target::PostFx));
         if(beginnerDepthSceneToolbarAction_)
             beginnerDepthSceneToolbarAction_->setVisible(beginner && beginnerProjectUsesSceneDepth());
+        if(beginnerLiveGameToolbarAction_)
+            beginnerLiveGameToolbarAction_->setVisible(beginner && beginnerProjectActive_ &&
+                beginnerProject_.target == beginner::Target::PostFx);
 
         if(previewSettingsTitle_)
             previewSettingsTitle_->setText(beginner ? "Preview Settings" : "Advanced Preview Settings");
@@ -18727,6 +18775,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(liveSplitSlider_) liveSplitSlider_->setVisible(
             liveActive && liveComparisonCombo_ &&
             liveComparisonCombo_->currentData().toInt() == static_cast<int>(LiveComparisonMode::Split));
+        if(beginnerLiveGameToolbarAction_)
+        {
+            beginnerLiveGameToolbarAction_->setText(liveActive ? "Stop Live Game" : "Live Game");
+            beginnerLiveGameToolbarAction_->setToolTip(liveActive
+                ? "Stop the current live BO3/window capture preview."
+                : "Capture a running BO3 window and apply the current Beginner PostFX shader live. No code is injected into the game.");
+        }
 
         if(live)
         {
@@ -18828,8 +18883,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         sourceImagePath_.clear();
         refreshPostFxRuntimeUi();
-        statusBar()->showMessage(
-            "Source: LIVE BO3 WINDOW — LDR APPROX (Windows Graphics Capture, external/non-invasive)", 6000);
+        if(beginnerUiMode_ && beginnerProjectUsesSceneDepth())
+            statusBar()->showMessage(
+                "Live Game captures scene color only. For Cartoon Outlines, AO or Depth Fog, use Game Depth Preview because external window capture cannot access BO3 floatZ.", 8000);
+        else
+            statusBar()->showMessage(
+                "Source: LIVE BO3 WINDOW — LDR APPROX (Windows Graphics Capture, external/non-invasive)", 6000);
     }
 
     void stopLiveCapture()
@@ -19659,6 +19718,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QAction* beginnerPreviewImageToolbarAction_ = nullptr;
     QAction* beginnerDepthToolbarAction_ = nullptr;
     QAction* beginnerDepthSceneToolbarAction_ = nullptr;
+    QAction* beginnerLiveGameToolbarAction_ = nullptr;
     QAction* uiBeginnerModeAction_ = nullptr;
     QAction* uiAdvancedModeAction_ = nullptr;
     QLabel* compileStatusBadge_ = nullptr;
