@@ -263,14 +263,37 @@ jobs:
           Write-Host "Lean tester update payload: $leanUpdate"
           Write-Host "Regression selection: GLSL=$runGlsl Shadertoy=$runShadertoy PostFX=$runPostfx Package=$runPackage"
 
-      - name: Install Qt
+      - name: Install Qt (lean tester)
+        if: env.BO3_FAST_TESTER == '1'
         uses: jurplel/install-qt-action@v4
         with:
+          # Shader Studio uses QtCore/Gui/Widgets/Network only, all supplied by
+          # qtbase. Automatic Tester builds do not need the unrelated archives.
+          # Pin the exact already-proven runtime so this small cache stays stable.
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          archives: 'qtbase'
+          cache: true
+
+      - name: Install Qt (full/manual)
+        if: env.BO3_FAST_TESTER != '1'
+        uses: jurplel/install-qt-action@v4
+        with:
+          # Preserve the conservative manual/stable release dependency path.
           version: '6.8.*'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
           cache: true
+
+      - name: Restore parallel make helper
+        if: env.BO3_FAST_TESTER == '1'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bo3_shader_studio_jom_1_1_7
+          key: bo3-shader-studio-jom-1.1.7-windows-x64
 
       - name: Set up C++ compiler cache
         if: env.BO3_FAST_TESTER == '1'
@@ -300,6 +323,7 @@ jobs:
         shell: cmd
         env:
           BO3_CI_FAST: ${{ env.BO3_FAST_TESTER }}
+          BO3_JOM_DIR: ${{ runner.temp }}\bo3_shader_studio_jom_1_1_7
           SCCACHE_GHA_ENABLED: 'true'
           SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
         run: tools\ci_build_release.cmd

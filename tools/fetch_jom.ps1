@@ -18,7 +18,18 @@ if (Test-Path -LiteralPath $jomExe) {
 
 $zipPath = Join-Path $OutputDir 'jom.zip'
 Write-Host "Fetching parallel make helper: jom $version"
-Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath
+
+# GitHub's Windows image already carries native curl and bsdtar. They avoid the
+# comparatively expensive Invoke-WebRequest/Expand-Archive path on a cache miss.
+# Keep PowerShell fallbacks so this helper remains usable on ordinary PCs.
+$curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+if ($curl) {
+    & $curl.Source --fail --location --silent --show-error --retry 2 --connect-timeout 10 --output $zipPath $url
+    if ($LASTEXITCODE -ne 0) { throw "curl failed while downloading jom (exit $LASTEXITCODE)." }
+}
+else {
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zipPath
+}
 
 $actualSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualSha256 -ne $expectedSha256) {
@@ -29,7 +40,15 @@ $extractDir = Join-Path $OutputDir 'extract'
 if (Test-Path -LiteralPath $extractDir) {
     Remove-Item -LiteralPath $extractDir -Recurse -Force
 }
-Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+$tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+if ($tar) {
+    & $tar.Source -xf $zipPath -C $extractDir
+    if ($LASTEXITCODE -ne 0) { throw "tar failed while extracting jom (exit $LASTEXITCODE)." }
+}
+else {
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+}
 
 $found = Get-ChildItem -LiteralPath $extractDir -Filter 'jom.exe' -File -Recurse | Select-Object -First 1
 if (-not $found) {

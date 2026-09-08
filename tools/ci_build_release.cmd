@@ -35,10 +35,17 @@ if errorlevel 1 exit /b 1
 
 set "BO3_TINYEXR_READY=0"
 if /I "%BO3_CI_FAST%"=="1" (
-    if exist "%CD%\third_party\tinyexr\tinyexr_v1.0.8.installed" if exist "%CD%\third_party\tinyexr\tinyexr.h" if exist "%CD%\third_party\tinyexr\miniz.h" if exist "%CD%\third_party\tinyexr\miniz.c" set "BO3_TINYEXR_READY=1"
+    rem The old fast path depended on tinyexr_v1.0.8.installed, but that marker
+    rem is intentionally gitignored, so a clean GitHub checkout never had it and
+    rem paid ~7 seconds to launch PowerShell and revalidate already-vendored files.
+    rem VERSION.txt is tracked, while the three source files are part of the same
+    rem commit, so this is a cheap and deterministic checkout integrity check.
+    if exist "%CD%\third_party\tinyexr\VERSION.txt" if exist "%CD%\third_party\tinyexr\tinyexr.h" if exist "%CD%\third_party\tinyexr\miniz.h" if exist "%CD%\third_party\tinyexr\miniz.c" (
+        findstr /x /c:"v1.0.8" "%CD%\third_party\tinyexr\VERSION.txt" >nul 2>nul && set "BO3_TINYEXR_READY=1"
+    )
 )
 if "%BO3_TINYEXR_READY%"=="1" (
-    echo EXR support ready: TinyEXR v1.0.8 ^(vendored fast path^)
+    echo EXR support ready: TinyEXR v1.0.8 ^(tracked vendored fast path^)
 ) else (
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\fetch_tinyexr.ps1" -OutputDir "%CD%\third_party\tinyexr"
     if errorlevel 1 exit /b 1
@@ -164,7 +171,10 @@ rem availability a release blocker: nmake remains the fallback.
 set "BO3_JOM_EXE="
 for /f "delims=" %%I in ('where jom.exe 2^>nul') do if not defined BO3_JOM_EXE set "BO3_JOM_EXE=%%I"
 if not defined BO3_JOM_EXE (
-    set "BO3_JOM_DIR=%TEMP%\bo3_shader_studio_jom_1_1_7"
+    rem Automatic tester CI supplies BO3_JOM_DIR inside RUNNER_TEMP and restores
+    rem that directory through actions/cache. Manual/local builds keep the old
+    rem TEMP fallback, so jom remains optional and self-contained.
+    if not defined BO3_JOM_DIR set "BO3_JOM_DIR=%TEMP%\bo3_shader_studio_jom_1_1_7"
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\fetch_jom.ps1" -OutputDir "!BO3_JOM_DIR!"
     if not errorlevel 1 if exist "!BO3_JOM_DIR!\jom.exe" set "BO3_JOM_EXE=!BO3_JOM_DIR!\jom.exe"
 )

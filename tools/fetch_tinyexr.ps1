@@ -46,6 +46,12 @@ if ($content -notmatch 'TINYEXR_H_') {
     throw 'tinyexr.h validation failed.'
 }
 
+# VERSION.txt is deliberately tracked so clean CI checkouts can prove which
+# vendored TinyEXR revision they contain without starting this PowerShell script.
+$versionFile = Join-Path $OutputDir 'VERSION.txt'
+Set-Content -LiteralPath $versionFile -Value $version -Encoding Ascii
+
+# Keep the legacy ignored marker for local installs/tools that already use it.
 $marker = Join-Path $OutputDir ("tinyexr_" + $version + ".installed")
 Set-Content -LiteralPath $marker -Value $version -Encoding Ascii
 Write-Host ("EXR support ready: TinyEXR " + $version)
