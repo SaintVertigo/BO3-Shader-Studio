@@ -82,18 +82,25 @@ exit /b 0
 
 :build_with_cache
 echo Fast tester build: attempting compiler-cache path.
+
+rem mozilla-actions/sccache-action currently exposes SCCACHE_PATH without an
+rem .exe suffix on some Windows runners. cmd.exe's IF EXIST does not perform
+rem PATHEXT expansion, so normalize it before qmake consumes the variable.
+set "BO3_SCCACHE_EXE="
 if defined SCCACHE_PATH (
-    if not exist "%SCCACHE_PATH%" (
-        echo WARNING: SCCACHE_PATH does not point to an existing executable: %SCCACHE_PATH%
-        exit /b 1
-    )
-) else (
-    where sccache.exe >nul 2>nul
-    if errorlevel 1 (
-        echo WARNING: sccache.exe was not found on PATH.
-        exit /b 1
-    )
+    if exist "%SCCACHE_PATH%" set "BO3_SCCACHE_EXE=%SCCACHE_PATH%"
+    if not defined BO3_SCCACHE_EXE if exist "%SCCACHE_PATH%.exe" set "BO3_SCCACHE_EXE=%SCCACHE_PATH%.exe"
 )
+if not defined BO3_SCCACHE_EXE (
+    for /f "delims=" %%I in ('where sccache.exe 2^>nul') do if not defined BO3_SCCACHE_EXE set "BO3_SCCACHE_EXE=%%I"
+)
+if not defined BO3_SCCACHE_EXE (
+    echo WARNING: sccache.exe was not found. Falling back to the normal MSVC build.
+    exit /b 1
+)
+set "SCCACHE_PATH=%BO3_SCCACHE_EXE%"
+echo Compiler cache: %SCCACHE_PATH%
+
 pushd build_qt
 qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"
 if errorlevel 1 (
