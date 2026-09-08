@@ -1033,7 +1033,9 @@ public:
     }
 
     int runCliGlslRegression(const QString& caseSelector, bool runAll,
-                             const QString& hlslOutputPath = QString())
+                             const QString& hlslOutputPath = QString(),
+                             bool fastValidation = false,
+                             int shardIndex = 0, int shardCount = 1)
     {
         const QFileInfo directCaseFile(caseSelector);
         const bool directFile = !runAll && directCaseFile.exists() && directCaseFile.isFile();
@@ -1047,7 +1049,23 @@ public:
         QStringList selectedFiles;
         if (runAll)
         {
-            selectedFiles = files;
+            // CI can split the expensive FXC corpus across independent processes.
+            // This deliberately shards by stable sorted corpus index so every file
+            // is covered exactly once and there is no shared compiler state.
+            const int safeShardCount = qMax(1, shardCount);
+            const int safeShardIndex = qBound(0, shardIndex, safeShardCount - 1);
+            for(int fileIndex = 0; fileIndex < files.size(); ++fileIndex)
+            {
+                if((fileIndex % safeShardCount) == safeShardIndex)
+                    selectedFiles << files[fileIndex];
+            }
+            if(safeShardCount > 1)
+            {
+                WriteCliOutput(QString("GLSL regression shard %1/%2: %3 case(s)\n")
+                                   .arg(safeShardIndex + 1)
+                                   .arg(safeShardCount)
+                                   .arg(selectedFiles.size()));
+            }
         }
         else if(directFile)
         {
@@ -1082,11 +1100,14 @@ public:
             }
         }
 
+        if(runAll && fastValidation)
+            WriteCliOutput("GLSL FXC validation: O0 fast tester mode\n");
+
         int passed = 0;
         int failed = 0;
         for (const QString& path : selectedFiles)
         {
-            const GlslRegressionCaseResult result = runGlslRegressionCaseFile(path);
+            const GlslRegressionCaseResult result = runGlslRegressionCaseFile(path, fastValidation);
             if(!hlslOutputPath.isEmpty())
             {
                 QFile outputFile(hlslOutputPath);
@@ -6672,7 +6693,8 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         return context.trimmed();
     }
 
-    bool compileGlslValidationHlsl(const QString& hlsl, QString& diagnostics) const
+    bool compileGlslValidationHlsl(const QString& hlsl, QString& diagnostics,
+                                   bool fastValidation = false) const
     {
         const QByteArray sourceBytes = hlsl.toUtf8();
         const std::string source(sourceBytes.constData(), static_cast<size_t>(sourceBytes.size()));
@@ -6682,7 +6704,15 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         ShaderIncludeHandler include(includeBase, explicitRoot);
         ComPtr<ID3DBlob> bytecode;
         ComPtr<ID3DBlob> errorBlob;
-        const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+        // Automatic tester CI only needs the corpus to prove that converted
+        // HLSL remains semantically compilable. Full/manual releases keep O3
+        // so BO3's production-like optimizer path is still validated. O0 makes
+        // the 100+ case edit/test loop dramatically cheaper without skipping
+        // parsing, type checking, overload resolution, includes, or codegen.
+        const UINT optimizationFlags = fastValidation
+            ? D3DCOMPILE_OPTIMIZATION_LEVEL0
+            : D3DCOMPILE_OPTIMIZATION_LEVEL3;
+        const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | optimizationFlags;
         const HRESULT hr = D3DCompile(
             source.data(), source.size(), "glsl_converter_validation.hlsl",
             nullptr, &include, "ps_main", "ps_5_0", flags, 0,
@@ -6708,7 +6738,8 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         return SUCCEEDED(hr);
     }
 
-    GlslRegressionCaseResult runGlslRegressionCaseFile(const QString& path) const
+    GlslRegressionCaseResult runGlslRegressionCaseFile(const QString& path,
+                                                        bool fastValidation = false) const
     {
         GlslRegressionCaseResult result;
         result.fileName = QFileInfo(path).fileName();
@@ -6831,7 +6862,7 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         }
 
         QString diagnostics;
-        result.passed = compileGlslValidationHlsl(result.hlsl, diagnostics);
+        result.passed = compileGlslValidationHlsl(result.hlsl, diagnostics, fastValidation);
         if (!result.passed)
         {
             result.failure = diagnostics.isEmpty() ? QString("Unknown FXC failure.") : diagnostics;
@@ -17280,6 +17311,9 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     QString regressionCase;
     QString regressionHlslOutput;
     bool regressionAll = false;
+    bool regressionFast = false;
+    int regressionShardIndex = 0;
+    int regressionShardCount = 1;
     bool shadertoyRegressionAll = false;
     bool postFxExportRegressionAll = false;
     bool bo3PackageRegressionAll = false;
@@ -17293,6 +17327,37 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         if (arguments[i] == "--regression-all")
         {
             regressionAll = true;
+        }
+        else if(arguments[i] == "--regression-fast")
+        {
+            regressionFast = true;
+        }
+        else if(arguments[i] == "--regression-shard")
+        {
+            if(i + 1 >= arguments.size())
+            {
+                WriteCliOutput("Usage: --regression-shard <zero-based-index>/<count>\n");
+                if(SUCCEEDED(com)) CoUninitialize();
+                return 2;
+            }
+            const QString shardSpec = arguments[++i].trimmed();
+            const QRegularExpressionMatch shardMatch =
+                QRegularExpression("^(\\d+)/(\\d+)$").match(shardSpec);
+            if(!shardMatch.hasMatch())
+            {
+                WriteCliOutput("FAIL: --regression-shard must use <zero-based-index>/<count>.\n");
+                if(SUCCEEDED(com)) CoUninitialize();
+                return 2;
+            }
+            regressionShardIndex = shardMatch.captured(1).toInt();
+            regressionShardCount = shardMatch.captured(2).toInt();
+            if(regressionShardCount < 1 || regressionShardIndex < 0 ||
+               regressionShardIndex >= regressionShardCount)
+            {
+                WriteCliOutput("FAIL: regression shard index must be inside the requested shard count.\n");
+                if(SUCCEEDED(com)) CoUninitialize();
+                return 2;
+            }
         }
         else if(arguments[i] == "--shadertoy-regression-all")
         {
@@ -17367,6 +17432,13 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         return 2;
     }
 
+    if((regressionFast || regressionShardCount > 1) && !regressionAll)
+    {
+        WriteCliOutput("FAIL: --regression-fast and --regression-shard are supported only with --regression-all.\n");
+        if(SUCCEEDED(com)) CoUninitialize();
+        return 2;
+    }
+
     if(publicCorpus)
     {
         MainWindow runner(true);
@@ -17417,7 +17489,8 @@ int RunBo3ShaderStudio(int argc, char* argv[])
 
         MainWindow runner(true);
         const int result = runner.runCliGlslRegression(
-            regressionCase, regressionAll, regressionHlslOutput);
+            regressionCase, regressionAll, regressionHlslOutput,
+            regressionFast, regressionShardIndex, regressionShardCount);
         if (SUCCEEDED(com)) CoUninitialize();
         return result;
     }

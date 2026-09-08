@@ -320,8 +320,55 @@ jobs:
         if: env.BO3_RUN_GLSL == '1'
         id: glsl_regression
         continue-on-error: true
-        shell: cmd
-        run: dist\BO3HLSLPreviewer.exe --regression-all
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'dist\BO3HLSLPreviewer.exe'
+          $workerCount = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount))
+          $fastArgs = @()
+          if ($env:BO3_FAST_TESTER -eq '1') {
+            # Tester pushes keep all converter assertions and FXC codegen, but
+            # use O0 for the broad 100+ shader corpus. PostFX/package coverage
+            # still exercises production-style optimized shader paths.
+            $fastArgs += '--regression-fast'
+          }
+
+          Write-Host "Running GLSL corpus in $workerCount independent shard process(es)."
+          $jobs = @()
+          for ($i = 0; $i -lt $workerCount; ++$i) {
+            $stdoutPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stdout.txt"
+            $stderrPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stderr.txt"
+            $arguments = @('--regression-all') + $fastArgs + @('--regression-shard', "$i/$workerCount")
+            $process = Start-Process -FilePath $exe `
+              -ArgumentList $arguments `
+              -PassThru `
+              -NoNewWindow `
+              -RedirectStandardOutput $stdoutPath `
+              -RedirectStandardError $stderrPath
+            $jobs += [pscustomobject]@{
+              Index = $i
+              Process = $process
+              Stdout = $stdoutPath
+              Stderr = $stderrPath
+            }
+          }
+
+          $failed = @()
+          foreach ($job in $jobs) {
+            $job.Process.WaitForExit()
+            Write-Host "----- GLSL shard $($job.Index + 1)/$workerCount -----"
+            if (Test-Path -LiteralPath $job.Stdout) { Get-Content -LiteralPath $job.Stdout }
+            if (Test-Path -LiteralPath $job.Stderr) {
+              $stderrText = Get-Content -LiteralPath $job.Stderr
+              if ($stderrText) { $stderrText | Write-Host }
+            }
+            if ($job.Process.ExitCode -ne 0) {
+              $failed += ($job.Index + 1)
+            }
+          }
+
+          if ($failed.Count -gt 0) {
+            throw "GLSL regression shard(s) failed: $($failed -join ', ')"
+          }
 
       - name: Run Shadertoy regression suite
         if: env.BO3_RUN_SHADERTOY == '1'

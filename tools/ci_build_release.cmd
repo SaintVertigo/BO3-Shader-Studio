@@ -33,13 +33,23 @@ if not defined VSROOT (
 call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\fetch_tinyexr.ps1" -OutputDir "%CD%\third_party\tinyexr"
-if errorlevel 1 exit /b 1
+set "BO3_TINYEXR_READY=0"
+if /I "%BO3_CI_FAST%"=="1" (
+    if exist "%CD%\third_party\tinyexr\tinyexr_v1.0.8.installed" if exist "%CD%\third_party\tinyexr\tinyexr.h" if exist "%CD%\third_party\tinyexr\miniz.h" if exist "%CD%\third_party\tinyexr\miniz.c" set "BO3_TINYEXR_READY=1"
+)
+if "%BO3_TINYEXR_READY%"=="1" (
+    echo EXR support ready: TinyEXR v1.0.8 ^(vendored fast path^)
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\fetch_tinyexr.ps1" -OutputDir "%CD%\third_party\tinyexr"
+    if errorlevel 1 exit /b 1
+)
 
 if exist build_qt rmdir /s /q build_qt
 if exist dist rmdir /s /q dist
 mkdir build_qt
 mkdir dist
+
+call :resolve_parallel_make
 
 if /I "%BO3_CI_FAST%"=="1" (
     call :build_with_cache
@@ -110,12 +120,17 @@ echo Compiler cache: %BO3_SCCACHE_EXE%
 echo Compiler launcher command: sccache
 
 pushd build_qt
-qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"
+rem qmake's NMake generator batches many .cpp files into one cl.exe command by
+rem default. sccache cannot cache that form (it reports "multiple input files"),
+rem which made the supposed fast path rebuild almost the entire application on
+rem every clean GitHub runner. no_batch emits one compiler invocation per source
+rem so unchanged translation units are real remote-cache hits.
+qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache" "CONFIG+=no_batch"
 if errorlevel 1 (
     popd
     exit /b 1
 )
-nmake.exe /nologo
+call :run_make
 set "BO3_BUILD_RC=!ERRORLEVEL!"
 popd
 exit /b !BO3_BUILD_RC!
@@ -123,12 +138,43 @@ exit /b !BO3_BUILD_RC!
 :build_normal
 echo Full compiler path: normal MSVC build.
 pushd build_qt
-qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release"
+qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=no_batch"
 if errorlevel 1 (
     popd
     exit /b 1
 )
-nmake.exe /nologo
+call :run_make
 set "BO3_BUILD_RC=!ERRORLEVEL!"
 popd
 exit /b !BO3_BUILD_RC!
+
+:resolve_parallel_make
+rem NMake has no parallel job scheduler. qmake no_batch exposes one rule per
+rem translation unit, and Qt's jom can execute those independent rules across
+rem the runner's cores. Keep a verified pinned helper, but never make network
+rem availability a release blocker: nmake remains the fallback.
+set "BO3_JOM_EXE="
+for /f "delims=" %%I in ('where jom.exe 2^>nul') do if not defined BO3_JOM_EXE set "BO3_JOM_EXE=%%I"
+if not defined BO3_JOM_EXE (
+    set "BO3_JOM_DIR=%TEMP%\bo3_shader_studio_jom_1_1_7"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\fetch_jom.ps1" -OutputDir "!BO3_JOM_DIR!"
+    if not errorlevel 1 if exist "!BO3_JOM_DIR!\jom.exe" set "BO3_JOM_EXE=!BO3_JOM_DIR!\jom.exe"
+)
+if defined BO3_JOM_EXE (
+    echo Parallel make: !BO3_JOM_EXE!
+) else (
+    echo WARNING: jom is unavailable; build will use single-threaded nmake.
+)
+exit /b 0
+
+:run_make
+if defined BO3_JOM_EXE (
+    if defined NUMBER_OF_PROCESSORS (
+        "!BO3_JOM_EXE!" -j !NUMBER_OF_PROCESSORS!
+    ) else (
+        "!BO3_JOM_EXE!"
+    )
+) else (
+    nmake.exe /nologo
+)
+exit /b !ERRORLEVEL!
