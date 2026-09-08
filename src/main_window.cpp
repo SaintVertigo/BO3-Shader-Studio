@@ -1493,7 +1493,8 @@ public:
             if(!postHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
                !postHlsl.contains("BO3BeginnerGrainLayer") ||
                !postHlsl.contains("BO3BeginnerPsxDither") ||
-               !postHlsl.contains("BO3 float-Z diagonal finite differences"))
+               !postHlsl.contains("BO3BeginnerLinearDepth") ||
+               !postHlsl.contains("BO3 Float-Z silhouette edges with restrained cel shading"))
                 return "Beginner PostFX quality/depth modules are missing from generated BO3 coverage HLSL.";
 
             const beginner::Project material = projects[1].first;
