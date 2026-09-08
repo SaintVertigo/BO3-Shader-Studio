@@ -120,6 +120,7 @@
 #include <QTemporaryDir>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTransform>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QUrl>
@@ -1025,6 +1026,13 @@ public:
         liveCompileTimer_.setInterval(550);
         connect(&liveCompileTimer_, &QTimer::timeout, this, [this]{ compileEditor(); });
 
+        beginnerLiveCompileTimer_.setSingleShot(true);
+        beginnerLiveCompileTimer_.setInterval(90);
+        connect(&beginnerLiveCompileTimer_, &QTimer::timeout, this, [this]
+        {
+            if(beginnerUiMode_ && beginnerProjectActive_) compileEditor();
+        });
+
         sourceValuesRefreshTimer_.setSingleShot(true);
         sourceValuesRefreshTimer_.setInterval(220);
         connect(&sourceValuesRefreshTimer_, &QTimer::timeout, this, [this]{ refreshSourceValueControls(); });
@@ -1546,8 +1554,19 @@ public:
                !beginner::supportsTarget(*gradient, beginner::Target::Sky) ||
                beginner::supportsTarget(*gradient, beginner::Target::Material))
                 return "Beginner Color Gradient target gating is incorrect.";
-            if(beginner::effectDefinitions().size() < 20)
-                return "Beginner V3 effect library is incomplete.";
+
+            const beginner::EffectDefinition* skySun = beginner::effectDefinition("sky_sun");
+            const beginner::EffectDefinition* skyClouds = beginner::effectDefinition("sky_clouds");
+            const beginner::EffectDefinition* skyMountains = beginner::effectDefinition("sky_mountains");
+            if(!skySun || !skyClouds || !skyMountains ||
+               !beginner::supportsTarget(*skySun, beginner::Target::Sky) ||
+               !beginner::supportsTarget(*skyClouds, beginner::Target::Sky) ||
+               !beginner::supportsTarget(*skyMountains, beginner::Target::Sky) ||
+               beginner::supportsTarget(*skySun, beginner::Target::PostFx) ||
+               beginner::supportsTarget(*skyClouds, beginner::Target::Material))
+                return "Beginner procedural Sky effect target gating is incorrect.";
+            if(beginner::effectDefinitions().size() < 28)
+                return "Beginner V4 effect library is incomplete.";
 
             for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             {
@@ -13487,8 +13506,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(id == "retro_crt") return "Scanlines + film grain + color split";
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
-        if(id == "sunset") return "Warm horizon + deep blue sky";
-        if(id == "dream_sky") return "Purple-blue sky + gentle pulse";
+        if(id == "sunset") return "Low sun + warm haze + moving clouds";
+        if(id == "dream_sky") return "Stars + nebula + purple-blue atmosphere";
+        if(id == "mountain_dawn") return "Sunrise + clouds + layered mountains";
+        if(id == "starry_night") return "Moon + twinkling procedural stars";
+        if(id == "aurora_night") return "Aurora ribbons + stars + dark mountains";
         return "Ready-made BO3-safe starting look";
     }
 
@@ -13681,6 +13703,103 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 painter.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y));
             painter.setPen(QPen(QColor("#C1F7FF"), 1.5));
             painter.drawEllipse(inner.center(), 24, 17);
+        }
+        else if(id == "sky_sun" || id == "sky_moon")
+        {
+            fillLinear(QColor("#18356C"), QColor("#E38A63"), true);
+            const QColor body = id == "sky_sun" ? QColor("#FFE2A4") : QColor("#E5EEFF");
+            QRadialGradient glow(QPointF(inner.right() - 55, inner.top() + 20), 24);
+            glow.setColorAt(0.0, body);
+            glow.setColorAt(0.28, body);
+            glow.setColorAt(1.0, QColor(body.red(), body.green(), body.blue(), 0));
+            painter.fillRect(inner, QBrush(glow));
+        }
+        else if(id == "sky_clouds")
+        {
+            fillLinear(QColor("#416A98"), QColor("#A6C7DB"), true);
+            painter.setPen(Qt::NoPen);
+            for(int i = 0; i < 8; ++i)
+            {
+                const qreal x = inner.left() + 12 + (i * 31) % static_cast<int>(inner.width() - 24);
+                const qreal y = inner.top() + 13 + (i * 17) % 24;
+                painter.setBrush(QColor(235, 241, 245, 150));
+                painter.drawEllipse(QPointF(x, y), 21 + (i % 3) * 5, 7 + (i % 2) * 3);
+            }
+        }
+        else if(id == "sky_mountains")
+        {
+            fillLinear(QColor("#36527A"), QColor("#D68770"), true);
+            QPainterPath farPath;
+            farPath.moveTo(inner.left(), inner.bottom());
+            for(int i = 0; i <= 12; ++i)
+            {
+                const qreal x = inner.left() + inner.width() * i / 12.0;
+                const qreal y = inner.center().y() + 5 - std::abs(std::sin(i * 1.73)) * 15;
+                farPath.lineTo(x, y);
+            }
+            farPath.lineTo(inner.right(), inner.bottom());
+            farPath.closeSubpath();
+            painter.fillPath(farPath, QColor("#334158"));
+            QPainterPath nearPath;
+            nearPath.moveTo(inner.left(), inner.bottom());
+            for(int i = 0; i <= 10; ++i)
+            {
+                const qreal x = inner.left() + inner.width() * i / 10.0;
+                const qreal y = inner.center().y() + 12 - std::abs(std::sin(i * 2.21 + 0.4)) * 22;
+                nearPath.lineTo(x, y);
+            }
+            nearPath.lineTo(inner.right(), inner.bottom());
+            nearPath.closeSubpath();
+            painter.fillPath(nearPath, QColor("#111723"));
+        }
+        else if(id == "sky_stars")
+        {
+            fillLinear(QColor("#080D22"), QColor("#182C5A"), true);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor("#EAF3FF"));
+            for(int i = 0; i < 34; ++i)
+            {
+                const qreal x = inner.left() + 5 + (i * 47) % static_cast<int>(inner.width() - 10);
+                const qreal y = inner.top() + 4 + (i * 29) % static_cast<int>(inner.height() - 8);
+                const qreal r = (i % 7 == 0) ? 1.8 : 0.8;
+                painter.drawEllipse(QPointF(x, y), r, r);
+            }
+        }
+        else if(id == "sky_haze")
+        {
+            fillLinear(QColor("#1B3C6A"), QColor("#263A5B"), true);
+            QLinearGradient haze(inner.topLeft(), inner.bottomLeft());
+            haze.setColorAt(0.25, QColor(255, 160, 112, 0));
+            haze.setColorAt(0.55, QColor(255, 160, 112, 190));
+            haze.setColorAt(0.80, QColor(255, 160, 112, 0));
+            painter.fillRect(inner, QBrush(haze));
+        }
+        else if(id == "sky_aurora")
+        {
+            painter.fillRect(inner, QColor("#071427"));
+            painter.setPen(QPen(QColor(72, 255, 190, 185), 5.0));
+            QPainterPath path;
+            path.moveTo(inner.left(), inner.bottom() - 12);
+            for(int i = 0; i <= 20; ++i)
+            {
+                const qreal x = inner.left() + inner.width() * i / 20.0;
+                const qreal y = inner.center().y() + std::sin(i * 0.65) * 10.0;
+                path.lineTo(x, y);
+            }
+            painter.drawPath(path);
+            painter.setPen(QPen(QColor(112, 110, 255, 120), 3.0));
+            QTransform translated;
+            translated.translate(0.0, -8.0);
+            painter.drawPath(translated.map(path));
+        }
+        else if(id == "sky_nebula")
+        {
+            painter.fillRect(inner, QColor("#090B22"));
+            QRadialGradient n1(QPointF(inner.left() + inner.width() * 0.35, inner.center().y()), inner.width() * 0.32);
+            n1.setColorAt(0.0, QColor(132, 72, 255, 210));
+            n1.setColorAt(0.5, QColor(219, 74, 205, 100));
+            n1.setColorAt(1.0, QColor(0, 0, 0, 0));
+            painter.fillRect(inner, QBrush(n1));
         }
         else
         {
@@ -14162,12 +14281,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(immediateCompile)
         {
             liveCompileTimer_.stop();
+            beginnerLiveCompileTimer_.stop();
             compileEditor();
         }
-        else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
+        else if(beginnerUiMode_)
         {
-            // Beginner mode is always live: the user should see slider changes
-            // immediately even if Advanced mode previously disabled Live Update.
+            // Beginner sliders are continuously live. Do not restart this timer on
+            // every mouse-move event: the old debounce only fired after dragging
+            // stopped. The dedicated short throttle compiles the newest generated
+            // HLSL while the slider is still moving, without queueing stale frames.
+            if(!beginnerLiveCompileTimer_.isActive())
+                beginnerLiveCompileTimer_.start();
+        }
+        else if(!liveCompile_ || liveCompile_->isChecked())
+        {
             liveCompileTimer_.start();
         }
     }
@@ -19266,7 +19393,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QDoubleSpinBox* vectorBoxes_[8][4]{};
     QLabel* vectorInfo_ = nullptr;
     std::unique_ptr<HlslHighlighter> highlighter_;
-    QTimer liveCompileTimer_, sourceValuesRefreshTimer_, fileWatchTimer_, performanceTimer_;
+    QTimer liveCompileTimer_, beginnerLiveCompileTimer_, sourceValuesRefreshTimer_, fileWatchTimer_, performanceTimer_;
     QMap<QString, QAction*> themeActions_;
     QMap<QString, QKeySequence> shortcutDefaults_;
     QMap<QString, QShortcut*> shortcuts_;

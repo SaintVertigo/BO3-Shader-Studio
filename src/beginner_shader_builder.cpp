@@ -212,13 +212,22 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "film_grain" && project.target == Target::PostFx && hasUv && hasTime)
         {
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString grainSize = floatLiteral(parameterFloat(effect, *definition, "scale"));
             const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            out += QString("    // %1\n"
-                           "    float %2_grain = BO3BeginnerHash21(floor(uv * %3) + floor(t * %4 * 59.0));\n"
-                           "    float %2_lumaMask = 0.45 + 0.55 * saturate(1.0 - dot(saturate(color), float3(0.2126, 0.7152, 0.0722)));\n"
-                           "    color += (%2_grain - 0.5) * %5 * %2_lumaMask;\n")
-                .arg(definition->name, tag, scale, speed, amount);
+            const QString shadowBoost = floatLiteral(parameterFloat(effect, *definition, "shadow_boost"));
+            const QString colorGrain = floatLiteral(parameterFloat(effect, *definition, "color_grain"));
+            out += QString("    // %1 - true pixel-space film grain, not scanline-sized UV bands\n"
+                           "    float %2_frame = floor(t * %4 * 48.0);\n"
+                           "    float2 %2_grainCell = floor(beginnerPixel / max(%3, 0.5));\n"
+                           "    float %2_g0 = BO3BeginnerHash21(%2_grainCell + float2(%2_frame * 17.0, %2_frame * 31.0)) - 0.5;\n"
+                           "    float %2_g1 = BO3BeginnerHash21(%2_grainCell.yx + float2(%2_frame * 47.0 + 13.0, %2_frame * 11.0 + 7.0)) - 0.5;\n"
+                           "    float %2_g2 = BO3BeginnerHash21(%2_grainCell + float2(%2_frame * 23.0 + 37.0, %2_frame * 53.0 + 19.0)) - 0.5;\n"
+                           "    float %2_luma = dot(saturate(color), float3(0.2126, 0.7152, 0.0722));\n"
+                           "    float %2_lumaMask = lerp(1.0, 1.45 - 0.80 * %2_luma, %5);\n"
+                           "    float3 %2_mono = %2_g0.xxx;\n"
+                           "    float3 %2_rgb = float3(%2_g0, %2_g1, %2_g2);\n"
+                           "    color += lerp(%2_mono, %2_rgb, %6) * (%7 * %2_lumaMask);\n")
+                .arg(definition->name, tag, grainSize, speed, shadowBoost, colorGrain, amount);
         }
         else if(effect.typeId == "uv_scroll" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -260,8 +269,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            out += QString("    // %1\n"
-                           "    float2 %2_chromaOffset = float2(%3, 0.0);\n"
+            out += QString("    // %1 - lens-style radial channel separation that grows toward the edges\n"
+                           "    float2 %2_chromaCenter = uv - 0.5;\n"
+                           "    float2 %2_chromaOffset = %2_chromaCenter * %3;\n"
                            "    float3 %2_chromaBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
                            "    float3 %2_chromaR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + %2_chromaOffset)).rgb);\n"
                            "    float3 %2_chromaB = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - %2_chromaOffset)).rgb);\n"
@@ -298,6 +308,159 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    clip(%2_dissolveNoise - %4);\n"
                            "    color += %6 * (%2_dissolveEdge * 1.6);\n")
                 .arg(definition->name, tag, scale, threshold, edgeWidth, colorLiteral(edgeColor));
+        }
+        else if(effect.typeId == "sky_sun" && project.target == Target::Sky)
+        {
+            const QColor sunColor = parameterColor(effect, *definition, "color");
+            const double az = parameterFloat(effect, *definition, "azimuth") * 3.14159265358979323846 / 180.0;
+            const double el = parameterFloat(effect, *definition, "elevation") * 3.14159265358979323846 / 180.0;
+            const double radius = parameterFloat(effect, *definition, "size") * 3.14159265358979323846 / 180.0;
+            const double softness = parameterFloat(effect, *definition, "softness") * 3.14159265358979323846 / 180.0;
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString glow = floatLiteral(parameterFloat(effect, *definition, "glow"));
+            const QString dir = QString("float3(%1, %2, %3)")
+                .arg(floatLiteral(std::cos(el) * std::cos(az)),
+                     floatLiteral(std::cos(el) * std::sin(az)),
+                     floatLiteral(std::sin(el)));
+            out += QString("    // %1\n"
+                           "    float3 %2_sunDir = normalize(%3);\n"
+                           "    float %2_sunDot = dot(d, %2_sunDir);\n"
+                           "    float %2_sunDisc = smoothstep(%4, %5, %2_sunDot);\n"
+                           "    float %2_sunHalo = pow(saturate(%2_sunDot), 72.0);\n"
+                           "    color += %6 * (%2_sunDisc * %7 + %2_sunHalo * %8);\n")
+                .arg(definition->name, tag, dir,
+                     floatLiteral(std::cos(radius + softness)),
+                     floatLiteral(std::cos(radius)),
+                     colorLiteral(sunColor), brightness, glow);
+        }
+        else if(effect.typeId == "sky_moon" && project.target == Target::Sky)
+        {
+            const QColor moonColor = parameterColor(effect, *definition, "color");
+            const double az = parameterFloat(effect, *definition, "azimuth") * 3.14159265358979323846 / 180.0;
+            const double el = parameterFloat(effect, *definition, "elevation") * 3.14159265358979323846 / 180.0;
+            const double radius = parameterFloat(effect, *definition, "size") * 3.14159265358979323846 / 180.0;
+            const double softness = parameterFloat(effect, *definition, "softness") * 3.14159265358979323846 / 180.0;
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString halo = floatLiteral(parameterFloat(effect, *definition, "halo"));
+            const QString dir = QString("float3(%1, %2, %3)")
+                .arg(floatLiteral(std::cos(el) * std::cos(az)),
+                     floatLiteral(std::cos(el) * std::sin(az)),
+                     floatLiteral(std::sin(el)));
+            out += QString("    // %1\n"
+                           "    float3 %2_moonDir = normalize(%3);\n"
+                           "    float %2_moonDot = dot(d, %2_moonDir);\n"
+                           "    float %2_moonDisc = smoothstep(%4, %5, %2_moonDot);\n"
+                           "    float %2_moonHalo = pow(saturate(%2_moonDot), 110.0);\n"
+                           "    color += %6 * (%2_moonDisc * %7 + %2_moonHalo * %8);\n")
+                .arg(definition->name, tag, dir,
+                     floatLiteral(std::cos(radius + softness)),
+                     floatLiteral(std::cos(radius)),
+                     colorLiteral(moonColor), brightness, halo);
+        }
+        else if(effect.typeId == "sky_clouds" && project.target == Target::Sky)
+        {
+            const QColor cloudColor = parameterColor(effect, *definition, "color");
+            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
+            const QString opacity = floatLiteral(parameterFloat(effect, *definition, "opacity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const double windAngle = parameterFloat(effect, *definition, "wind_direction") * 3.14159265358979323846 / 180.0;
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1 - seamless direction-space procedural clouds\n"
+                           "    float3 %2_wind = float3(%3, %4, 0.0);\n"
+                           "    float3 %2_cloudP = d * (%5 * 3.5) + %2_wind * (t * %6);\n"
+                           "    float %2_cloudNoise = BO3BeginnerFbm3(%2_cloudP);\n"
+                           "    float %2_cloudThreshold = lerp(0.76, 0.30, %7);\n"
+                           "    float %2_cloud = smoothstep(%2_cloudThreshold, %2_cloudThreshold + max(%8, 0.025), %2_cloudNoise);\n"
+                           "    %2_cloud *= smoothstep(-0.08, 0.16, d.z);\n"
+                           "    float3 %2_cloudLit = %9 * (0.72 + 0.28 * saturate(d.z * 0.5 + 0.5));\n"
+                           "    color = lerp(color, %2_cloudLit, saturate(%2_cloud * %10));\n")
+                .arg(definition->name, tag,
+                     floatLiteral(std::cos(windAngle)), floatLiteral(std::sin(windAngle)),
+                     scale, speed, coverage, softness, colorLiteral(cloudColor))
+                .arg(opacity);
+        }
+        else if(effect.typeId == "sky_mountains" && project.target == Target::Sky)
+        {
+            const QColor nearColor = parameterColor(effect, *definition, "near_color");
+            const QColor farColor = parameterColor(effect, *definition, "far_color");
+            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
+            const QString roughness = floatLiteral(parameterFloat(effect, *definition, "roughness"));
+            const QString depth = floatLiteral(parameterFloat(effect, *definition, "depth"));
+            out += QString("    // %1 - seam-free procedural horizon silhouettes\n"
+                           "    float2 %2_h = normalize(d.xy + float2(0.00001, 0.00002));\n"
+                           "    float %2_ridgeA = 0.5 + 0.5 * sin(%2_h.x * 14.7 + %2_h.y * 21.3 + 0.6);\n"
+                           "    float %2_ridgeB = 0.5 + 0.5 * sin(%2_h.x * 31.9 - %2_h.y * 24.1 + 2.4);\n"
+                           "    float %2_ridgeC = 0.5 + 0.5 * sin(%2_h.x * 59.3 + %2_h.y * 43.7 + 1.2);\n"
+                           "    float %2_ridge = (%2_ridgeA * 0.52 + %2_ridgeB * 0.31 + %2_ridgeC * 0.17);\n"
+                           "    float %2_farTop = %3 * 0.62 + (%2_ridge * 0.085 * %4);\n"
+                           "    float %2_nearTop = %3 + pow(saturate(%2_ridge), 1.35) * (0.15 * %4);\n"
+                           "    float %2_farMask = 1.0 - smoothstep(%2_farTop, %2_farTop + 0.012, d.z);\n"
+                           "    float %2_nearMask = 1.0 - smoothstep(%2_nearTop, %2_nearTop + 0.009, d.z);\n"
+                           "    color = lerp(color, %5, saturate(%2_farMask * %6));\n"
+                           "    color = lerp(color, %7, %2_nearMask);\n")
+                .arg(definition->name, tag, height, roughness, colorLiteral(farColor), depth, colorLiteral(nearColor));
+        }
+        else if(effect.typeId == "sky_stars" && project.target == Target::Sky)
+        {
+            const QColor starColor = parameterColor(effect, *definition, "color");
+            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
+            const QString twinkle = floatLiteral(parameterFloat(effect, *definition, "twinkle"));
+            const QString twinkleSpeed = floatLiteral(parameterFloat(effect, *definition, "twinkle_speed"));
+            out += QString("    // %1\n"
+                           "    float3 %2_starCell = floor(d * %3);\n"
+                           "    float %2_starSeed = BO3BeginnerHash31(%2_starCell);\n"
+                           "    float %2_starThreshold = lerp(0.9993, 0.972, %4);\n"
+                           "    float %2_star = smoothstep(%2_starThreshold, 1.0, %2_starSeed);\n"
+                           "    %2_star = pow(saturate(%2_star), 6.0);\n"
+                           "    float %2_twinkle = 0.72 + 0.28 * sin(t * %5 * 6.2831853 + BO3BeginnerHash31(%2_starCell + 17.0) * 19.0);\n"
+                           "    %2_star *= lerp(1.0, %2_twinkle, %6) * smoothstep(-0.04, 0.18, d.z);\n"
+                           "    color += %7 * (%2_star * %8);\n")
+                .arg(definition->name, tag, scale, density, twinkleSpeed, twinkle, colorLiteral(starColor), brightness);
+        }
+        else if(effect.typeId == "sky_haze" && project.target == Target::Sky)
+        {
+            const QColor hazeColor = parameterColor(effect, *definition, "color");
+            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
+            const QString width = floatLiteral(parameterFloat(effect, *definition, "width"));
+            out += QString("    // %1\n"
+                           "    float %2_haze = exp(-abs(d.z) / max(%3, 0.01));\n"
+                           "    color = lerp(color, %4, saturate(%2_haze * %5));\n")
+                .arg(definition->name, tag, width, colorLiteral(hazeColor), intensity);
+        }
+        else if(effect.typeId == "sky_aurora" && project.target == Target::Sky)
+        {
+            const QColor colorA = parameterColor(effect, *definition, "color_a");
+            const QColor colorB = parameterColor(effect, *definition, "color_b");
+            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            out += QString("    // %1\n"
+                           "    float2 %2_ah = normalize(d.xy + float2(0.00001, 0.00002));\n"
+                           "    float %2_an = BO3BeginnerFbm3(float3(%2_ah * %3, d.z * 2.0 + t * %4));\n"
+                           "    float %2_wave = 0.5 + 0.5 * sin((%2_ah.x * 8.0 + %2_ah.y * 11.0 + %2_an * 3.2 + t * %4) * 3.14159265);\n"
+                           "    float %2_band = smoothstep(0.58, 0.94, %2_wave);\n"
+                           "    %2_band *= smoothstep(0.02, 0.28, d.z) * (1.0 - smoothstep(0.88, 1.0, d.z));\n"
+                           "    float3 %2_ac = lerp(%5, %6, saturate(d.z));\n"
+                           "    color += %2_ac * (%2_band * %7);\n")
+                .arg(definition->name, tag, scale, speed, colorLiteral(colorA), colorLiteral(colorB), intensity);
+        }
+        else if(effect.typeId == "sky_nebula" && project.target == Target::Sky)
+        {
+            const QColor colorA = parameterColor(effect, *definition, "color_a");
+            const QColor colorB = parameterColor(effect, *definition, "color_b");
+            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
+            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
+            out += QString("    // %1\n"
+                           "    float %2_nn = BO3BeginnerFbm3(d * (%3 * 2.6) + float3(3.1, 7.7, 11.3));\n"
+                           "    float %2_nm = smoothstep(lerp(0.72, 0.30, %4), 0.86, %2_nn);\n"
+                           "    %2_nm *= smoothstep(-0.05, 0.20, d.z);\n"
+                           "    float3 %2_nc = lerp(%5, %6, saturate(%2_nn));\n"
+                           "    color += %2_nc * (%2_nm * %7);\n")
+                .arg(definition->name, tag, scale, coverage, colorLiteral(colorA), colorLiteral(colorB), intensity);
         }
         else if(effect.typeId == "gradient")
         {
@@ -357,9 +520,15 @@ QString optionalHelpers(const Project& project)
     const bool needsHash21 =
         (project.target != Target::Material && projectUsesEffect(project, "noise")) ||
         projectUsesEffect(project, "film_grain");
+    const bool needsFbm3 =
+        projectUsesEffect(project, "sky_clouds") ||
+        projectUsesEffect(project, "sky_aurora") ||
+        projectUsesEffect(project, "sky_nebula");
     const bool needsHash31 =
         (project.target == Target::Material && projectUsesEffect(project, "noise")) ||
-        projectUsesEffect(project, "dissolve");
+        projectUsesEffect(project, "dissolve") ||
+        projectUsesEffect(project, "sky_stars") ||
+        needsFbm3;
     const bool needsHash11 = projectUsesEffect(project, "flicker");
 
     if(needsHash21)
@@ -382,6 +551,42 @@ float BO3BeginnerHash31(float3 p)
     p = frac(p * 0.1031);
     p += dot(p, p.yzx + 33.33);
     return frac((p.x + p.y) * p.z);
+}
+)HLSL");
+    }
+
+    if(needsFbm3)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerValueNoise3(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = BO3BeginnerHash31(i + float3(0.0, 0.0, 0.0));
+    float n100 = BO3BeginnerHash31(i + float3(1.0, 0.0, 0.0));
+    float n010 = BO3BeginnerHash31(i + float3(0.0, 1.0, 0.0));
+    float n110 = BO3BeginnerHash31(i + float3(1.0, 1.0, 0.0));
+    float n001 = BO3BeginnerHash31(i + float3(0.0, 0.0, 1.0));
+    float n101 = BO3BeginnerHash31(i + float3(1.0, 0.0, 1.0));
+    float n011 = BO3BeginnerHash31(i + float3(0.0, 1.0, 1.0));
+    float n111 = BO3BeginnerHash31(i + float3(1.0, 1.0, 1.0));
+    float nx00 = lerp(n000, n100, f.x);
+    float nx10 = lerp(n010, n110, f.x);
+    float nx01 = lerp(n001, n101, f.x);
+    float nx11 = lerp(n011, n111, f.x);
+    return lerp(lerp(nx00, nx10, f.y), lerp(nx01, nx11, f.y), f.z);
+}
+
+float BO3BeginnerFbm3(float3 p)
+{
+    float value = 0.0;
+    float amplitude = 0.53;
+    value += BO3BeginnerValueNoise3(p) * amplitude; p = p * 2.03 + 17.17; amplitude *= 0.50;
+    value += BO3BeginnerValueNoise3(p) * amplitude; p = p * 2.01 + 11.31; amplitude *= 0.50;
+    value += BO3BeginnerValueNoise3(p) * amplitude; p = p * 2.07 + 7.73; amplitude *= 0.50;
+    value += BO3BeginnerValueNoise3(p) * amplitude;
+    return saturate(value / 0.99375);
 }
 )HLSL");
     }
@@ -448,6 +653,7 @@ PS_INPUT vs_main(const VS_INPUT vertex, const uint instance : INSTANCE_SEMANTIC)
 float4 ps_main(PS_INPUT input) : SV_Target
 {
     float2 uv = saturate(input.texcoord);
+    float2 beginnerPixel = input.position.xy;
     float t = GetTime();
     float beginnerVertical = uv.y;
     float3 color = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, uv).rgb);
@@ -657,11 +863,13 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {FloatParam("amount", "Strength", "Noise intensity.", 0.0, 0.75, 0.005, 0.05),
                    FloatParam("scale", "Scale", "How fine or coarse the noise pattern is.", 2.0, 1200.0, 1.0, 320.0),
                    FloatParam("speed", "Speed", "How quickly a new noise pattern appears.", 0.0, 4.0, 0.01, 0.35)}),
-        EffectDef("film_grain", "Film Grain", "Add fine moving grain that is strongest in darker parts of the game image.", "Atmosphere",
+        EffectDef("film_grain", "Film Grain", "Add fine per-pixel moving film grain instead of broad digital bands.", "Atmosphere",
                   {Target::PostFx},
-                  {FloatParam("amount", "Strength", "How visible the grain is.", 0.0, 0.30, 0.005, 0.045),
-                   FloatParam("scale", "Grain Size", "Higher values make the grain finer.", 120.0, 1800.0, 1.0, 720.0),
-                   FloatParam("speed", "Speed", "How quickly the grain changes.", 0.0, 4.0, 0.01, 1.0)}),
+                  {FloatParam("amount", "Strength", "How visible the grain is.", 0.0, 0.20, 0.002, 0.035),
+                   FloatParam("scale", "Grain Size", "Size of each grain speck in screen pixels.", 0.5, 4.0, 0.05, 1.15),
+                   FloatParam("speed", "Speed", "How quickly the grain pattern changes.", 0.0, 4.0, 0.01, 1.0),
+                   FloatParam("shadow_boost", "Shadow Grain", "Increase grain in dark areas like real film stock.", 0.0, 1.0, 0.01, 0.55),
+                   FloatParam("color_grain", "Color Grain", "0 is monochrome grain; higher values add subtle RGB grain.", 0.0, 1.0, 0.01, 0.10)}),
 
         EffectDef("scanlines", "Scanlines", "Add animated horizontal lines for CRT, hologram, visor and monitor looks.", "Retro & Display",
                   {Target::PostFx, Target::Material},
@@ -709,6 +917,68 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("edge_width", "Edge Width", "Width of the bright transition around dissolving areas.", 0.01, 0.25, 0.005, 0.08),
                    ColorParam("edge_color", "Edge Color", "Color along the dissolving edge.", "#FF8A3D")}),
 
+        EffectDef("sky_sun", "Sun & Glow", "Place a procedural sun anywhere in the sky with adjustable size, color and glow.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Sun Color", "Color of the sun and its halo.", "#FFD89A"),
+                   FloatParam("azimuth", "Horizontal Position", "Rotate the sun around the horizon in degrees.", 0.0, 360.0, 1.0, 255.0),
+                   FloatParam("elevation", "Height", "Sun height above the horizon in degrees.", -8.0, 90.0, 0.5, 18.0),
+                   FloatParam("size", "Disc Size", "Angular radius of the visible sun disc.", 0.25, 12.0, 0.05, 2.2),
+                   FloatParam("softness", "Edge Softness", "Softness around the sun disc edge.", 0.05, 4.0, 0.05, 0.45),
+                   FloatParam("brightness", "Brightness", "Brightness of the sun disc.", 0.0, 8.0, 0.05, 3.0),
+                   FloatParam("glow", "Glow", "Strength of the surrounding halo.", 0.0, 5.0, 0.05, 1.1)}),
+        EffectDef("sky_moon", "Moon & Halo", "Place a procedural moon in the sky independently from the sun.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Moon Color", "Color of the moon and halo.", "#DDE8FF"),
+                   FloatParam("azimuth", "Horizontal Position", "Rotate the moon around the horizon in degrees.", 0.0, 360.0, 1.0, 70.0),
+                   FloatParam("elevation", "Height", "Moon height above the horizon in degrees.", -8.0, 90.0, 0.5, 42.0),
+                   FloatParam("size", "Disc Size", "Angular radius of the moon disc.", 0.25, 10.0, 0.05, 1.7),
+                   FloatParam("softness", "Edge Softness", "Softness around the disc edge.", 0.05, 4.0, 0.05, 0.25),
+                   FloatParam("brightness", "Brightness", "Brightness of the moon disc.", 0.0, 6.0, 0.05, 1.8),
+                   FloatParam("halo", "Halo", "Strength of the subtle moon halo.", 0.0, 3.0, 0.05, 0.35)}),
+        EffectDef("sky_clouds", "Procedural Clouds", "Generate seamless animated clouds around the sky without any texture files.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Cloud Color", "Main color of the cloud layer.", "#E8EDF2"),
+                   FloatParam("coverage", "Coverage", "How much of the sky is covered by clouds.", 0.0, 1.0, 0.01, 0.48),
+                   FloatParam("opacity", "Opacity", "How strongly clouds cover the sky behind them.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("scale", "Cloud Size", "Higher values create smaller cloud structures.", 0.5, 10.0, 0.05, 2.2),
+                   FloatParam("softness", "Softness", "How soft the cloud edges are.", 0.025, 0.35, 0.005, 0.11),
+                   FloatParam("wind_direction", "Wind Direction", "Direction the clouds travel in degrees.", 0.0, 360.0, 1.0, 28.0),
+                   FloatParam("speed", "Wind Speed", "How quickly clouds move across the sky.", -2.0, 2.0, 0.01, 0.08)}),
+        EffectDef("sky_mountains", "Mountain Silhouettes", "Build layered procedural mountain ranges around the horizon with no image texture.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("near_color", "Near Mountains", "Color of the closest ridge.", "#101523"),
+                   ColorParam("far_color", "Distant Mountains", "Color of the distant ridge.", "#344058"),
+                   FloatParam("height", "Height", "Average mountain height above the horizon.", 0.01, 0.38, 0.005, 0.10),
+                   FloatParam("roughness", "Jaggedness", "How dramatic the peaks and valleys become.", 0.0, 1.5, 0.01, 0.78),
+                   FloatParam("depth", "Distant Layer", "Visibility of the distant mountain layer.", 0.0, 1.0, 0.01, 0.72)}),
+        EffectDef("sky_stars", "Procedural Stars", "Fill the upper sky with seamless stars and optional animated twinkle.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Star Color", "Color of the stars.", "#DCEBFF"),
+                   FloatParam("density", "Density", "Number of visible stars.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("scale", "Star Size", "Higher values produce finer, smaller stars.", 90.0, 900.0, 1.0, 360.0),
+                   FloatParam("brightness", "Brightness", "How bright the stars appear.", 0.0, 5.0, 0.05, 1.5),
+                   FloatParam("twinkle", "Twinkle", "How strongly star brightness animates.", 0.0, 1.0, 0.01, 0.25),
+                   FloatParam("twinkle_speed", "Twinkle Speed", "How quickly the stars shimmer.", 0.0, 4.0, 0.01, 0.55)}),
+        EffectDef("sky_haze", "Horizon Haze", "Add colored atmospheric haze around the entire horizon.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color", "Haze Color", "Color of the horizon haze.", "#F4A67B"),
+                   FloatParam("intensity", "Intensity", "How strongly the haze affects the horizon.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("width", "Width", "Vertical thickness of the haze band.", 0.02, 0.60, 0.01, 0.16)}),
+        EffectDef("sky_aurora", "Aurora Ribbons", "Add animated procedural aurora ribbons across the upper sky.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color_a", "Primary Color", "Primary aurora color.", "#54FFC4"),
+                   ColorParam("color_b", "Secondary Color", "Secondary aurora color.", "#6C75FF"),
+                   FloatParam("intensity", "Intensity", "Brightness of the aurora.", 0.0, 4.0, 0.05, 0.85),
+                   FloatParam("scale", "Ribbon Detail", "Complexity and width of the ribbons.", 0.5, 8.0, 0.05, 2.2),
+                   FloatParam("speed", "Movement Speed", "How quickly the aurora flows.", -2.0, 2.0, 0.01, 0.10)}),
+        EffectDef("sky_nebula", "Nebula / Space Clouds", "Add colorful procedural space fog for fantasy, alien and deep-space skies.", "Sky & Environment",
+                  {Target::Sky},
+                  {ColorParam("color_a", "Color A", "First nebula color.", "#6D3EFF"),
+                   ColorParam("color_b", "Color B", "Second nebula color.", "#FF4FC3"),
+                   FloatParam("intensity", "Intensity", "Brightness of the nebula.", 0.0, 3.0, 0.05, 0.60),
+                   FloatParam("scale", "Cloud Size", "Higher values create smaller space-cloud structures.", 0.5, 10.0, 0.05, 2.1),
+                   FloatParam("coverage", "Coverage", "How much of the sky receives nebula color.", 0.0, 1.0, 0.01, 0.42)}),
+
         EffectDef("gradient", "Color Gradient", "Blend a top and bottom color through the screen or sky while keeping its detail.", "Patterns",
                   {Target::PostFx, Target::Sky},
                   {ColorParam("bottom_color", "Bottom Color", "Color toward the bottom.", "#5740A8"),
@@ -717,9 +987,9 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("grid_rings", "Grid / Rings", "Overlay a procedural grid or rings without requiring an image texture.", "Patterns",
                   {Target::PostFx, Target::Material},
                   {ColorParam("color", "Pattern Color", "Color of the lines.", "#6FE8FF"),
-                   FloatParam("strength", "Strength", "Brightness of the pattern.", 0.0, 3.0, 0.01, 0.45),
+                   FloatParam("strength", "Strength", "Brightness of the pattern.", 0.0, 3.0, 0.01, 0.22),
                    FloatParam("scale", "Scale", "How many pattern cells or rings are visible.", 2.0, 80.0, 0.1, 12.0),
-                   FloatParam("rings", "Grid ↔ Rings", "0 is a grid; 1 is rings; values between blend both.", 0.0, 1.0, 0.01, 0.0)})
+                   FloatParam("rings", "Grid / Rings Mix", "0 is all grid; 1 is all rings; values between blend both.", 0.0, 1.0, 0.01, 0.0)})
     };
     return definitions;
 }
@@ -776,7 +1046,8 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target)
         return {{"blank", "Blank / Original Scene"}, {"cinematic", "Cinematic"}, {"retro_crt", "Retro CRT"}};
     if(target == Target::Material)
         return {{"blank", "Blank Surface"}, {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
-    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"dream_sky", "Dream Sky"}};
+    return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"dream_sky", "Dream Sky"},
+            {"mountain_dawn", "Mountain Dawn"}, {"starry_night", "Starry Night"}, {"aurora_night", "Aurora Night"}};
 }
 
 Project makePreset(const QString& presetId, Target target)
@@ -804,7 +1075,7 @@ Project makePreset(const QString& presetId, Target target)
         project.name = "Retro CRT";
         add("saturation", {{"amount", 0.84}});
         add("scanlines", {{"amount", 0.18}, {"density", 190.0}, {"speed", 0.20}});
-        add("film_grain", {{"amount", 0.035}, {"scale", 760.0}, {"speed", 1.0}});
+        add("film_grain", {{"amount", 0.030}, {"scale", 1.10}, {"speed", 1.0}, {"shadow_boost", 0.55}, {"color_grain", 0.08}});
         add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
         add("vignette", {{"strength", 0.28}, {"size", 0.68}, {"softness", 0.45}});
     }
@@ -838,6 +1109,9 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["groundColor"] = "#120B18";
         add("saturation", {{"amount", 1.18}});
         add("contrast", {{"amount", 1.08}});
+        add("sky_haze", {{"color", "#FF9A6A"}, {"intensity", 0.42}, {"width", 0.18}});
+        add("sky_sun", {{"color", "#FFD08A"}, {"azimuth", 265.0}, {"elevation", 9.0}, {"size", 2.6}, {"brightness", 3.4}, {"glow", 1.5}});
+        add("sky_clouds", {{"color", "#E8B6A2"}, {"coverage", 0.34}, {"opacity", 0.32}, {"scale", 2.0}, {"speed", 0.045}});
     }
     else if(target == Target::Sky && id == "dream_sky")
     {
@@ -847,7 +1121,40 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["groundColor"] = "#070814";
         add("tint", {{"color", "#8FA7FF"}, {"amount", 0.22}});
         add("saturation", {{"amount", 1.32}});
-        add("pulse", {{"amount", 0.06}, {"speed", 0.22}});
+        add("sky_stars", {{"density", 0.34}, {"brightness", 1.75}, {"twinkle", 0.34}, {"twinkle_speed", 0.48}});
+        add("sky_nebula", {{"color_a", "#5B46FF"}, {"color_b", "#E65EC7"}, {"intensity", 0.48}, {"coverage", 0.38}});
+        add("pulse", {{"amount", 0.035}, {"speed", 0.18}});
+    }
+    else if(target == Target::Sky && id == "mountain_dawn")
+    {
+        project.name = "Mountain Dawn";
+        project.settings["zenithColor"] = "#274B7A";
+        project.settings["horizonColor"] = "#F2A47D";
+        project.settings["groundColor"] = "#10151D";
+        add("sky_haze", {{"color", "#F7B08A"}, {"intensity", 0.36}, {"width", 0.20}});
+        add("sky_sun", {{"color", "#FFE0A3"}, {"azimuth", 235.0}, {"elevation", 12.0}, {"size", 2.1}, {"brightness", 2.8}, {"glow", 1.0}});
+        add("sky_clouds", {{"color", "#D9E1E8"}, {"coverage", 0.30}, {"opacity", 0.34}, {"scale", 2.4}, {"speed", 0.035}});
+        add("sky_mountains", {{"near_color", "#151A22"}, {"far_color", "#48566A"}, {"height", 0.11}, {"roughness", 0.88}, {"depth", 0.78}});
+    }
+    else if(target == Target::Sky && id == "starry_night")
+    {
+        project.name = "Starry Night";
+        project.settings["zenithColor"] = "#050B22";
+        project.settings["horizonColor"] = "#17254A";
+        project.settings["groundColor"] = "#02040A";
+        add("sky_stars", {{"density", 0.58}, {"brightness", 2.1}, {"scale", 430.0}, {"twinkle", 0.42}, {"twinkle_speed", 0.65}});
+        add("sky_moon", {{"color", "#E5EEFF"}, {"azimuth", 72.0}, {"elevation", 48.0}, {"size", 1.8}, {"brightness", 2.0}, {"halo", 0.42}});
+        add("sky_haze", {{"color", "#28385E"}, {"intensity", 0.18}, {"width", 0.15}});
+    }
+    else if(target == Target::Sky && id == "aurora_night")
+    {
+        project.name = "Aurora Night";
+        project.settings["zenithColor"] = "#04091B";
+        project.settings["horizonColor"] = "#102B3A";
+        project.settings["groundColor"] = "#01040A";
+        add("sky_stars", {{"density", 0.30}, {"brightness", 1.35}, {"scale", 380.0}, {"twinkle", 0.18}});
+        add("sky_aurora", {{"color_a", "#54FFC4"}, {"color_b", "#6D79FF"}, {"intensity", 1.05}, {"scale", 2.4}, {"speed", 0.08}});
+        add("sky_mountains", {{"near_color", "#060A10"}, {"far_color", "#16232D"}, {"height", 0.085}, {"roughness", 0.72}, {"depth", 0.62}});
     }
     return project;
 }
