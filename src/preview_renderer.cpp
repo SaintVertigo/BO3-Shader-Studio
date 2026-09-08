@@ -31,6 +31,8 @@
 #include <vector>
 
 #include "model_import.h"
+#include "hlsl_preview_mode.h"
+#include "shader_include_handler.h"
 
 #define TINYEXR_USE_MINIZ 1
 #define TINYEXR_USE_PIZ 1
@@ -89,196 +91,6 @@ fs::path GetExecutableDirectory()
     if (length == 0 || length >= buffer.size()) return fs::current_path();
     return fs::path(std::wstring(buffer.data(), length)).parent_path();
 }
-
-
-class LocalInclude final : public ID3DInclude
-{
-public:
-    LocalInclude(fs::path baseDir, fs::path explicitRoot)
-        : baseDir_(std::move(baseDir)), explicitRoot_(std::move(explicitRoot))
-    {
-        AddSearchRoot(baseDir_);
-        if (!explicitRoot_.empty()) AddSearchRoot(explicitRoot_);
-
-        // BO3 shader trees often sit below ...\share\raw\shaders_* while common
-        // headers live in a neighboring shaders/include/lib directory. Add a few
-        // ancestors and conventional subfolders automatically so normal engine
-        // include layouts work without manually copying files next to the EXE.
-        fs::path walk = baseDir_;
-        for (int i = 0; i < 5 && !walk.empty(); ++i)
-        {
-            AddSearchRoot(walk);
-            AddSearchRoot(walk / L"include");
-            AddSearchRoot(walk / L"includes");
-            AddSearchRoot(walk / L"lib");
-            AddSearchRoot(walk / L"common");
-            AddSearchRoot(walk / L"shaders");
-            AddSearchRoot(walk / L"shaders_stable");
-            walk = walk.parent_path();
-        }
-        // Bundled compatibility headers gathered from the user-supplied
-        // BlackOps3Shaders repository. Keep these after the shader's own paths
-        // so local project headers always win over the bundled fallback copy.
-        const fs::path bundled = GetExecutableDirectory() / L"bo3_compat" / L"shaders_stable";
-        AddSearchRoot(bundled);
-        AddSearchRoot(bundled / L"postfx");
-        AddSearchRoot(bundled / L"lib");
-        AddSearchRoot(bundled / L"code");
-        AddSearchRoot(bundled / L"gfxcore");
-
-        // Source-tree fallback for people running from Visual Studio before the
-        // post-build copy has populated dist\bo3_compat.
-        const fs::path cwdBundled = fs::current_path() / L"bo3_compat" / L"shaders_stable";
-        AddSearchRoot(cwdBundled);
-        AddSearchRoot(cwdBundled / L"postfx");
-        AddSearchRoot(cwdBundled / L"lib");
-        AddSearchRoot(cwdBundled / L"code");
-        AddSearchRoot(cwdBundled / L"gfxcore");
-
-        AddSearchRoot(fs::current_path());
-    }
-
-    HRESULT __stdcall Open(D3D_INCLUDE_TYPE, LPCSTR fileName, LPCVOID parentData,
-                           LPCVOID* data, UINT* bytes) override
-    {
-        if (!fileName || !data || !bytes) return E_INVALIDARG;
-        const fs::path requested = Utf8ToWide(fileName);
-
-        std::vector<fs::path> candidates;
-        auto addCandidate = [&](const fs::path& p)
-        {
-            if (p.empty()) return;
-            const fs::path normalized = p.lexically_normal();
-            if (std::find(candidates.begin(), candidates.end(), normalized) == candidates.end())
-                candidates.push_back(normalized);
-        };
-
-        // Critical for nested BO3 headers: resolve relative to the include file
-        // that issued this #include, not only relative to the top-level shader.
-        if (parentData)
-        {
-            auto it = allocations_.find(parentData);
-            if (it != allocations_.end())
-                addCandidate(it->second.path.parent_path() / requested);
-        }
-
-        for (const auto& root : searchRoots_)
-        {
-            addCandidate(root / requested);
-            addCandidate(root / L"include" / requested);
-            addCandidate(root / L"includes" / requested);
-            addCandidate(root / L"lib" / requested);
-            addCandidate(root / L"common" / requested);
-        }
-
-        fs::path found;
-        for (const auto& candidate : candidates)
-        {
-            std::error_code ec;
-            if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec))
-            {
-                found = candidate;
-                break;
-            }
-        }
-
-        if (found.empty())
-        {
-            MissingInclude miss{};
-            miss.name = requested.wstring();
-            miss.candidates = std::move(candidates);
-            missing_.push_back(std::move(miss));
-            return E_FAIL;
-        }
-
-        std::ifstream in(found, std::ios::binary);
-        if (!in) return E_FAIL;
-        std::ostringstream ss;
-        ss << in.rdbuf();
-        const std::string content = ss.str();
-
-        Allocation allocation{};
-        allocation.data = std::make_unique<char[]>(content.size() + 1);
-        memcpy(allocation.data.get(), content.data(), content.size());
-        allocation.data[content.size()] = '\0';
-        allocation.path = found;
-
-        const void* key = allocation.data.get();
-        *data = key;
-        *bytes = static_cast<UINT>(content.size());
-        allocations_.emplace(key, std::move(allocation));
-        return S_OK;
-    }
-
-    HRESULT __stdcall Close(LPCVOID data) override
-    {
-        allocations_.erase(data);
-        return S_OK;
-    }
-
-    std::wstring MissingDiagnostics() const
-    {
-        if (missing_.empty()) return {};
-        std::wstring result =
-            L"\r\n[Preview] Include resolver could not find one or more files.\r\n"
-            L"[Preview] Nested includes are resolved relative to their parent header first.\r\n";
-
-        // Avoid flooding the output for repeated failures generated by compiler retries.
-        std::unordered_set<std::wstring> shown;
-        for (const auto& miss : missing_)
-        {
-            if (!shown.insert(miss.name).second) continue;
-            result += L"\r\n  Missing: ";
-            result += miss.name;
-            result += L"\r\n  Searched:\r\n";
-            const size_t limit = std::min<size_t>(miss.candidates.size(), 12);
-            for (size_t i = 0; i < limit; ++i)
-            {
-                result += L"    ";
-                result += miss.candidates[i].wstring();
-                result += L"\r\n";
-            }
-            if (miss.candidates.size() > limit)
-            {
-                result += L"    ... and ";
-                result += std::to_wstring(miss.candidates.size() - limit);
-                result += L" more locations\r\n";
-            }
-        }
-
-        result +=
-            L"\r\n[Preview] If the BO3 header tree is somewhere else, use Include Root... "
-            L"and select the folder that contains folders such as lib\\ or include\\.\r\n";
-        return result;
-    }
-
-private:
-    struct Allocation
-    {
-        std::unique_ptr<char[]> data;
-        fs::path path;
-    };
-
-    struct MissingInclude
-    {
-        std::wstring name;
-        std::vector<fs::path> candidates;
-    };
-
-    void AddSearchRoot(const fs::path& root)
-    {
-        if (root.empty()) return;
-        const fs::path normalized = root.lexically_normal();
-        if (std::find(searchRoots_.begin(), searchRoots_.end(), normalized) == searchRoots_.end())
-            searchRoots_.push_back(normalized);
-    }
-
-    fs::path baseDir_;
-    fs::path explicitRoot_;
-    std::vector<fs::path> searchRoots_;
-    std::unordered_map<const void*, Allocation> allocations_;
-    std::vector<MissingInclude> missing_;
-};
 
 
 struct ReflectedVariable
@@ -465,7 +277,7 @@ public:
 
         auto compileSource = [&](const std::string& source, ComPtr<ID3DBlob>& bytecode, std::wstring& diagnostics) -> HRESULT
         {
-            LocalInclude include(includeBase, includeRoot);
+            ShaderIncludeHandler include(includeBase, includeRoot);
             ComPtr<ID3DBlob> errorBlob;
             bytecode.Reset();
             HRESULT hr = D3DCompile(
@@ -612,7 +424,7 @@ public:
         bool newTemporalExposureMode = false;
         if (!vertexOnlyRequest && containsEntryFunction("ps_exposure_state"))
         {
-            LocalInclude stateInclude(includeBase, includeRoot);
+            ShaderIncludeHandler stateInclude(includeBase, includeRoot);
             ComPtr<ID3DBlob> stateBytecode;
             ComPtr<ID3DBlob> stateErrorBlob;
             HRESULT stateHr = D3DCompile(

@@ -35,6 +35,7 @@ HEADERS += src/github_update.h \
            src/main_window.h \
            src/glsl_converter_core.h \
            src/preview_renderer.h \
+           src/shader_include_handler.h \
            src/bo3_package.h \
            src/model_import.h \
            src/bo3_install_history.h \
@@ -60,10 +61,11 @@ QMAKE_CXXFLAGS += /utf-8 /W3
 # command name also keeps this usable on developer machines that have sccache
 # on PATH.
 contains(CONFIG, bo3_sccache) {
-    BO3_SCCACHE = $$(SCCACHE_PATH)
-    isEmpty(BO3_SCCACHE): BO3_SCCACHE = sccache
-    QMAKE_CC = $$quote($$BO3_SCCACHE) $$QMAKE_CC
-    QMAKE_CXX = $$quote($$BO3_SCCACHE) $$QMAKE_CXX
+    # ci_build_release.cmd places the resolved sccache directory on PATH.
+    # Use the command name here instead of embedding a mixed-slash absolute
+    # Windows path into qmake's compiler command, which cmd.exe can misparse.
+    QMAKE_CC = sccache $$QMAKE_CC
+    QMAKE_CXX = sccache $$QMAKE_CXX
 }
 
 LIBS += d3d11.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib user32.lib windowsapp.lib

@@ -98,8 +98,16 @@ if not defined BO3_SCCACHE_EXE (
     echo WARNING: sccache.exe was not found. Falling back to the normal MSVC build.
     exit /b 1
 )
-set "SCCACHE_PATH=%BO3_SCCACHE_EXE%"
-echo Compiler cache: %SCCACHE_PATH%
+for %%I in ("%BO3_SCCACHE_EXE%") do set "BO3_SCCACHE_DIR=%%~dpI"
+set "PATH=%BO3_SCCACHE_DIR%;%PATH%"
+where sccache.exe >nul 2>nul
+if errorlevel 1 (
+    echo WARNING: resolved sccache.exe could not be invoked from PATH.
+    exit /b 1
+)
+set "SCCACHE_PATH=sccache"
+echo Compiler cache: %BO3_SCCACHE_EXE%
+echo Compiler launcher command: sccache
 
 pushd build_qt
 qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"

@@ -161,6 +161,7 @@
 #include "github_update.h"
 #include "glsl_converter_core.h"
 #include "preview_renderer.h"
+#include "shader_include_handler.h"
 
 // Keep TinyEXR/miniz after Qt and the C++ standard-library headers.
 // Older miniz/TinyEXR releases may expose C-style helper macros (notably
@@ -4889,7 +4890,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         const fs::path configuredIncludeRoot = packageIncludeRoot.empty()
             ? (includeRoot_.isEmpty() ? fs::path() : fs::path(includeRoot_.toStdWString()))
             : packageIncludeRoot;
-        LocalInclude includeHandler(fs::current_path(), configuredIncludeRoot);
+        ShaderIncludeHandler includeHandler(fs::current_path(), configuredIncludeRoot);
         const QString normalizedShaderPath = QDir::cleanPath(QDir::fromNativeSeparators(shaderRel));
         auto compileStage = [&](bo3::ResolvedShaderStage& stage,
                                 bo3::CompiledShaderInterface& compiled)
@@ -6630,7 +6631,7 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         const fs::path includeBase = GetExecutableDirectory();
         const fs::path explicitRoot = includeRoot_.isEmpty() ? fs::path() : fs::path(includeRoot_.toStdWString());
 
-        LocalInclude include(includeBase, explicitRoot);
+        ShaderIncludeHandler include(includeBase, explicitRoot);
         ComPtr<ID3DBlob> bytecode;
         ComPtr<ID3DBlob> errorBlob;
         const UINT flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
