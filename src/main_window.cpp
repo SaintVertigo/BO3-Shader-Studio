@@ -13839,12 +13839,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         else if(id == "sky_mountains")
         {
             fillLinear(QColor("#527397"), QColor("#D6A582"), true);
-            QPainterPath far; far.moveTo(inner.left(),inner.bottom());
-            for(int x=0;x<=12;++x){ qreal px=inner.left()+x*inner.width()/12.0; qreal py=inner.center().y()+9-std::abs(std::sin(x*1.37))*23; far.lineTo(px,py); }
-            far.lineTo(inner.right(),inner.bottom()); far.closeSubpath(); painter.fillPath(far,QColor("#53657A"));
-            QPainterPath near; near.moveTo(inner.left(),inner.bottom());
-            for(int x=0;x<=10;++x){ qreal px=inner.left()+x*inner.width()/10.0; qreal py=inner.center().y()+20-std::abs(std::sin(x*1.91+0.6))*31; near.lineTo(px,py); }
-            near.lineTo(inner.right(),inner.bottom()); near.closeSubpath(); painter.fillPath(near,QColor("#151B24"));
+            QPainterPath farPath; farPath.moveTo(inner.left(),inner.bottom());
+            for(int x=0;x<=12;++x){ qreal px=inner.left()+x*inner.width()/12.0; qreal py=inner.center().y()+9-std::abs(std::sin(x*1.37))*23; farPath.lineTo(px,py); }
+            farPath.lineTo(inner.right(),inner.bottom()); farPath.closeSubpath(); painter.fillPath(farPath,QColor("#53657A"));
+            QPainterPath nearPath; nearPath.moveTo(inner.left(),inner.bottom());
+            for(int x=0;x<=10;++x){ qreal px=inner.left()+x*inner.width()/10.0; qreal py=inner.center().y()+20-std::abs(std::sin(x*1.91+0.6))*31; nearPath.lineTo(px,py); }
+            nearPath.lineTo(inner.right(),inner.bottom()); nearPath.closeSubpath(); painter.fillPath(nearPath,QColor("#151B24"));
         }
         else if(id == "sky_aurora")
         {
