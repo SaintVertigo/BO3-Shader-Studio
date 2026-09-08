@@ -41,6 +41,7 @@ struct EffectDefinition
     QString id;
     QString name;
     QString description;
+    QString category;
     QVector<Target> targets;
     QVector<ParameterDefinition> parameters;
 };

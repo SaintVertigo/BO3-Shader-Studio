@@ -1497,6 +1497,14 @@ public:
                beginner::supportsTarget(*vignette, beginner::Target::Sky))
                 return "Beginner effect target gating is not enforcing BO3-safe Vignette availability.";
 
+            for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
+            {
+                if(definition.category.trimmed().isEmpty())
+                    return QString("Beginner effect '%1' is missing visual-browser category metadata.").arg(definition.id);
+                if(definition.targets.isEmpty())
+                    return QString("Beginner effect '%1' has no BO3 target contract.").arg(definition.id);
+            }
+
             return {};
         });
 
@@ -3248,8 +3256,12 @@ private:
         // normal fullscreen PostFX shader. Advanced mode keeps them visible for
         // diagnostics even when disabled.
         meshCombo_->setVisible(!beginnerUiMode_ || geometryMode);
+        if(loadModelQuickButton_) loadModelQuickButton_->setVisible(!beginnerUiMode_ || geometryMode);
         gbufferViewCombo_->setVisible(!beginnerUiMode_ || deferredMode);
         lightingQuickMode_->setVisible(!beginnerUiMode_ || geometryMode);
+        if(beginnerPreviewImageToolbarButton_)
+            beginnerPreviewImageToolbarButton_->setVisible(!beginnerUiMode_ || !beginnerProjectActive_ ||
+                beginnerProject_.target == beginner::Target::PostFx);
         if (geometryMode && !cameraUserOverride_)
         {
             QSignalBlocker blocker(camera3D_);
@@ -13375,6 +13387,52 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             .arg(safe.name(QColor::HexRgb), foreground);
     }
 
+    static QString beginnerTargetShortName(beginner::Target target)
+    {
+        switch(target)
+        {
+            case beginner::Target::Material: return "Material";
+            case beginner::Target::Sky: return "Sky";
+            default: return "Screen";
+        }
+    }
+
+    static QString beginnerEffectAvailability(const beginner::EffectDefinition& definition)
+    {
+        QStringList targets;
+        if(beginner::supportsTarget(definition, beginner::Target::PostFx)) targets << "Screen";
+        if(beginner::supportsTarget(definition, beginner::Target::Material)) targets << "Material";
+        if(beginner::supportsTarget(definition, beginner::Target::Sky)) targets << "Sky";
+        return targets.join(" · ");
+    }
+
+    static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
+    {
+        const QString id = presetId.trimmed().toLower();
+        if(id == "blank")
+        {
+            if(target == beginner::Target::PostFx) return "Untouched game scene";
+            if(target == beginner::Target::Material) return "Simple clean surface";
+            return "Basic three-color sky";
+        }
+        if(id == "cinematic") return "Film contrast + soft color + vignette";
+        if(id == "retro_crt") return "Scanlines + grain + vignette";
+        if(id == "neon_surface") return "Blue-cyan glow + slow pulse";
+        if(id == "hologram") return "Cyan scanlines + noise + pulse";
+        if(id == "sunset") return "Warm horizon + deep blue sky";
+        if(id == "dream_sky") return "Purple-blue sky + gentle pulse";
+        return "Ready-made BO3-safe starting look";
+    }
+
+    bool beginnerProjectNameIsAutomatic(beginner::Target target, const QString& name) const
+    {
+        if(name == beginner::makeDefaultProject(target).name) return true;
+        const auto presets = beginner::presetsForTarget(target);
+        for(const auto& preset : presets)
+            if(name == beginner::makePreset(preset.first, target).name) return true;
+        return false;
+    }
+
     int beginnerEffectIndexById(const QString& instanceId) const
     {
         for(int i = 0; i < beginnerProject_.effects.size(); ++i)
@@ -13393,25 +13451,57 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         if(beginnerCompatibilityLabel_)
         {
-            beginnerCompatibilityLabel_->setText(QString::fromUtf8("✓  ") + beginner::compatibilitySummary(beginnerProject_));
+            beginnerCompatibilityLabel_->setText(QString::fromUtf8("✓  Works in Black Ops III"));
             beginnerCompatibilityLabel_->setToolTip(
-                "Beginner mode exposes only Shader Studio modules with a known BO3 target contract. "
-                "The generated HLSL still passes through the normal BO3 package validation before export.");
+                beginner::compatibilitySummary(beginnerProject_) + "\n\n"
+                "Every effect offered by Beginner mode has a known BO3 target contract. "
+                "Shader Studio still runs the normal BO3 package validation before export.");
         }
         if(beginnerSummaryLabel_)
-            beginnerSummaryLabel_->setText(beginner::projectSummary(beginnerProject_));
+        {
+            const QString summary = beginner::projectSummary(beginnerProject_);
+            beginnerSummaryLabel_->setText(summary.isEmpty() ? "No effects yet" : summary);
+        }
         if(beginnerTargetDescription_)
             beginnerTargetDescription_->setText(beginner::targetDescription(beginnerProject_.target));
+        if(beginnerPreviewImageToolbarButton_)
+            beginnerPreviewImageToolbarButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::PostFx);
+        if(loadModelQuickButton_)
+            loadModelQuickButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::Material);
     }
 
     void refreshBeginnerPresetCombo()
     {
-        if(!beginnerPresetCombo_) return;
-        QSignalBlocker blocker(beginnerPresetCombo_);
-        beginnerPresetCombo_->clear();
         const auto presets = beginner::presetsForTarget(beginnerProject_.target);
-        for(const auto& preset : presets)
-            beginnerPresetCombo_->addItem(preset.second, preset.first);
+        if(beginnerPresetCombo_)
+        {
+            QSignalBlocker blocker(beginnerPresetCombo_);
+            beginnerPresetCombo_->clear();
+            for(const auto& preset : presets)
+                beginnerPresetCombo_->addItem(preset.second, preset.first);
+        }
+
+        if(!beginnerPresetCardsLayout_) return;
+        while(QLayoutItem* item = beginnerPresetCardsLayout_->takeAt(0))
+        {
+            if(QWidget* widget = item->widget()) widget->deleteLater();
+            delete item;
+        }
+        for(int i = 0; i < presets.size(); ++i)
+        {
+            const auto& preset = presets[i];
+            auto* card = new QToolButton();
+            card->setText(preset.second + "\n" + beginnerPresetDescription(beginnerProject_.target, preset.first));
+            card->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            card->setMinimumHeight(54);
+            card->setObjectName("BeginnerPresetCard");
+            card->setStyleSheet(
+                "QToolButton { text-align:left; padding:8px 10px; border:1px solid #344352; border-radius:6px; background:#121A23; }"
+                "QToolButton:hover { border-color:#66A9D5; background:#172533; }");
+            beginnerPresetCardsLayout_->addWidget(card, i, 0);
+            connect(card, &QToolButton::clicked, this, [this, presetId = preset.first]{ applyBeginnerPreset(presetId); });
+        }
     }
 
     void rebuildBeginnerBaseAppearance()
@@ -13481,6 +13571,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
+    void updateBeginnerEffectActionState()
+    {
+        const int row = beginnerEffectList_ ? beginnerEffectList_->currentRow() : -1;
+        const int count = beginnerEffectList_ ? beginnerEffectList_->count() : 0;
+        if(beginnerBrowseEffectsButton_) beginnerBrowseEffectsButton_->setVisible(count > 0);
+        if(beginnerRemoveEffectButton_) beginnerRemoveEffectButton_->setEnabled(row >= 0);
+        if(beginnerMoveEffectUpButton_) beginnerMoveEffectUpButton_->setEnabled(row > 0);
+        if(beginnerMoveEffectDownButton_) beginnerMoveEffectDownButton_->setEnabled(row >= 0 && row < count - 1);
+    }
+
     void refreshBeginnerEffectList(const QString& preferredInstanceId = QString())
     {
         if(!beginnerEffectList_) return;
@@ -13492,20 +13592,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const beginner::Effect& effect = beginnerProject_.effects[i];
             const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
             if(!definition) continue;
-            auto* item = new QListWidgetItem(definition->name, beginnerEffectList_);
+            auto* item = new QListWidgetItem(
+                QString("%1    ·    %2").arg(definition->name, definition->category), beginnerEffectList_);
             item->setData(Qt::UserRole, effect.instanceId);
             item->setToolTip(definition->description);
+            item->setSizeHint(QSize(0, 38));
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
             item->setCheckState(effect.enabled ? Qt::Checked : Qt::Unchecked);
             if(effect.instanceId == preferredInstanceId) preferredRow = beginnerEffectList_->count() - 1;
         }
         beginnerRefreshingUi_ = false;
+        if(beginnerEffectsContentStack_)
+            beginnerEffectsContentStack_->setCurrentIndex(beginnerEffectList_->count() == 0 ? 0 : 1);
         if(preferredRow >= 0)
             beginnerEffectList_->setCurrentRow(preferredRow);
         else if(beginnerEffectList_->count() > 0 && beginnerEffectList_->currentRow() < 0)
             beginnerEffectList_->setCurrentRow(0);
         else if(beginnerEffectList_->count() == 0)
             rebuildBeginnerEffectParameters();
+        updateBeginnerEffectActionState();
         updateBeginnerBuilderSummary();
     }
 
@@ -13532,14 +13637,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const int effectIndex = beginnerEffectIndexById(instanceId);
         if(effectIndex < 0)
         {
-            auto* title = new QLabel("Choose an effect");
+            auto* title = new QLabel("Nothing to adjust yet");
             title->setObjectName("InspectorTitle");
-            auto* help = new QLabel("Add an effect, then use simple sliders here. Shader Studio writes the BO3 HLSL for you.");
+            auto* help = new QLabel("Add an effect first. You will get friendly sliders and color controls here — no shader code required.");
             help->setWordWrap(true);
             help->setObjectName("CompactHelp");
+            auto* browse = new QPushButton("Browse Effects");
+            browse->setObjectName("PrimaryAction");
+            browse->setMinimumHeight(36);
             beginnerEffectParamsLayout_->addWidget(title);
             beginnerEffectParamsLayout_->addWidget(help);
+            beginnerEffectParamsLayout_->addSpacing(6);
+            beginnerEffectParamsLayout_->addWidget(browse);
             beginnerEffectParamsLayout_->addStretch(1);
+            connect(browse, &QPushButton::clicked, this, [this]{ showBeginnerEffectBrowser(); });
             return;
         }
 
@@ -13547,11 +13658,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
         if(!definition) return;
 
+        auto* category = new QLabel(definition->category.toUpper());
+        category->setStyleSheet("QLabel { color:#7FB5D8; font-size:10px; font-weight:700; }");
         auto* title = new QLabel(definition->name);
         title->setObjectName("InspectorTitle");
         auto* help = new QLabel(definition->description);
         help->setWordWrap(true);
         help->setObjectName("CompactHelp");
+        beginnerEffectParamsLayout_->addWidget(category);
         beginnerEffectParamsLayout_->addWidget(title);
         beginnerEffectParamsLayout_->addWidget(help);
 
@@ -13650,9 +13764,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QSignalBlocker blocker(beginnerTargetButtons_[i]);
             beginnerTargetButtons_[i]->setChecked(static_cast<int>(beginnerProject_.target) == i);
         }
+        if(beginnerBaseAppearanceGroup_)
+        {
+            if(beginnerProject_.target == beginner::Target::PostFx)
+                beginnerBaseAppearanceGroup_->setTitle("Starting image");
+            else if(beginnerProject_.target == beginner::Target::Material)
+                beginnerBaseAppearanceGroup_->setTitle("Base surface");
+            else
+                beginnerBaseAppearanceGroup_->setTitle("Sky colors");
+        }
+        if(beginnerEffectsGroup_)
+            beginnerEffectsGroup_->setTitle("3. Add effects to your shader");
+        if(beginnerParamsGroup_)
+            beginnerParamsGroup_->setTitle("4. Fine tune the selected effect");
         refreshBeginnerPresetCombo();
         rebuildBeginnerBaseAppearance();
         updateBeginnerBuilderSummary();
+        updateGBufferUi();
     }
 
     void refreshBeginnerProjectUi(const QString& preferredEffect = QString())
@@ -13715,8 +13843,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             liveCompileTimer_.stop();
             compileEditor();
         }
-        else if(!liveCompile_ || liveCompile_->isChecked())
+        else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
         {
+            // Beginner mode is always live: the user should see slider changes
+            // immediately even if Advanced mode previously disabled Live Update.
             liveCompileTimer_.start();
         }
     }
@@ -13812,13 +13942,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
 
         const beginner::Target previousTarget = beginnerProject_.target;
-        const beginner::Project previousDefaults = beginner::makeDefaultProject(previousTarget);
         beginner::Project defaults = beginner::makeDefaultProject(target);
-        const bool stillUsingDefaultName = beginnerProjectPath_.isEmpty() &&
-            beginnerProject_.name == previousDefaults.name;
+        const bool stillUsingAutomaticName = beginnerProjectPath_.isEmpty() &&
+            beginnerProjectNameIsAutomatic(previousTarget, beginnerProject_.name);
         beginnerProject_.target = target;
         beginnerProject_.settings = defaults.settings;
-        if(stillUsingDefaultName) beginnerProject_.name = defaults.name;
+        if(stillUsingAutomaticName) beginnerProject_.name = defaults.name;
         QVector<beginner::Effect> compatible;
         for(const beginner::Effect& effect : beginnerProject_.effects)
         {
@@ -13843,18 +13972,163 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         applyBeginnerProjectToEditor(false);
     }
 
+    void showBeginnerEffectBrowser()
+    {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Add an Effect");
+        dlg.resize(860, 620);
+        auto* root = new QVBoxLayout(&dlg);
+        root->setContentsMargins(16, 14, 16, 14);
+        root->setSpacing(10);
+
+        auto* title = new QLabel("Add an effect");
+        title->setObjectName("InspectorTitle");
+        auto* help = new QLabel(
+            QString("Choose what you want the %1 shader to look like. Every available effect below has a BO3-safe implementation — Shader Studio handles the HLSL for you.")
+                .arg(beginnerTargetShortName(beginnerProject_.target).toLower()));
+        help->setWordWrap(true);
+        help->setObjectName("CompactHelp");
+        root->addWidget(title);
+        root->addWidget(help);
+
+        auto* search = new QLineEdit();
+        search->setPlaceholderText("Search effects...");
+        search->setClearButtonEnabled(true);
+        root->addWidget(search);
+
+        auto* body = new QHBoxLayout();
+        body->setSpacing(12);
+        auto* categoryList = new QListWidget();
+        categoryList->setMaximumWidth(168);
+        categoryList->setMinimumWidth(150);
+        categoryList->setSpacing(2);
+        categoryList->addItem("All Effects");
+        QStringList categories;
+        for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
+            if(!categories.contains(definition.category)) categories << definition.category;
+        for(const QString& category : categories) categoryList->addItem(category);
+        categoryList->setCurrentRow(0);
+        body->addWidget(categoryList);
+
+        auto* scroll = new QScrollArea();
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        auto* cardHost = new QWidget();
+        auto* cardGrid = new QGridLayout(cardHost);
+        cardGrid->setContentsMargins(0, 0, 0, 0);
+        cardGrid->setHorizontalSpacing(10);
+        cardGrid->setVerticalSpacing(10);
+        scroll->setWidget(cardHost);
+        body->addWidget(scroll, 1);
+        root->addLayout(body, 1);
+
+        auto rebuildCards = [&]()
+        {
+            while(QLayoutItem* item = cardGrid->takeAt(0))
+            {
+                if(QWidget* widget = item->widget()) widget->deleteLater();
+                delete item;
+            }
+
+            const QString selectedCategory = categoryList->currentItem()
+                ? categoryList->currentItem()->text() : QStringLiteral("All Effects");
+            const QString query = search->text().trimmed();
+            int visibleIndex = 0;
+            for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
+            {
+                if(selectedCategory != "All Effects" && definition.category != selectedCategory) continue;
+                if(!query.isEmpty() &&
+                   !definition.name.contains(query, Qt::CaseInsensitive) &&
+                   !definition.description.contains(query, Qt::CaseInsensitive) &&
+                   !definition.category.contains(query, Qt::CaseInsensitive))
+                    continue;
+
+                const bool supported = beginner::supportsTarget(definition, beginnerProject_.target);
+                auto* card = new QFrame();
+                card->setObjectName("BeginnerEffectCard");
+                card->setMinimumHeight(154);
+                card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+                card->setStyleSheet(supported
+                    ? "QFrame#BeginnerEffectCard { background:#111923; border:1px solid #34495C; border-radius:8px; } QFrame#BeginnerEffectCard:hover { border-color:#67A9D5; }"
+                    : "QFrame#BeginnerEffectCard { background:#11151B; border:1px solid #2B3138; border-radius:8px; }" );
+                auto* layout = new QVBoxLayout(card);
+                layout->setContentsMargins(12, 10, 12, 10);
+                layout->setSpacing(5);
+
+                auto* category = new QLabel(definition.category.toUpper());
+                category->setStyleSheet(supported
+                    ? "QLabel { color:#79B9E4; font-size:10px; font-weight:700; }"
+                    : "QLabel { color:#707984; font-size:10px; font-weight:700; }");
+                auto* name = new QLabel(definition.name);
+                name->setStyleSheet(supported
+                    ? "QLabel { font-size:14px; font-weight:700; color:#F2F6FA; }"
+                    : "QLabel { font-size:14px; font-weight:700; color:#89919A; }");
+                auto* description = new QLabel(definition.description);
+                description->setWordWrap(true);
+                description->setObjectName("CompactHelp");
+                description->setEnabled(supported);
+                layout->addWidget(category);
+                layout->addWidget(name);
+                layout->addWidget(description);
+                layout->addStretch(1);
+
+                auto* availability = new QLabel();
+                availability->setWordWrap(true);
+                if(supported)
+                {
+                    availability->setText(QString::fromUtf8("✓ Works with this %1 shader")
+                        .arg(beginnerTargetShortName(beginnerProject_.target)));
+                    availability->setStyleSheet("QLabel { color:#84D4A0; font-size:10px; }");
+                }
+                else
+                {
+                    availability->setText("Available for: " + beginnerEffectAvailability(definition));
+                    availability->setStyleSheet("QLabel { color:#A58E64; font-size:10px; }");
+                }
+                layout->addWidget(availability);
+
+                auto* add = new QPushButton(supported ? "+ Add Effect" : "Not available for this shader");
+                add->setEnabled(supported);
+                if(supported) add->setObjectName("PrimaryAction");
+                layout->addWidget(add);
+                if(supported)
+                    connect(add, &QPushButton::clicked, &dlg, [this, &dlg, id = definition.id]
+                    {
+                        addBeginnerEffect(id);
+                        dlg.accept();
+                    });
+
+                cardGrid->addWidget(card, visibleIndex / 2, visibleIndex % 2);
+                ++visibleIndex;
+            }
+
+            if(visibleIndex == 0)
+            {
+                auto* none = new QLabel("No effects match that search.");
+                none->setAlignment(Qt::AlignCenter);
+                none->setObjectName("CompactHelp");
+                cardGrid->addWidget(none, 0, 0, 1, 2);
+            }
+            cardGrid->setColumnStretch(0, 1);
+            cardGrid->setColumnStretch(1, 1);
+            cardGrid->setRowStretch(qMax(1, (visibleIndex + 1) / 2), 1);
+        };
+
+        connect(search, &QLineEdit::textChanged, &dlg, [&](const QString&){ rebuildCards(); });
+        connect(categoryList, &QListWidget::currentRowChanged, &dlg, [&](int){ rebuildCards(); });
+        rebuildCards();
+
+        auto* close = new QDialogButtonBox(QDialogButtonBox::Close);
+        connect(close, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        connect(close, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        root->addWidget(close);
+        dlg.exec();
+    }
+
     void showAddBeginnerEffectMenu(QPushButton* anchor)
     {
-        if(!anchor) return;
-        QMenu menu(this);
-        for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
-        {
-            if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
-            QAction* action = menu.addAction(definition.name);
-            action->setToolTip(definition.description);
-            connect(action, &QAction::triggered, this, [this, id = definition.id]{ addBeginnerEffect(id); });
-        }
-        menu.exec(anchor->mapToGlobal(QPoint(0, anchor->height())));
+        Q_UNUSED(anchor);
+        showBeginnerEffectBrowser();
     }
 
     void removeSelectedBeginnerEffect()
@@ -13884,15 +14158,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         applyBeginnerProjectToEditor(false);
     }
 
-    void applySelectedBeginnerPreset()
+    void applyBeginnerPreset(const QString& presetId)
     {
-        if(!beginnerPresetCombo_) return;
-        const QString presetId = beginnerPresetCombo_->currentData().toString();
         if(presetId.isEmpty()) return;
         if(!beginnerProject_.effects.isEmpty())
         {
             const auto answer = QMessageBox::question(
-                this, "Apply Preset", "Replace the current effect stack with this preset?",
+                this, "Apply Starting Look",
+                "Replace the current effects and colors with this starting look?",
                 QMessageBox::Yes | QMessageBox::No);
             if(answer != QMessageBox::Yes) return;
         }
@@ -13908,6 +14181,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(presetIndex >= 0) beginnerPresetCombo_->setCurrentIndex(presetIndex);
         }
         applyBeginnerProjectToEditor(true);
+    }
+
+    void applySelectedBeginnerPreset()
+    {
+        if(!beginnerPresetCombo_) return;
+        applyBeginnerPreset(beginnerPresetCombo_->currentData().toString());
     }
 
     bool saveBeginnerProject(const QString& explicitPath = QString())
@@ -14035,7 +14314,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         heroLayout->addWidget(title);
         heroLayout->addWidget(subtitle);
         heroRow->addWidget(heroText, 1);
-        beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  BO3-safe modules only"));
+        beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  Works in Black Ops III"));
         beginnerCompatibilityLabel_->setStyleSheet("QLabel { color:#B8F0CA; background:#173624; border:1px solid #2C7A49; border-radius:6px; padding:7px 10px; font-weight:600; }");
         heroRow->addWidget(beginnerCompatibilityLabel_, 0, Qt::AlignTop);
         root->addLayout(heroRow);
@@ -14075,70 +14354,102 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         leftLayout->setSpacing(8);
 
         auto* projectGroup = new QGroupBox("2. Start with a look");
-        auto* projectForm = new QFormLayout(projectGroup);
+        auto* projectLayout = new QVBoxLayout(projectGroup);
+        auto* nameRow = new QHBoxLayout();
+        auto* nameLabel = new QLabel("Name");
         beginnerProjectNameEdit_ = new QLineEdit();
         beginnerProjectNameEdit_->setPlaceholderText("My Shader");
-        projectForm->addRow("Name", beginnerProjectNameEdit_);
-        auto* presetRow = new QWidget();
-        auto* presetLayout = new QHBoxLayout(presetRow);
-        presetLayout->setContentsMargins(0, 0, 0, 0);
-        beginnerPresetCombo_ = new QComboBox();
-        auto* applyPreset = new QPushButton("Apply");
-        presetLayout->addWidget(beginnerPresetCombo_, 1);
-        presetLayout->addWidget(applyPreset);
-        projectForm->addRow("Preset", presetRow);
+        nameRow->addWidget(nameLabel);
+        nameRow->addWidget(beginnerProjectNameEdit_, 1);
+        projectLayout->addLayout(nameRow);
+        auto* presetHelp = new QLabel("Pick a ready-made starting look, or begin blank.");
+        presetHelp->setObjectName("CompactHelp");
+        presetHelp->setWordWrap(true);
+        projectLayout->addWidget(presetHelp);
+        beginnerPresetCardsLayout_ = new QGridLayout();
+        beginnerPresetCardsLayout_->setContentsMargins(0, 0, 0, 0);
+        beginnerPresetCardsLayout_->setSpacing(6);
+        projectLayout->addLayout(beginnerPresetCardsLayout_);
         leftLayout->addWidget(projectGroup);
 
-        auto* baseGroup = new QGroupBox("Base Appearance");
-        beginnerBaseAppearanceLayout_ = new QVBoxLayout(baseGroup);
+        beginnerBaseAppearanceGroup_ = new QGroupBox("Base Appearance");
+        beginnerBaseAppearanceLayout_ = new QVBoxLayout(beginnerBaseAppearanceGroup_);
         beginnerBaseAppearanceLayout_->setContentsMargins(8, 8, 8, 8);
-        leftLayout->addWidget(baseGroup);
+        leftLayout->addWidget(beginnerBaseAppearanceGroup_);
 
-        auto* effectsGroup = new QGroupBox("3. Build your effect stack");
-        auto* effectsLayout = new QVBoxLayout(effectsGroup);
+        beginnerEffectsGroup_ = new QGroupBox("3. Add effects to your shader");
+        auto* effectsLayout = new QVBoxLayout(beginnerEffectsGroup_);
+        beginnerEffectsContentStack_ = new QStackedWidget();
+
+        auto* emptyEffects = new QFrame();
+        emptyEffects->setObjectName("BeginnerEmptyEffects");
+        emptyEffects->setStyleSheet("QFrame#BeginnerEmptyEffects { border:1px dashed #3A4B5C; border-radius:8px; background:#0F161E; }");
+        auto* emptyLayout = new QVBoxLayout(emptyEffects);
+        emptyLayout->setContentsMargins(18, 22, 18, 22);
+        auto* emptyTitle = new QLabel("Your shader has no effects yet");
+        emptyTitle->setAlignment(Qt::AlignCenter);
+        emptyTitle->setObjectName("InspectorTitle");
+        auto* emptyHelp = new QLabel("Add your first effect, then adjust it with simple sliders. You never need to write HLSL.");
+        emptyHelp->setAlignment(Qt::AlignCenter);
+        emptyHelp->setWordWrap(true);
+        emptyHelp->setObjectName("CompactHelp");
+        auto* emptyAdd = new QPushButton("+ Add Your First Effect");
+        emptyAdd->setObjectName("PrimaryAction");
+        emptyAdd->setMinimumHeight(38);
+        emptyLayout->addStretch(1);
+        emptyLayout->addWidget(emptyTitle);
+        emptyLayout->addWidget(emptyHelp);
+        emptyLayout->addSpacing(6);
+        emptyLayout->addWidget(emptyAdd);
+        emptyLayout->addStretch(1);
+
         beginnerEffectList_ = new QListWidget();
         beginnerEffectList_->setSelectionMode(QAbstractItemView::SingleSelection);
         beginnerEffectList_->setMinimumHeight(170);
         beginnerEffectList_->setAlternatingRowColors(true);
-        effectsLayout->addWidget(beginnerEffectList_, 1);
+        beginnerEffectsContentStack_->addWidget(emptyEffects);
+        beginnerEffectsContentStack_->addWidget(beginnerEffectList_);
+        effectsLayout->addWidget(beginnerEffectsContentStack_, 1);
+
         auto* effectButtons = new QHBoxLayout();
-        auto* addEffect = new QPushButton("+ Add Effect");
+        auto* addEffect = new QPushButton("+ Browse Effects");
+        beginnerBrowseEffectsButton_ = addEffect;
         addEffect->setObjectName("PrimaryAction");
-        auto* removeEffect = new QPushButton("Remove");
-        auto* moveUp = new QPushButton(QString::fromUtf8("↑"));
-        auto* moveDown = new QPushButton(QString::fromUtf8("↓"));
-        moveUp->setFixedWidth(34);
-        moveDown->setFixedWidth(34);
+        beginnerRemoveEffectButton_ = new QPushButton("Remove");
+        beginnerMoveEffectUpButton_ = new QPushButton(QString::fromUtf8("↑"));
+        beginnerMoveEffectDownButton_ = new QPushButton(QString::fromUtf8("↓"));
+        beginnerMoveEffectUpButton_->setFixedWidth(34);
+        beginnerMoveEffectDownButton_->setFixedWidth(34);
         effectButtons->addWidget(addEffect, 1);
-        effectButtons->addWidget(removeEffect);
-        effectButtons->addWidget(moveUp);
-        effectButtons->addWidget(moveDown);
+        effectButtons->addWidget(beginnerRemoveEffectButton_);
+        effectButtons->addWidget(beginnerMoveEffectUpButton_);
+        effectButtons->addWidget(beginnerMoveEffectDownButton_);
         effectsLayout->addLayout(effectButtons);
         beginnerSummaryLabel_ = new QLabel();
         beginnerSummaryLabel_->setWordWrap(true);
         beginnerSummaryLabel_->setObjectName("CompactHelp");
         effectsLayout->addWidget(beginnerSummaryLabel_);
-        leftLayout->addWidget(effectsGroup, 1);
+        leftLayout->addWidget(beginnerEffectsGroup_, 1);
 
         auto* right = new QWidget();
         auto* rightLayout = new QVBoxLayout(right);
         rightLayout->setContentsMargins(6, 0, 0, 0);
         rightLayout->setSpacing(8);
-        auto* paramsGroup = new QGroupBox("4. Adjust the selected effect");
-        beginnerEffectParamsLayout_ = new QVBoxLayout(paramsGroup);
+        beginnerParamsGroup_ = new QGroupBox("4. Fine tune the selected effect");
+        beginnerEffectParamsLayout_ = new QVBoxLayout(beginnerParamsGroup_);
         beginnerEffectParamsLayout_->setContentsMargins(10, 10, 10, 10);
-        rightLayout->addWidget(paramsGroup, 1);
+        rightLayout->addWidget(beginnerParamsGroup_, 1);
 
-        auto* explain = new QGroupBox("How did this shader get made?");
+        auto* explain = new QGroupBox("Want to learn how it works?");
         auto* explainLayout = new QVBoxLayout(explain);
-        auto* explainText = new QLabel("Your project is turned into known-good BO3 HLSL modules in the same order as the effect stack. You can inspect the generated code whenever you want, but you never have to edit it.");
+        auto* explainText = new QLabel("Shader Studio builds your look from BO3-safe shader modules in the same order as your effects. You can inspect the generated HLSL whenever you are curious, but you never need to edit it.");
         explainText->setWordWrap(true);
         explainText->setObjectName("CompactHelp");
         explainLayout->addWidget(explainText);
         rightLayout->addWidget(explain);
 
         auto* actions = new QHBoxLayout();
-        auto* viewCode = new QPushButton("View Generated HLSL");
+        auto* viewCode = new QPushButton("See Generated HLSL");
         viewCode->setToolTip("Open the generated code in Advanced mode for learning or manual editing.");
         auto* exportButton = new QPushButton("Export to Black Ops III");
         exportButton->setObjectName("PrimaryAction");
@@ -14160,12 +14471,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             markBeginnerProjectModified();
             updateBeginnerBuilderSummary();
         });
-        connect(applyPreset, &QPushButton::clicked, this, [this]{ applySelectedBeginnerPreset(); });
-        connect(addEffect, &QPushButton::clicked, this, [this, addEffect]{ showAddBeginnerEffectMenu(addEffect); });
-        connect(removeEffect, &QPushButton::clicked, this, [this]{ removeSelectedBeginnerEffect(); });
-        connect(moveUp, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(-1); });
-        connect(moveDown, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(1); });
-        connect(beginnerEffectList_, &QListWidget::currentRowChanged, this, [this]{ rebuildBeginnerEffectParameters(); });
+        connect(addEffect, &QPushButton::clicked, this, [this]{ showBeginnerEffectBrowser(); });
+        connect(emptyAdd, &QPushButton::clicked, this, [this]{ showBeginnerEffectBrowser(); });
+        connect(beginnerRemoveEffectButton_, &QPushButton::clicked, this, [this]{ removeSelectedBeginnerEffect(); });
+        connect(beginnerMoveEffectUpButton_, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(-1); });
+        connect(beginnerMoveEffectDownButton_, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(1); });
+        connect(beginnerEffectList_, &QListWidget::currentRowChanged, this, [this]
+        {
+            rebuildBeginnerEffectParameters();
+            updateBeginnerEffectActionState();
+        });
         connect(beginnerEffectList_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item)
         {
             if(beginnerRefreshingUi_ || !item) return;
@@ -14322,6 +14637,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         toolbar->addAction(saveAction);
 
         auto* sourceButton = new QToolButton();
+        beginnerPreviewImageToolbarButton_ = sourceButton;
         sourceButton->setDefaultAction(sourceAction);
         sourceButton->setText("Preview Image");
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -14389,8 +14705,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         toolbar->addWidget(compileStatusBadge_);
         advancedOnlyWidgets_.append(toolbar->widgetForAction(reloadAction));
         advancedOnlyWidgets_.append(toolbar->widgetForAction(compileAction));
+        advancedOnlyWidgets_.append(toolbar->widgetForAction(exportBo3Action));
         advancedOnlyWidgets_.append(glslToolbarButton);
         advancedOnlyWidgets_.append(depthButton);
+        advancedOnlyWidgets_.append(pauseTime_);
+        advancedOnlyWidgets_.append(liveCompile_);
+        advancedOnlyWidgets_.append(compileStatusBadge_);
 
         // Controls that used to occupy the second toolbar now live in a vertical
         // Preview Settings inspector. This preserves all functionality while making
@@ -18332,7 +18652,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QToolButton* beginnerTargetButtons_[3]{};
     QLineEdit* beginnerProjectNameEdit_ = nullptr;
     QComboBox* beginnerPresetCombo_ = nullptr;
+    QGridLayout* beginnerPresetCardsLayout_ = nullptr;
     QListWidget* beginnerEffectList_ = nullptr;
+    QStackedWidget* beginnerEffectsContentStack_ = nullptr;
+    QPushButton* beginnerBrowseEffectsButton_ = nullptr;
+    QPushButton* beginnerRemoveEffectButton_ = nullptr;
+    QPushButton* beginnerMoveEffectUpButton_ = nullptr;
+    QPushButton* beginnerMoveEffectDownButton_ = nullptr;
+    QGroupBox* beginnerBaseAppearanceGroup_ = nullptr;
+    QGroupBox* beginnerEffectsGroup_ = nullptr;
+    QGroupBox* beginnerParamsGroup_ = nullptr;
     QVBoxLayout* beginnerBaseAppearanceLayout_ = nullptr;
     QVBoxLayout* beginnerEffectParamsLayout_ = nullptr;
     QLabel* beginnerCompatibilityLabel_ = nullptr;
@@ -18378,6 +18707,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QToolButton* previewSettingsToggleButton_ = nullptr;
     QToolButton* beginnerModeButton_ = nullptr;
     QToolButton* advancedModeButton_ = nullptr;
+    QToolButton* beginnerPreviewImageToolbarButton_ = nullptr;
     QAction* uiBeginnerModeAction_ = nullptr;
     QAction* uiAdvancedModeAction_ = nullptr;
     QLabel* compileStatusBadge_ = nullptr;

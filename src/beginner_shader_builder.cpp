@@ -40,7 +40,7 @@ ParameterDefinition ColorParam(const char* key, const char* name, const char* de
     return parameter;
 }
 
-EffectDefinition EffectDef(const char* id, const char* name, const char* description,
+EffectDefinition EffectDef(const char* id, const char* name, const char* description, const char* category,
                            std::initializer_list<Target> targets,
                            std::initializer_list<ParameterDefinition> parameters)
 {
@@ -48,6 +48,7 @@ EffectDefinition EffectDef(const char* id, const char* name, const char* descrip
     definition.id = QString::fromLatin1(id);
     definition.name = QString::fromLatin1(name);
     definition.description = QString::fromLatin1(description);
+    definition.category = QString::fromLatin1(category);
     for(Target target : targets) definition.targets.push_back(target);
     for(const ParameterDefinition& parameter : parameters) definition.parameters.push_back(parameter);
     return definition;
@@ -450,11 +451,11 @@ QString targetDescription(Target target)
     switch(target)
     {
         case Target::Material:
-            return "Put a custom procedural look on a BO3 model or surface. Shader Studio handles the BO3 material/techset plumbing.";
+            return "Give a BO3 model or surface a custom look. Preview it on a sphere, cube, plane, or your own model.";
         case Target::Sky:
-            return "Build a procedural BO3 sky/environment without writing sky-direction HLSL.";
+            return "Create the colors and animated atmosphere around the player. Drag in the preview to look around.";
         default:
-            return "Change the game image with a BO3 PostFX shader. This is the easiest place to start.";
+            return "Change how the game screen looks. Use Preview Image to test the effect on any screenshot.";
     }
 }
 
@@ -470,40 +471,40 @@ bool targetFromId(const QString& id, Target& target)
 const QVector<EffectDefinition>& effectDefinitions()
 {
     static const QVector<EffectDefinition> definitions = {
-        EffectDef("tint", "Color Tint", "Blend the shader toward a chosen color without replacing the underlying detail.",
+        EffectDef("tint", "Color Tint", "Blend the shader toward a chosen color without replacing the underlying detail.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("color", "Color", "Tint color.", "#73A7FF"),
                    FloatParam("amount", "Strength", "How strongly the tint affects the result.", 0.0, 1.0, 0.01, 0.35)}),
-        EffectDef("brightness", "Brightness", "Make the result brighter or darker.",
+        EffectDef("brightness", "Brightness", "Make the result brighter or darker.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Amount", "Negative values darken; positive values brighten.", -1.0, 1.0, 0.01, 0.08)}),
-        EffectDef("contrast", "Contrast", "Increase or soften the difference between dark and bright areas.",
+        EffectDef("contrast", "Contrast", "Increase or soften the difference between dark and bright areas.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Contrast", "1.0 keeps the original contrast.", 0.0, 2.5, 0.01, 1.15)}),
-        EffectDef("saturation", "Saturation", "Control how colorful the result is.",
+        EffectDef("saturation", "Saturation", "Control how colorful the result is.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Saturation", "0 is monochrome, 1 is original color, above 1 is more colorful.", 0.0, 2.5, 0.01, 1.15)}),
-        EffectDef("grayscale", "Black & White", "Blend the shader toward grayscale.",
+        EffectDef("grayscale", "Black & White", "Blend the shader toward grayscale.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Strength", "0 keeps color; 1 is fully black and white.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("invert", "Invert Colors", "Invert the current colors, with adjustable strength.",
+        EffectDef("invert", "Invert Colors", "Invert the current colors, with adjustable strength.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Strength", "0 is unchanged; 1 is fully inverted.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("vignette", "Vignette", "Darken the edges of a screen effect while keeping the center clear.",
+        EffectDef("vignette", "Vignette", "Darken the edges of a screen effect while keeping the center clear.", "Atmosphere",
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "How strongly the edges darken.", 0.0, 1.0, 0.01, 0.45),
                    FloatParam("size", "Size", "How much of the center remains clear.", 0.10, 0.95, 0.01, 0.70),
                    FloatParam("softness", "Softness", "Width of the edge transition.", 0.05, 1.0, 0.01, 0.40)}),
-        EffectDef("scanlines", "Scanlines", "Add animated horizontal lines for CRT, hologram, visor and monitor looks.",
+        EffectDef("scanlines", "Scanlines", "Add animated horizontal lines for CRT, hologram, visor and monitor looks.", "Retro & Display",
                   {Target::PostFx, Target::Material},
                   {FloatParam("amount", "Strength", "How dark the scanlines become.", 0.0, 0.75, 0.01, 0.12),
                    FloatParam("density", "Density", "Number of line cycles across the surface.", 8.0, 800.0, 1.0, 160.0),
                    FloatParam("speed", "Speed", "How quickly the line pattern moves.", -4.0, 4.0, 0.01, 0.25)}),
-        EffectDef("pulse", "Animated Pulse", "Rhythmically brighten and dim the result.",
+        EffectDef("pulse", "Animated Pulse", "Rhythmically brighten and dim the result.", "Animation",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Amount", "Brightness swing around the original value.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("speed", "Speed", "Pulses per second.", 0.05, 5.0, 0.01, 0.75)}),
-        EffectDef("noise", "Procedural Noise", "Add lightweight animated grain/noise without requiring a texture image.",
+        EffectDef("noise", "Procedural Noise", "Add lightweight animated grain/noise without requiring a texture image.", "Atmosphere",
                   {Target::PostFx, Target::Material},
                   {FloatParam("amount", "Strength", "Noise intensity.", 0.0, 0.75, 0.005, 0.05),
                    FloatParam("scale", "Scale", "How fine or coarse the noise pattern is.", 2.0, 1200.0, 1.0, 320.0),
@@ -545,8 +546,8 @@ Project makeDefaultProject(Target target)
 {
     Project project;
     project.target = target;
-    project.name = target == Target::Material ? "My Material" :
-                   target == Target::Sky ? "My Sky" : "My Screen Effect";
+    project.name = target == Target::Material ? "New Material" :
+                   target == Target::Sky ? "New Sky" : "New Screen Effect";
     if(target == Target::Material)
         project.settings["baseColor"] = "#2F78D0";
     else if(target == Target::Sky)
