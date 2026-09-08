@@ -1542,7 +1542,7 @@ public:
                !skyHlsl.contains("BO3BeginnerNebulaField") ||
                !skyHlsl.contains("beginnerTimeOfDay") ||
                !skyHlsl.contains("beginnerSunDir") ||
-               !skyHlsl.contains("cloudBase") ||
+               !skyHlsl.contains("continuous volumetric-look cloud deck without visible raymarch slices") ||
                !skyHlsl.contains("windAngle") ||
                !skyHlsl.contains("beginnerWaterMask") ||
                !skyHlsl.contains("beginnerReflectedDirection") ||
