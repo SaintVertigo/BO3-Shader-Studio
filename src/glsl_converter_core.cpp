@@ -17,6 +17,11 @@ namespace bo3::glsl
 {
 namespace
 {
+// Keep the converter independent from the preview renderer. Shadertoy exposes
+// four standard input channels (iChannel0..iChannel3), so the conversion core
+// owns its local channel-count constant instead of depending on renderer state.
+constexpr int kGlslChannelCount = 4;
+
 class Core final
 {
 public:
@@ -6278,7 +6283,7 @@ QString convertGlslArrayConstructors(QString source, QStringList& notes) const
         bool changed = false;
         for (int channel : usedChannels)
         {
-            if (channel < 0 || channel >= kShadertoyChannelCount) continue;
+            if (channel < 0 || channel >= kGlslChannelCount) continue;
             const QString ch = QString("iChannel%1").arg(channel);
             const QString samp = QString("glslSampler%1").arg(channel);
             struct Route { const char* from; const char* to; };
