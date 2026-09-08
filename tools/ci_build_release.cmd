@@ -41,30 +41,21 @@ if exist dist rmdir /s /q dist
 mkdir build_qt
 mkdir dist
 
-pushd build_qt
 if /I "%BO3_CI_FAST%"=="1" (
-    echo Fast tester build: compiler cache enabled.
-    if defined SCCACHE_PATH (
-        if not exist "%SCCACHE_PATH%" (
-            echo ERROR: SCCACHE_PATH does not point to an existing sccache executable.
-            goto :fail_from_build
-        )
-    ) else (
-        where sccache.exe >nul 2>nul
-        if errorlevel 1 (
-            echo ERROR: Fast CI requested, but sccache.exe was not found.
-            goto :fail_from_build
-        )
+    call :build_with_cache
+    if errorlevel 1 (
+        echo.
+        echo WARNING: Cached tester build failed. Retrying once with the normal MSVC compiler.
+        echo          This keeps tester publishing reliable even if sccache/setup has a transient problem.
+        if exist build_qt rmdir /s /q build_qt
+        mkdir build_qt
+        call :build_normal
+        if errorlevel 1 exit /b 1
     )
-    qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"
 ) else (
-    echo Full build: compiler cache launcher disabled.
-    qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release"
+    call :build_normal
+    if errorlevel 1 exit /b 1
 )
-if errorlevel 1 goto :fail_from_build
-nmake.exe /nologo
-if errorlevel 1 goto :fail_from_build
-popd
 
 if not exist "dist\BO3HLSLPreviewer.exe" (
     echo ERROR: dist\BO3HLSLPreviewer.exe was not produced.
@@ -89,6 +80,40 @@ if exist version.json copy /Y version.json dist\version.json >nul
 
 exit /b 0
 
-:fail_from_build
+:build_with_cache
+echo Fast tester build: attempting compiler-cache path.
+if defined SCCACHE_PATH (
+    if not exist "%SCCACHE_PATH%" (
+        echo WARNING: SCCACHE_PATH does not point to an existing executable: %SCCACHE_PATH%
+        exit /b 1
+    )
+) else (
+    where sccache.exe >nul 2>nul
+    if errorlevel 1 (
+        echo WARNING: sccache.exe was not found on PATH.
+        exit /b 1
+    )
+)
+pushd build_qt
+qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release" "CONFIG+=bo3_sccache"
+if errorlevel 1 (
+    popd
+    exit /b 1
+)
+nmake.exe /nologo
+set "BO3_BUILD_RC=!ERRORLEVEL!"
 popd
-exit /b 1
+exit /b !BO3_BUILD_RC!
+
+:build_normal
+echo Full compiler path: normal MSVC build.
+pushd build_qt
+qmake.exe "..\BO3HLSLPreviewer.pro" -spec win32-msvc "CONFIG+=release"
+if errorlevel 1 (
+    popd
+    exit /b 1
+)
+nmake.exe /nologo
+set "BO3_BUILD_RC=!ERRORLEVEL!"
+popd
+exit /b !BO3_BUILD_RC!

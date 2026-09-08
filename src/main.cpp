@@ -7668,6 +7668,29 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
+        run("texture-free converted Material bridges closed-mesh UV seams", [&]() -> QString
+        {
+            QStringList notes;
+            QSet<int> channels;
+            QStringList varyings;
+            const QString core =
+                "float noise(float2 p){return frac(sin(dot(p,float2(12.9898,4.1414)))*43758.5453);}"
+                "void mainImage(out float4 c,in float2 p){float2 uv=p/iResolution.x;c=float4(noise(uv),0.0,0.0,1.0);}";
+            const QString material = makeBo3MaterialFromGlsl(core, channels, varyings, 0);
+            if(!material.contains("BO3GLSL_EvaluateMaterialMainImage") ||
+               !material.contains("seamWidthUv") || !material.contains("oppositeFragCoord"))
+                return "texture-free procedural Material did not receive the closed-mesh seam bridge";
+
+            QSet<int> texturedChannels;
+            texturedChannels.insert(0);
+            const QString textured = makeBo3MaterialFromGlsl(
+                "void mainImage(out float4 c,in float2 p){c=GLSL_TEXTURE(iChannel0,p/iResolution.xy);}",
+                texturedChannels, varyings, 0);
+            if(textured.contains("BO3GLSL_EvaluateMaterialMainImage"))
+                return "textured Material unexpectedly received procedural seam blending";
+            return {};
+        });
+
         run("converted GLSL helpers are isolated from BO3 stock names", [&]() -> QString
         {
             QStringList notes;
@@ -7706,6 +7729,23 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 return "real user helper was not namespaced";
             if(!out.contains(QRegularExpression(R"(\bmainImage\s*\()")))
                 return "mainImage entry was damaged while protecting control-flow keywords";
+            return {};
+        });
+
+        run("GLSL helper namespacing never rewrites HLSL type constructors", [&]() -> QString
+        {
+            QStringList notes;
+            const QString input =
+                "float helper(float x) { return x * 0.5; }\n"
+                "void mainImage(out float4 c, in float2 p) { c = float4(helper(p.x), p.y, 0.0, 1.0); }\n";
+            const QString out = namespaceConvertedGlslUserFunctions(input, notes);
+            if(out.contains("BO3GLSL_USER_float4") || out.contains("BO3GLSL_USER_float3") ||
+               out.contains("BO3GLSL_USER_float2"))
+                return "an HLSL vector type/constructor was mistaken for a user helper";
+            if(!out.contains("BO3GLSL_USER_helper"))
+                return "real user helper was not namespaced while protecting HLSL types";
+            if(!out.contains(QRegularExpression(R"(\bfloat4\s*\()")))
+                return "float4 constructor was damaged during helper namespacing";
             return {};
         });
 
@@ -20268,13 +20308,37 @@ void GLSL_SET_VEC4(inout float4 v, int i, float x) { i=GLSL_WRAP_INDEX_4(i); if(
             "if", "else", "for", "while", "do", "switch", "case", "default",
             "return", "break", "continue", "discard"
         };
+        // The generic return-type branch above is intentionally permissive so user
+        // structs can be returned from helpers. A malformed/ambiguous match must
+        // never be allowed to promote an HLSL type token into the function-name
+        // set, otherwise the global rename below can turn every float4(...)
+        // constructor into BO3GLSL_USER_float4(...).
+        const QSet<QString> nonFunctionTypeNames = {
+            "void", "bool", "bool2", "bool3", "bool4",
+            "int", "int2", "int3", "int4",
+            "uint", "uint2", "uint3", "uint4",
+            "half", "half2", "half3", "half4",
+            "float", "float2", "float3", "float4",
+            "float2x2", "float2x3", "float2x4",
+            "float3x2", "float3x3", "float3x4",
+            "float4x2", "float4x3", "float4x4",
+            "double", "min16float", "min10float",
+            "texture1d", "texture1darray", "texture2d", "texture2darray",
+            "texture2dms", "texture2dmsarray", "texture3d", "texturecube",
+            "texturecubearray", "buffer", "structuredbuffer", "byteaddressbuffer",
+            "rwtexture1d", "rwtexture2d", "rwtexture3d", "rwbuffer",
+            "rwstructuredbuffer", "rwbyteaddressbuffer",
+            "samplerstate", "samplercomparisonstate"
+        };
 
         QSet<QString> functionNames;
         auto it = functionDefRe.globalMatch(source);
         while(it.hasNext())
         {
             const QString name = it.next().captured(1);
-            if(nonFunctionKeywords.contains(name.toLower()))
+            const QString lowerName = name.toLower();
+            if(nonFunctionKeywords.contains(lowerName) ||
+               nonFunctionTypeNames.contains(lowerName))
                 continue;
             if(name.compare("mainImage", Qt::CaseInsensitive) == 0 ||
                name.compare("main", Qt::CaseInsensitive) == 0 ||
@@ -20554,6 +20618,65 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
 )MAT")
             : QString();
 
+        // Texture-free procedural GLSL is frequently authored as a non-tiling
+        // 2D image. Mapping that directly to a closed mesh makes U=0 and U=1
+        // meet with unrelated colors, producing an obvious longitudinal seam.
+        // Bridge only a narrow strip at the wrap and evaluate the opposite edge
+        // there. Most of the material remains byte-for-byte equivalent to the
+        // original UV evaluation, while the two sides of the closed-mesh seam
+        // converge to the same value. Textured/image materials keep exact UVs.
+        const bool proceduralSeamBridge = channels.isEmpty() && !needsGenericSampler &&
+            !converted.contains(QRegularExpression(
+                R"(\b(?:Texture1D|Texture2D|Texture3D|TextureCube|SamplerState)\b)",
+                QRegularExpression::CaseInsensitiveOption));
+        const QString materialEntry = proceduralSeamBridge
+            ? QStringLiteral(R"MAT(
+float4 BO3GLSL_EvaluateMaterialMainImage(float2 fragCoord)
+{
+    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
+    float4 c = float4(0.0, 0.0, 0.0, 0.0);
+    mainImage(c, fragCoord);
+    return c;
+}
+
+float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
+{
+    // Procedural closed-mesh mapping. Preserve the authored UV evaluation away
+    // from the wrap, but cross-fade the two U edges in a narrow band so a
+    // non-periodic mainImage does not create a visible sphere/model seam.
+    float2 surfaceUv = input.texCoords.xy;
+    float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
+    float4 fragColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
+
+    const float seamWidthUv = 0.02;
+    float wrappedU = frac(surfaceUv.x);
+    float seamDistanceUv = min(wrappedU, 1.0 - wrappedU);
+    if (seamDistanceUv < seamWidthUv)
+    {
+        float2 oppositeFragCoord = fragCoord;
+        oppositeFragCoord.x += (wrappedU < 0.5)
+            ? BO3_GLSL_MATERIAL_RESOLUTION.x
+            : -BO3_GLSL_MATERIAL_RESOLUTION.x;
+        float4 oppositeColor = BO3GLSL_EvaluateMaterialMainImage(oppositeFragCoord);
+        float oppositeWeight = 0.5 * (1.0 - smoothstep(0.0, seamWidthUv, seamDistanceUv));
+        fragColor = lerp(fragColor, oppositeColor, oppositeWeight);
+    }
+
+    // Restore the primary coordinate for any wrapper-side logic that follows.
+    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
+)MAT")
+            : QStringLiteral(R"MAT(
+float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
+{
+    // Material UVs are top-left oriented in the preview. mainImage/gl_FragCoord
+    // expect a lower-left origin, so flip V when creating the virtual canvas.
+    float2 surfaceUv = input.texCoords.xy;
+    float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
+    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
+    float4 fragColor = float4(0.0, 0.0, 0.0, 0.0);
+    mainImage(fragColor, fragCoord);
+)MAT");
+
         return QString("// BO3_PREVIEWER_MATERIAL_SURFACE: %1\n").arg(surfaceTag) + resources + QStringLiteral(R"MAT(
 // Material / Surface GLSL wrapper.
 // The original mainImage() is evaluated across mesh UVs instead of the screen.
@@ -20592,17 +20715,7 @@ struct MaterialSurfaceInput
 // -----------------------------------------------------------------------------
 // Converted GLSL
 // -----------------------------------------------------------------------------
-)MAT") + converted + QStringLiteral(R"MAT(
-float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
-{
-    // Material UVs are top-left oriented in the preview. mainImage/gl_FragCoord
-    // expect a lower-left origin, so flip V when creating the virtual canvas.
-    float2 surfaceUv = input.texCoords.xy;
-    float2 fragCoord = float2(surfaceUv.x, 1.0 - surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    float4 fragColor = float4(0.0, 0.0, 0.0, 0.0);
-    mainImage(fragColor, fragCoord);
-)MAT") + previewClip + QStringLiteral(R"MAT(    return fragColor;
+)MAT") + converted + materialEntry + previewClip + QStringLiteral(R"MAT(    return fragColor;
 }
 )MAT");
     }

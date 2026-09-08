@@ -157,9 +157,11 @@ jobs:
 
       - name: Set up C++ compiler cache
         if: env.BO3_FAST_TESTER == '1'
+        id: sccache_setup
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.11
         with:
-          version: 'v0.15.0'
+          version: 'v0.16.0'
 
       - name: Stamp GitHub update metadata
         shell: pwsh
@@ -177,6 +179,7 @@ jobs:
           $json | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
 
       - name: Build Windows runtime
+        id: build_runtime
         shell: cmd
         env:
           BO3_CI_FAST: ${{ env.BO3_FAST_TESTER }}
@@ -185,7 +188,8 @@ jobs:
         run: tools\ci_build_release.cmd
 
       - name: Show compiler-cache statistics
-        if: env.BO3_FAST_TESTER == '1'
+        if: always() && env.BO3_FAST_TESTER == '1' && steps.build_runtime.outcome == 'success'
+        continue-on-error: true
         shell: pwsh
         run: |
           if (-not [string]::IsNullOrWhiteSpace($env:SCCACHE_PATH) -and (Test-Path -LiteralPath $env:SCCACHE_PATH)) {
@@ -226,11 +230,17 @@ jobs:
         if: always()
         shell: pwsh
         env:
+          BUILD_RESULT: ${{ steps.build_runtime.outcome }}
           GLSL_RESULT: ${{ steps.glsl_regression.outcome }}
           SHADERTOY_RESULT: ${{ steps.shadertoy_regression.outcome }}
           POSTFX_RESULT: ${{ steps.postfx_regression.outcome }}
           PACKAGE_RESULT: ${{ steps.package_regression.outcome }}
         run: |
+          Write-Host ("Windows runtime build: {0}" -f $env:BUILD_RESULT)
+          if ($env:BUILD_RESULT -ne 'success') {
+            throw "Windows runtime build failed before regression testing. Expand the 'Build Windows runtime' step for the compiler/build error; skipped suites are not test failures."
+          }
+
           $results = [ordered]@{
             GLSL = $env:GLSL_RESULT
             Shadertoy = $env:SHADERTOY_RESULT
@@ -238,6 +248,12 @@ jobs:
             'BO3 package' = $env:PACKAGE_RESULT
           }
           $results.GetEnumerator() | ForEach-Object { Write-Host ("{0}: {1}" -f $_.Key, $_.Value) }
+
+          $notRun = @($results.GetEnumerator() | Where-Object { $_.Value -in @('skipped','cancelled','') })
+          if ($notRun.Count -gt 0) {
+            throw ("Regression suites did not run: " + (($notRun | ForEach-Object { $_.Key }) -join ', '))
+          }
+
           $failed = @($results.GetEnumerator() | Where-Object { $_.Value -ne 'success' })
           if ($failed.Count -gt 0) {
             throw ("Regression suites failed: " + (($failed | ForEach-Object { $_.Key }) -join ', '))
