@@ -5,6 +5,7 @@ TEMPLATE = app
 TARGET = BO3HLSLPreviewer
 
 SOURCES += src/main.cpp \
+           src/glsl_converter_core.cpp \
            src/github_update.cpp \
            src/model_import.cpp \
            src/bo3_install_history.cpp \
@@ -28,6 +29,7 @@ INCLUDEPATH += $$PWD/third_party/tinyexr
 
 RESOURCES += resources/learning.qrc
 HEADERS += src/github_update.h \
+           src/glsl_converter_core.h \
            src/bo3_package.h \
            src/model_import.h \
            src/bo3_install_history.h \
