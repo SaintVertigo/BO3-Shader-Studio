@@ -1027,21 +1027,13 @@ public:
         {
             if(beginnerUiMode_ && beginnerProjectActive_ && beginnerParameterPreviewDirty_)
             {
-                // Generate once per preview tick from the newest slider state,
-                // rather than rebuilding a large HLSL string on every mouse move.
-                beginnerPendingHlsl_ = beginner::generateHlsl(beginnerProject_);
-                beginnerGeneratedHlsl_ = beginnerPendingHlsl_;
-                beginnerParameterPreviewDirty_ = false;
-            }
-            if(beginnerUiMode_ && beginnerProjectActive_ && !beginnerPendingHlsl_.isEmpty() && editor_)
-            {
-                const CodeEditor::ViewState view = editor_->captureViewState();
-                loadingText_ = true;
-                editor_->setPlainText(beginnerPendingHlsl_);
-                editor_->document()->setModified(false);
-                loadingText_ = false;
-                editor_->restoreViewState(view);
+                // Generate only from the newest slider state. Do NOT rebuild the
+                // hidden Advanced QTextDocument on every tick; compileEditor()
+                // reads beginnerGeneratedHlsl_ directly while Beginner mode is
+                // active. This removes a surprisingly large UI-thread cost.
+                beginnerGeneratedHlsl_ = beginner::generateHlsl(beginnerProject_);
                 beginnerPendingHlsl_.clear();
+                beginnerParameterPreviewDirty_ = false;
             }
             compileEditor();
         });
@@ -14077,7 +14069,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         rebuildBeginnerEffectParameters();
         updateBeginnerBuilderSummary();
         if(showMessage)
-            statusBar()->showMessage("Using BO3 Game Depth Preview — an in-game screenshot with matched preview Float-Z is active.", 4200);
+            statusBar()->showMessage("Using BO3 Game Depth Preview — Shadows of Evil screenshot with matched preview Float-Z approximation.", 4200);
     }
 
     void updateBeginnerBuilderSummary()
@@ -14131,8 +14123,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         if(beginnerPresetScroll_)
         {
+            // Preset descriptions used to make every Sky card two lines tall,
+            // forcing a clipped/scrolling "starting point" box as the library grew.
+            // Keep the cards compact and put the explanation in the tooltip.
             const int rows = qMax(1, (presets.size() + 1) / 2);
-            const int desired = qBound(108, rows * 54 + 4, 222);
+            const int desired = qBound(82, rows * 38 + 4, 198);
             beginnerPresetScroll_->setMinimumHeight(desired);
             beginnerPresetScroll_->setMaximumHeight(desired);
         }
@@ -14140,10 +14135,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             const auto& preset = presets[i];
             auto* card = new QToolButton();
-            card->setText(preset.second + "\n" + beginnerPresetDescription(beginnerProject_.target, preset.first));
+            const QString description = beginnerPresetDescription(beginnerProject_.target, preset.first);
+            card->setText(preset.second);
+            card->setToolTip(description);
             card->setToolButtonStyle(Qt::ToolButtonTextOnly);
             card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-            card->setMinimumHeight(48);
+            card->setMinimumHeight(32);
+            card->setMaximumHeight(36);
             card->setObjectName("BeginnerPresetCard");
             beginnerPresetCardsLayout_->addWidget(card, i / 2, i % 2);
             connect(card, &QToolButton::clicked, this, [this, presetId = preset.first]{ applyBeginnerPreset(presetId); });
@@ -14407,7 +14405,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             layout->addWidget(spin);
             form->addRow(parameter.name, row);
 
-            connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin](int position)
+            const QString previewEffectType = effect.typeId;
+            connect(slider, &QSlider::sliderPressed, this, [this, previewEffectType]
+            {
+                beginnerSliderDragging_ = true;
+                beginnerHeavyPreviewEffect_ =
+                    previewEffectType == "sky_realistic_clouds" ||
+                    previewEffectType == "sky_aurora" ||
+                    previewEffectType == "sky_nebula";
+            });
+            connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin, previewEffectType](int position)
             {
                 const int index = beginnerEffectIndexById(instanceId);
                 if(index < 0) return;
@@ -14418,8 +14425,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     spin->setValue(value);
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
+                beginnerHeavyPreviewEffect_ =
+                    previewEffectType == "sky_realistic_clouds" ||
+                    previewEffectType == "sky_aurora" ||
+                    previewEffectType == "sky_nebula";
                 markBeginnerProjectModified();
                 queueBeginnerParameterPreview();
+            });
+            connect(slider, &QSlider::sliderReleased, this, [this]
+            {
+                beginnerSliderDragging_ = false;
+                beginnerHeavyPreviewEffect_ = false;
+                beginnerParameterPreviewDirty_ = true;
+                liveCompileTimer_.stop();
+                liveCompileTimer_.setInterval(1);
+                liveCompileTimer_.start();
             });
             connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, instanceId, parameter, slider](double value)
             {
@@ -14500,9 +14520,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!preview_) return;
         if(!liveCompileTimer_.isActive())
         {
-            // About 25 preview refreshes/sec while dragging. The slider UI itself
-            // remains unthrottled; only shader regeneration/compile is paced.
-            liveCompileTimer_.setInterval(40);
+            // FXC compilation is synchronous. Compiling a large volumetric sky
+            // every 40 ms starved Qt's input loop and made the slider itself feel
+            // sticky. Keep ordinary effects responsive, but pace expensive cloud
+            // stacks more gently while the mouse is held down. The final value is
+            // compiled immediately on slider release.
+            int interval = beginnerSliderDragging_ ? 72 : 28;
+            if(beginnerSliderDragging_ && beginnerHeavyPreviewEffect_)
+                interval = 135;
+            liveCompileTimer_.setInterval(interval);
             liveCompileTimer_.start();
         }
     }
@@ -14530,7 +14556,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else
         {
-            beginnerPendingHlsl_ = generated;
+            // Beginner preview compiles beginnerGeneratedHlsl_ directly, so the
+            // hidden code editor can remain untouched until Advanced mode is opened.
+            beginnerPendingHlsl_.clear();
             modified_ = false;
         }
 
@@ -15537,7 +15565,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Use an in-game BO3 screenshot paired with Shader Studio preview Float-Z for depth effects. No external depth map is required.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Use an actual BO3 Shadows of Evil screenshot paired with Shader Studio preview Float-Z for depth effects. No external depth map is required.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -17507,6 +17535,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerUiMode_ = beginner;
 
+        if(!beginner && beginnerProjectActive_ && editor_)
+        {
+            const QString canonical = beginner::generateHlsl(beginnerProject_);
+            beginnerGeneratedHlsl_ = canonical;
+            if(editor_->toPlainText() != canonical)
+            {
+                const CodeEditor::ViewState view = editor_->captureViewState();
+                loadingText_ = true;
+                editor_->setPlainText(canonical);
+                editor_->document()->setModified(false);
+                loadingText_ = false;
+                editor_->restoreViewState(view);
+                modified_ = false;
+            }
+        }
+
         if(beginnerModeButton_)
         {
             QSignalBlocker blocker(beginnerModeButton_);
@@ -18316,7 +18360,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             setCompileStatusBadge(QString::fromUtf8("✕ HLSL FAIL"), "#FF7070");
             return;
         }
-        const QString originalSource = editor_->toPlainText();
+        const QString originalSource =
+            (beginnerUiMode_ && beginnerProjectActive_ && !beginnerGeneratedHlsl_.isEmpty())
+                ? beginnerGeneratedHlsl_
+                : editor_->toPlainText();
         const fs::path nativePath = shaderPath_.isEmpty() ? fs::path() : fs::path(shaderPath_.toStdWString());
         const fs::path nativeRoot = includeRoot_.isEmpty() ? fs::path() : fs::path(includeRoot_.toStdWString());
         const PreviewMode activeMode = selectedPreviewMode();
@@ -19676,6 +19723,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QString beginnerGeneratedHlsl_;
     QString beginnerPendingHlsl_;
     bool beginnerParameterPreviewDirty_ = false;
+    bool beginnerSliderDragging_ = false;
+    bool beginnerHeavyPreviewEffect_ = false;
     bool beginnerProjectActive_ = false;
     bool beginnerProjectModified_ = false;
     bool beginnerRefreshingUi_ = false;

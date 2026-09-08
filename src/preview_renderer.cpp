@@ -1547,15 +1547,16 @@ public:
     {
         if(liveCaptureSource_) StopLiveCapture();
 
-        // Beginner depth preview deliberately uses a real in-game BO3 screenshot
-        // for color, paired with a hand-authored Float-Z approximation of the same
-        // corridor. It is not a capture of BO3's original depth buffer, but it is
-        // far more useful for judging the *look* of outlines/AO/fog than the old
-        // abstract boxes-and-grid scene. Actual BO3 export still binds live floatZ.
+        // Beginner depth preview uses an actual Black Ops III screenshot supplied
+        // by the user (Shadows of Evil) for the color image. Shader Studio pairs
+        // it with an approximate Float-Z field authored for the same composition.
+        // It is intentionally a visual/gameplay preview, not a claim that we have
+        // captured BO3's protected runtime depth buffer. Export still binds live
+        // floatZ in game.
         QImage sourceImage(QStringLiteral(":/preview/beginner_depth_game_scene.jpg"));
         if(sourceImage.isNull())
         {
-            error = L"Could not load the built-in BO3 game depth-preview screenshot resource.";
+            error = L"Could not load the built-in BO3 Game Depth Preview screenshot resource.";
             return false;
         }
 
@@ -1571,7 +1572,7 @@ public:
         std::memcpy(color.data(), sourceImage.constBits(), color.size());
 
         std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
-        std::vector<float> worldDepth(static_cast<size_t>(w) * h, 1200.0f);
+        std::vector<float> worldDepth(static_cast<size_t>(w) * h, 1600.0f);
         std::vector<uint8_t> depthHackMask(static_cast<size_t>(w) * h, 0u);
 
         auto encodeWorldRawDepth = [&](float distance)
@@ -1588,12 +1589,12 @@ public:
                               depthHackSplit + 0.000001f, 0.999999f);
         };
 
-        // Perspective reconstruction for the corridor screenshot. The vanishing
-        // point is at the bright opening in the far room. Distances are chosen in
-        // BO3-like linear units so the Beginner Float-Z decoder exercises the same
-        // near/mid/far ranges as it will in game.
-        const float vpX = 0.675f;
-        const float vpY = 0.435f;
+        // Approximate perspective/depth for the supplied Shadows of Evil street
+        // screenshot. The values are deliberately broad and stable: AO needs
+        // believable contact discontinuities, cartoon outlines need silhouettes,
+        // and depth fog needs a useful near/mid/far progression.
+        const float vpX = 0.555f;
+        const float vpY = 0.485f;
         for(UINT y = 0; y < h; ++y)
         {
             const float fy = static_cast<float>(y) / static_cast<float>(h - 1);
@@ -1602,51 +1603,69 @@ public:
                 const float fx = static_cast<float>(x) / static_cast<float>(w - 1);
                 const size_t pidx = static_cast<size_t>(y) * w + x;
 
-                float distance = 900.0f;
+                float distance = 1800.0f;
+
+                // Wet street / ground plane converges toward the Easy Street arch.
                 if(fy >= vpY)
                 {
-                    const float floorT = std::clamp((fy - vpY) / (1.0f - vpY), 0.0f, 1.0f);
-                    distance = 4.0f + 1180.0f * (1.0f - floorT) * (1.0f - floorT);
+                    const float groundT = std::clamp((fy - vpY) / (1.0f - vpY), 0.0f, 1.0f);
+                    distance = 5.0f + 1450.0f * (1.0f - groundT) * (1.0f - groundT);
                 }
                 else
                 {
-                    const float ceilingT = std::clamp((vpY - fy) / std::max(vpY, 0.001f), 0.0f, 1.0f);
-                    distance = 7.0f + 1160.0f * (1.0f - ceilingT) * (1.0f - ceilingT);
+                    // Upper sky and very distant roofline.
+                    distance = 2600.0f + (vpY - fy) * 3400.0f;
                 }
 
-                // Side-wall perspective: pixels farther from the vanishing point
-                // become progressively closer to the camera.
-                const float sideNorm = std::clamp(std::abs(fx - vpX) / 0.70f, 0.0f, 1.0f);
-                const float sideDistance = 7.0f + 1050.0f * (1.0f - sideNorm) * (1.0f - sideNorm);
-                if(fx < 0.48f || fx > 0.88f)
-                    distance = std::min(distance, sideDistance);
+                // Left brick/market frontage. It is close at the left edge and
+                // recedes rapidly toward the street opening.
+                if(fx < 0.36f)
+                {
+                    const float t = std::clamp(fx / 0.36f, 0.0f, 1.0f);
+                    const float side = 7.0f + 250.0f * std::pow(t, 1.65f);
+                    distance = std::min(distance, side);
+                }
 
-                // Large scene props visible in the screenshot. These extra depth
-                // discontinuities make AO/contact shadows and cartoon silhouettes
-                // readable against a real BO3 image rather than a synthetic grid.
-                if(fx > 0.31f && fx < 0.48f && fy > 0.49f && fy < 0.76f)
-                    distance = std::min(distance, 18.0f + (0.76f - fy) * 55.0f);
-                if(fx > 0.49f && fx < 0.60f && fy > 0.49f && fy < 0.64f)
-                    distance = std::min(distance, 34.0f);
-                if(fx > 0.73f && fx < 0.88f && fy > 0.48f && fy < 0.70f)
-                    distance = std::min(distance, 28.0f + (0.70f - fy) * 45.0f);
+                // Right-hand building/railing close to the camera.
+                if(fx > 0.84f)
+                {
+                    const float t = std::clamp((1.0f - fx) / 0.16f, 0.0f, 1.0f);
+                    const float side = 8.0f + 230.0f * std::pow(t, 1.55f);
+                    distance = std::min(distance, side);
+                }
 
-                // Bright far opening / exterior.
-                if(fx > 0.605f && fx < 0.735f && fy > 0.31f && fy < 0.515f)
-                    distance = 1450.0f;
+                // Mid-street architecture and the distant Easy Street opening.
+                if(fx > 0.34f && fx < 0.61f && fy > 0.25f && fy < 0.62f)
+                    distance = std::min(distance, 95.0f + std::abs(fx - 0.50f) * 220.0f);
+                if(fx > 0.44f && fx < 0.70f && fy < 0.42f)
+                    distance = std::max(distance, 520.0f);
 
-                // Approximate the first-person weapon/arms as BO3 depth-hacked
-                // geometry. Beginner depth effects intentionally ignore this mask,
-                // matching the killfeed shader's world-vs-viewmodel Float-Z split.
+                // Left market stand, crates and barrels.
+                if(fx < 0.34f && fy > 0.42f && fy < 0.76f)
+                    distance = std::min(distance, 10.0f + (0.76f - fy) * 26.0f);
+                if(fx > 0.17f && fx < 0.33f && fy > 0.55f && fy < 0.77f)
+                    distance = std::min(distance, 7.5f + (0.77f - fy) * 20.0f);
+
+                // Truck and awning on the right side of the street.
+                if(fx > 0.59f && fx < 0.84f && fy > 0.40f && fy < 0.69f)
+                    distance = std::min(distance, 18.0f + (0.69f - fy) * 26.0f);
+                if(fx > 0.67f && fx < 0.86f && fy > 0.34f && fy < 0.48f)
+                    distance = std::min(distance, 24.0f + (0.48f - fy) * 40.0f);
+
+                // Small mid-ground street props.
+                if(fx > 0.44f && fx < 0.58f && fy > 0.46f && fy < 0.64f)
+                    distance = std::min(distance, 34.0f + (0.64f - fy) * 65.0f);
+
+                // First-person revolver and arms are approximated as BO3
+                // depth-hacked geometry so Beginner AO/fog can exclude them.
                 const bool viewmodel =
-                    (fy > 0.84f && fx > 0.50f) ||
-                    (fy > 0.72f && fx > 0.63f) ||
-                    (fy > 0.62f && fy < 0.75f && fx > 0.57f && fx < 0.80f) ||
-                    (fy > 0.76f && fx > 0.53f && fx < 0.72f);
+                    (fy > 0.78f && fx > 0.49f && fx < 0.78f) ||
+                    (fy > 0.62f && fy < 0.82f && fx > 0.54f && fx < 0.66f) ||
+                    (fy > 0.84f && fx > 0.42f);
                 if(viewmodel)
                 {
                     depthHackMask[pidx] = 1u;
-                    distance = 0.65f;
+                    distance = 0.68f;
                 }
 
                 worldDepth[pidx] = distance;
@@ -1676,7 +1695,7 @@ public:
         sourceHeight_ = depthHeight_ = h;
         sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
         sourceHdrPeakLuminance_ = 1.0f;
-        sourceHdrMeanLuminance_ = 0.24f;
+        sourceHdrMeanLuminance_ = 0.20f;
         depthUserLoaded_ = false;
         builtInDepthScene_ = true;
         ResetTemporalExposureState();
