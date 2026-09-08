@@ -170,6 +170,15 @@ jobs:
                   continue
                 }
 
+                # No-code Beginner Builder modules generate all three BO3 target
+                # contracts, and their focused FXC + package-adapter coverage lives
+                # in the PostFX/export regression executable. Keep ordinary effect
+                # module edits fast instead of running unrelated GLSL/Shadertoy suites.
+                if ($normalized -match '^src/beginner_shader_builder\.(cpp|h)$') {
+                  $runPostfx = $true
+                  continue
+                }
+
                 # BO3 package/adapters/reflection/techset/export contract.
                 if ($normalized -match '^src/bo3_' -or
                     $normalized -match '^src/preview_package_session\.(cpp|h)$' -or

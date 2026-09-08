@@ -6,6 +6,7 @@ TARGET = BO3HLSLPreviewer
 
 SOURCES += src/main.cpp \
            src/main_window.cpp \
+           src/beginner_shader_builder.cpp \
            src/glsl_converter_core.cpp \
            src/preview_renderer.cpp \
            src/tinyexr_impl.cpp \
@@ -32,6 +33,7 @@ INCLUDEPATH += $$PWD/third_party/tinyexr
 
 RESOURCES += resources/learning.qrc
 HEADERS += src/github_update.h \
+           src/beginner_shader_builder.h \
            src/main_window.h \
            src/glsl_converter_core.h \
            src/preview_renderer.h \

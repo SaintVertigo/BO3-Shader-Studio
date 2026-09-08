@@ -96,6 +96,7 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
 #include <QStandardPaths>
@@ -147,6 +148,7 @@
 #include <functional>
 
 #include "shadertoy_project.h"
+#include "beginner_shader_builder.h"
 #include "model_import.h"
 #include "bo3_package_regression.h"
 #include "bo3_install_history.h"
@@ -1025,8 +1027,14 @@ public:
         QTimer::singleShot(0, this, [this]{
             QString error;
             if (!preview_->ensureInitialized(error) && !error.isEmpty())
+            {
                 QMessageBox::critical(this, "DirectX initialization failed", error);
-            openBundledSample();
+                return;
+            }
+            if(beginnerUiMode_)
+                startBeginnerProject(beginner::Target::PostFx, false);
+            else
+                openBundledSample();
         });
         if (automaticUpdateChecksEnabled())
             QTimer::singleShot(2500, this, [this]{ checkForOnlineUpdates(false); });
@@ -1387,6 +1395,110 @@ public:
                 WriteCliOutput(QString("[FAIL] %1\n- %2\n").arg(name, problem));
             }
         };
+
+        run("Beginner Shader Builder BO3 contracts", [&]() -> QString
+        {
+            const QVector<QPair<beginner::Project, bo3::PackageTarget>> projects = {
+                {beginner::makePreset("retro_crt", beginner::Target::PostFx), bo3::PackageTarget::PostFx},
+                {beginner::makePreset("hologram", beginner::Target::Material), bo3::PackageTarget::Material},
+                {beginner::makePreset("dream_sky", beginner::Target::Sky), bo3::PackageTarget::Skybox}
+            };
+
+            for(const auto& entry : projects)
+            {
+                const beginner::Project& project = entry.first;
+                const QString hlsl = beginner::generateHlsl(project);
+                if(!hlsl.contains("BO3_BEGINNER_PROJECT: 1"))
+                    return QString("%1 output is missing the Beginner project marker.")
+                        .arg(beginner::targetName(project.target));
+                if(!hlsl.contains("float4 ps_main"))
+                    return QString("%1 output is missing ps_main.")
+                        .arg(beginner::targetName(project.target));
+
+                QString compileDiagnostics;
+                if(!compileGlslValidationHlsl(hlsl, compileDiagnostics, true))
+                    return QString("%1 generated HLSL failed FXC validation: %2")
+                        .arg(beginner::targetName(project.target), compileDiagnostics);
+
+                const bo3::ShaderSourceAnalysis analysis = bo3::analyzeShaderSource(hlsl);
+                if(!analysis.hasPixelEntry)
+                    return QString("%1 generated HLSL was not recognized as a BO3 pixel shader.")
+                        .arg(beginner::targetName(project.target));
+
+                bo3::PackageAdapterRequest request;
+                request.target = entry.second;
+                request.configuration = bo3::PackageConfiguration::Runtime;
+                request.source = hlsl;
+                request.sourceFileName = QString("beginner_%1.hlsl").arg(beginner::targetId(project.target));
+                const bo3::PackageAdapterResult adapted = bo3::adaptShaderPackage(request);
+                if(adapted.confidence == bo3::AutomationConfidence::Unsupported)
+                    return QString("%1 generated HLSL is unsupported by the BO3 package adapter: %2")
+                        .arg(beginner::targetName(project.target), adapted.diagnostics.toText());
+                if(adapted.diagnostics.hasErrors())
+                    return QString("%1 package adaptation reported an error: %2")
+                        .arg(beginner::targetName(project.target), adapted.diagnostics.toText());
+            }
+
+            const beginner::Project post = projects[0].first;
+            const QString postHlsl = beginner::generateHlsl(post);
+            if(!postHlsl.contains("SamplerState bilinearClampler : register(s1);"))
+                return "Beginner PostFX did not use the proven BO3 bilinearClampler binding.";
+            if(postHlsl.contains("frameBufferSampler"))
+                return "Beginner PostFX still emits a synthetic framebuffer sampler name.";
+
+            const beginner::Project material = projects[1].first;
+            const QString materialHlsl = beginner::generateHlsl(material);
+            if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE"))
+                return "Beginner Material is missing its BO3 emissive/unlit surface contract.";
+            if(!materialHlsl.contains("localPosition : TEXCOORD5") ||
+               !materialHlsl.contains("BO3BeginnerHash31") ||
+               !materialHlsl.contains("surfacePosition"))
+                return "Beginner Material procedural effects are not using the seamless local-3D coordinate path.";
+
+            // The package adapter validates the authored Material contract above,
+            // but Beginner export ultimately passes through the Custom Material
+            // bridge. Exercise that real export transform too so localPosition is
+            // guaranteed to become BO3's skinned objectPosition in the runtime copy.
+            QString materialAdapterDescription;
+            QString materialAdapterError;
+            const QString exportedMaterial = makeBo3CustomMaterialShader(
+                materialHlsl, materialAdapterDescription, materialAdapterError, 1);
+            if(exportedMaterial.isEmpty() || !materialAdapterError.isEmpty())
+                return "Beginner Material failed the real BO3 Custom Material export bridge: " + materialAdapterError;
+            if(!exportedMaterial.contains("pixel.objectPosition"))
+                return "Beginner Material export did not map localPosition to BO3 objectPosition.";
+            QString exportedMaterialDiagnostics;
+            if(!compileGlslValidationHlsl(exportedMaterial, exportedMaterialDiagnostics, true))
+                return "Beginner Material exported runtime HLSL failed FXC validation: " + exportedMaterialDiagnostics;
+
+            const beginner::Project sky = projects[2].first;
+            const QString skyHlsl = beginner::generateHlsl(sky);
+            if(!skyHlsl.contains("BO3_PREVIEWER_SKY_SOURCE: SELF_CAMERA") ||
+               !skyHlsl.contains("skyDirection : TEXCOORD0"))
+                return "Beginner Sky is missing the BO3 directional sky contract.";
+            if(bo3::analyzeShaderSource(skyHlsl).hasVertexEntry)
+                return "Beginner Sky should use BO3's stock vs_sky stage rather than an authored fullscreen vertex shader.";
+            if(!skyHlsl.contains("float t = gameTime.w;"))
+                return "Beginner Sky animation is not using its declared BO3 gameTime constant.";
+
+            const QJsonObject serialized = beginner::projectToJson(material);
+            beginner::Project roundTrip;
+            QString projectError;
+            if(!beginner::projectFromJson(serialized, roundTrip, projectError))
+                return "Beginner project JSON round-trip failed: " + projectError;
+            if(roundTrip.target != material.target ||
+               roundTrip.effects.size() != material.effects.size() ||
+               beginner::projectSummary(roundTrip) != beginner::projectSummary(material))
+                return "Beginner project JSON round-trip changed the project structure.";
+
+            const beginner::EffectDefinition* vignette = beginner::effectDefinition("vignette");
+            if(!vignette || !beginner::supportsTarget(*vignette, beginner::Target::PostFx) ||
+               beginner::supportsTarget(*vignette, beginner::Target::Material) ||
+               beginner::supportsTarget(*vignette, beginner::Target::Sky))
+                return "Beginner effect target gating is not enforcing BO3-safe Vignette availability.";
+
+            return {};
+        });
 
         const QString source = QString::fromUtf8(R"HLSL(#include "postfx/postfx_common.h"
 Texture2D<float4> frameBuffer : register(t0);
@@ -11678,10 +11790,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!preview_) return;
 
         QDialog dlg(this);
-        dlg.setWindowTitle("Export to Black Ops III");
-        dlg.resize(800, 830);
+        const bool beginnerExport = beginnerUiMode_ && beginnerProjectActive_;
+        dlg.setWindowTitle(beginnerExport ? "Export Beginner Shader to Black Ops III" : "Export to Black Ops III");
+        dlg.resize(beginnerExport ? 650 : 800, beginnerExport ? 470 : 830);
         auto* root = new QVBoxLayout(&dlg);
-        auto* intro = new QLabel("Choose either Build Shareable Package or Install into BO3. They are separate actions: packaging never installs anything, and installing never creates a ZIP. Folder/namespace and asset names are fully editable. Custom HLSL Materials can be exported as opaque/deferred, emissive, transparent, additive, cutout, decal, or glass-like surface presets.");
+        auto* intro = new QLabel(beginnerExport
+            ? "Shader Studio will handle the HLSL, techset, material files, BO3 bindings and package validation for you. Pick a name and choose whether to create a shareable package or install it directly."
+            : "Choose either Build Shareable Package or Install into BO3. They are separate actions: packaging never installs anything, and installing never creates a ZIP. Folder/namespace and asset names are fully editable. Custom HLSL Materials can be exported as opaque/deferred, emissive, transparent, additive, cutout, decal, or glass-like surface presets.");
         intro->setWordWrap(true);
         root->addWidget(intro);
 
@@ -11749,9 +11864,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         };
 
         auto* folder = new QLineEdit(savedNamespace);
-        const QString baseGuess = sanitizeBo3Name(shaderPath_.isEmpty()
-            ? defaultBaseForType(type->currentIndex())
-            : QFileInfo(shaderPath_).completeBaseName());
+        const QString baseGuess = sanitizeBo3Name(
+            beginnerProjectActive_
+                ? beginnerProject_.name
+                : (shaderPath_.isEmpty()
+                    ? defaultBaseForType(type->currentIndex())
+                    : QFileInfo(shaderPath_).completeBaseName()));
         const QString initialStem = makeAssetStem(savedPrefix, baseGuess);
         auto* base = new QLineEdit(baseGuess);
         auto* prefix = new QLineEdit(savedPrefix);
@@ -11826,6 +11944,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             type->setCurrentIndex(1);
             materialSurfaceMode->setCurrentIndex(0);
+        }
+        else if(currentShaderText.contains("BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE"))
+        {
+            type->setCurrentIndex(1);
+            materialSurfaceMode->setCurrentIndex(1);
+        }
+
+        if(beginnerExport)
+        {
+            type->setCurrentIndex(beginnerProject_.target == beginner::Target::Material ? 1 :
+                                  (beginnerProject_.target == beginner::Target::Sky ? 2 : 0));
+            if(beginnerProject_.target == beginner::Target::Material)
+                materialSurfaceMode->setCurrentIndex(1); // Beginner materials are intentionally emissive/unlit v1 modules.
+            if(beginnerProject_.target == beginner::Target::PostFx)
+                includePostFxFilterSupport->setChecked(true);
         }
 
         auto* materialOutputScale = new QDoubleSpinBox();
@@ -11902,6 +12035,46 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const QString pref = sanitizeBo3Name(prefix->text());
             const QString tn = sanitizeBo3Name(techsetName->text());
             const QString mat = sanitizeBo3Name(materialName->text());
+
+            if(beginnerExport)
+            {
+                // Beginner export intentionally hides BO3 implementation details.
+                // All hidden fields still carry deterministic safe defaults into
+                // the existing proven exporter/backend below.
+                setRowVisible(type, false);
+                setRowVisible(rootRow, true);
+                setRowVisible(folder, false);
+                setRowVisible(prefixRow, false);
+                setRowVisible(base, true);
+                setRowVisible(techsetName, false);
+                setRowVisible(materialName, false);
+                setRowVisible(bundleName, false);
+                setRowVisible(sceneSource, false);
+                setRowVisible(materialExportMode, false);
+                setRowVisible(materialSurfaceMode, false);
+                setRowVisible(materialOutputScale, false);
+                setRowVisible(materialOpacity, false);
+                setRowVisible(materialAlphaCutoff, false);
+                setRowVisible(materialProfile, false);
+                setRowVisible(glossInterpretation, false);
+                setRowVisible(pomHeightScale, false);
+                setRowVisible(pomMinLayers, false);
+                setRowVisible(pomMaxLayers, false);
+                setRowVisible(pomClampUvs, false);
+                setRowVisible(skyRes, false);
+                setRowVisible(makeBundle, false);
+                setRowVisible(removePostFxBlackBackground, false);
+                setRowVisible(includePostFxFilterSupport, false);
+                setRowVisible(resetNames, false);
+                if(QLabel* rootLabel = qobject_cast<QLabel*>(form->labelForField(rootRow)))
+                    rootLabel->setText("Black Ops III folder");
+                if(QLabel* nameLabel = qobject_cast<QLabel*>(form->labelForField(base)))
+                    nameLabel->setText("Shader name");
+                summary->setText(QString::fromUtf8("✓ BO3 compatibility pipeline ready\n\n") +
+                    QString("Target: %1\nEffects: %2\n\nShader Studio will generate and validate the required BO3 shader, techset and asset files automatically. No register, sampler or techset setup is required.")
+                        .arg(beginner::targetName(beginnerProject_.target), beginner::projectSummary(beginnerProject_)));
+                return;
+            }
 
             // Type-specific forms: don't show PostFX controls while exporting a
             // material or sky, and don't show material-only clutter for a sky.
@@ -11990,7 +12163,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(type,qOverload<int>(&QComboBox::currentIndexChanged),&dlg,[&](int){updateSummary();});
         connect(folder,&QLineEdit::textChanged,&dlg,[&](const QString&){updateSummary();});
         connect(prefix,&QLineEdit::textChanged,&dlg,[&](const QString&){updateSummary();});
-        connect(base,&QLineEdit::textChanged,&dlg,[&](const QString&){updateSummary();});
+        connect(base,&QLineEdit::textChanged,&dlg,[&](const QString& text)
+        {
+            // Beginner export intentionally hides BO3 asset naming. Keep every
+            // hidden dependent name synchronized with the one friendly Shader
+            // name field so beginners cannot accidentally create mismatched assets.
+            if(beginnerExport)
+            {
+                const QString stem = makeAssetStem(prefix->text(), text);
+                techsetName->setText(stem);
+                materialName->setText("mtl_" + stem);
+                bundleName->setText("postfx_" + stem);
+            }
+            updateSummary();
+        });
         connect(materialName,&QLineEdit::textChanged,&dlg,[&](const QString&){updateSummary();});
         connect(techsetName,&QLineEdit::textChanged,&dlg,[&](const QString&){updateSummary();});
         connect(materialExportMode,qOverload<int>(&QComboBox::currentIndexChanged),&dlg,[&](int){updateSummary();});
@@ -12047,8 +12233,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         int exportAction = 0; // 1 = package ZIP, 2 = direct BO3 install.
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
-        auto* packageButton = buttons->addButton("Build Shareable Package", QDialogButtonBox::AcceptRole);
-        auto* installButton = buttons->addButton("Install into BO3", QDialogButtonBox::ActionRole);
+        auto* packageButton = buttons->addButton(beginnerExport ? "Create Shareable BO3 Package" : "Build Shareable Package", QDialogButtonBox::AcceptRole);
+        auto* installButton = buttons->addButton(beginnerExport ? "Install Shader into BO3" : "Install into BO3", QDialogButtonBox::ActionRole);
         packageButton->setToolTip("Build a BO3-root-shaped ZIP only. Your local BO3 install is not modified.");
         installButton->setToolTip("Write the exported files directly into your BO3 root. No ZIP is created; a shader-specific INSTALL_README is written under source_data and linked from the completion dialog.");
         connect(buttons,&QDialogButtonBox::rejected,&dlg,&QDialog::reject);
@@ -13180,6 +13366,834 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             showBO3InstallHistory();
     }
 
+    static QString beginnerColorButtonStyle(const QColor& color)
+    {
+        const QColor safe = color.isValid() ? color : QColor(Qt::white);
+        const double luminance = 0.2126 * safe.redF() + 0.7152 * safe.greenF() + 0.0722 * safe.blueF();
+        const QString foreground = luminance > 0.56 ? "#101216" : "#FFFFFF";
+        return QString("QPushButton { background:%1; color:%2; border:1px solid #59636F; border-radius:5px; padding:6px 10px; font-weight:600; }")
+            .arg(safe.name(QColor::HexRgb), foreground);
+    }
+
+    int beginnerEffectIndexById(const QString& instanceId) const
+    {
+        for(int i = 0; i < beginnerProject_.effects.size(); ++i)
+            if(beginnerProject_.effects[i].instanceId == instanceId) return i;
+        return -1;
+    }
+
+    void markBeginnerProjectModified()
+    {
+        if(!beginnerProjectActive_) return;
+        beginnerProjectModified_ = true;
+        updateTitle();
+    }
+
+    void updateBeginnerBuilderSummary()
+    {
+        if(beginnerCompatibilityLabel_)
+        {
+            beginnerCompatibilityLabel_->setText(QString::fromUtf8("✓  ") + beginner::compatibilitySummary(beginnerProject_));
+            beginnerCompatibilityLabel_->setToolTip(
+                "Beginner mode exposes only Shader Studio modules with a known BO3 target contract. "
+                "The generated HLSL still passes through the normal BO3 package validation before export.");
+        }
+        if(beginnerSummaryLabel_)
+            beginnerSummaryLabel_->setText(beginner::projectSummary(beginnerProject_));
+        if(beginnerTargetDescription_)
+            beginnerTargetDescription_->setText(beginner::targetDescription(beginnerProject_.target));
+    }
+
+    void refreshBeginnerPresetCombo()
+    {
+        if(!beginnerPresetCombo_) return;
+        QSignalBlocker blocker(beginnerPresetCombo_);
+        beginnerPresetCombo_->clear();
+        const auto presets = beginner::presetsForTarget(beginnerProject_.target);
+        for(const auto& preset : presets)
+            beginnerPresetCombo_->addItem(preset.second, preset.first);
+    }
+
+    void rebuildBeginnerBaseAppearance()
+    {
+        if(!beginnerBaseAppearanceLayout_) return;
+        while(QLayoutItem* item = beginnerBaseAppearanceLayout_->takeAt(0))
+        {
+            if(QWidget* widget = item->widget()) widget->deleteLater();
+            if(QLayout* child = item->layout())
+            {
+                while(QLayoutItem* nested = child->takeAt(0))
+                {
+                    if(QWidget* widget = nested->widget()) widget->deleteLater();
+                    delete nested;
+                }
+                delete child;
+            }
+            delete item;
+        }
+
+        if(beginnerProject_.target == beginner::Target::PostFx)
+        {
+            auto* text = new QLabel("The game scene is the starting image. Add effects below to change it.");
+            text->setWordWrap(true);
+            text->setObjectName("CompactHelp");
+            beginnerBaseAppearanceLayout_->addWidget(text);
+            return;
+        }
+
+        auto addColorSetting = [this](const QString& key, const QString& label, const QColor& fallback)
+        {
+            QColor current(beginnerProject_.settings.value(key).toString());
+            if(!current.isValid()) current = fallback;
+            auto* row = new QWidget();
+            auto* layout = new QHBoxLayout(row);
+            layout->setContentsMargins(0, 0, 0, 0);
+            auto* name = new QLabel(label);
+            auto* button = new QPushButton(current.name(QColor::HexRgb).toUpper());
+            button->setStyleSheet(beginnerColorButtonStyle(current));
+            layout->addWidget(name);
+            layout->addStretch(1);
+            layout->addWidget(button);
+            beginnerBaseAppearanceLayout_->addWidget(row);
+            connect(button, &QPushButton::clicked, this, [this, key, fallback, button]
+            {
+                QColor current(beginnerProject_.settings.value(key).toString());
+                if(!current.isValid()) current = fallback;
+                const QColor chosen = QColorDialog::getColor(current, this, "Choose color");
+                if(!chosen.isValid()) return;
+                beginnerProject_.settings[key] = chosen.name(QColor::HexRgb);
+                button->setText(chosen.name(QColor::HexRgb).toUpper());
+                button->setStyleSheet(beginnerColorButtonStyle(chosen));
+                markBeginnerProjectModified();
+                applyBeginnerProjectToEditor(false);
+            });
+        };
+
+        if(beginnerProject_.target == beginner::Target::Material)
+        {
+            addColorSetting("baseColor", "Base Color", QColor("#2F78D0"));
+        }
+        else
+        {
+            addColorSetting("zenithColor", "Top / Zenith", QColor("#102E68"));
+            addColorSetting("horizonColor", "Horizon", QColor("#E17658"));
+            addColorSetting("groundColor", "Bottom / Ground", QColor("#060B18"));
+        }
+    }
+
+    void refreshBeginnerEffectList(const QString& preferredInstanceId = QString())
+    {
+        if(!beginnerEffectList_) return;
+        beginnerRefreshingUi_ = true;
+        beginnerEffectList_->clear();
+        int preferredRow = -1;
+        for(int i = 0; i < beginnerProject_.effects.size(); ++i)
+        {
+            const beginner::Effect& effect = beginnerProject_.effects[i];
+            const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
+            if(!definition) continue;
+            auto* item = new QListWidgetItem(definition->name, beginnerEffectList_);
+            item->setData(Qt::UserRole, effect.instanceId);
+            item->setToolTip(definition->description);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+            item->setCheckState(effect.enabled ? Qt::Checked : Qt::Unchecked);
+            if(effect.instanceId == preferredInstanceId) preferredRow = beginnerEffectList_->count() - 1;
+        }
+        beginnerRefreshingUi_ = false;
+        if(preferredRow >= 0)
+            beginnerEffectList_->setCurrentRow(preferredRow);
+        else if(beginnerEffectList_->count() > 0 && beginnerEffectList_->currentRow() < 0)
+            beginnerEffectList_->setCurrentRow(0);
+        else if(beginnerEffectList_->count() == 0)
+            rebuildBeginnerEffectParameters();
+        updateBeginnerBuilderSummary();
+    }
+
+    void rebuildBeginnerEffectParameters()
+    {
+        if(!beginnerEffectParamsLayout_) return;
+        while(QLayoutItem* item = beginnerEffectParamsLayout_->takeAt(0))
+        {
+            if(QWidget* widget = item->widget()) widget->deleteLater();
+            if(QLayout* child = item->layout())
+            {
+                while(QLayoutItem* nested = child->takeAt(0))
+                {
+                    if(QWidget* widget = nested->widget()) widget->deleteLater();
+                    delete nested;
+                }
+                delete child;
+            }
+            delete item;
+        }
+
+        QListWidgetItem* item = beginnerEffectList_ ? beginnerEffectList_->currentItem() : nullptr;
+        const QString instanceId = item ? item->data(Qt::UserRole).toString() : QString();
+        const int effectIndex = beginnerEffectIndexById(instanceId);
+        if(effectIndex < 0)
+        {
+            auto* title = new QLabel("Choose an effect");
+            title->setObjectName("InspectorTitle");
+            auto* help = new QLabel("Add an effect, then use simple sliders here. Shader Studio writes the BO3 HLSL for you.");
+            help->setWordWrap(true);
+            help->setObjectName("CompactHelp");
+            beginnerEffectParamsLayout_->addWidget(title);
+            beginnerEffectParamsLayout_->addWidget(help);
+            beginnerEffectParamsLayout_->addStretch(1);
+            return;
+        }
+
+        const beginner::Effect& effect = beginnerProject_.effects[effectIndex];
+        const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
+        if(!definition) return;
+
+        auto* title = new QLabel(definition->name);
+        title->setObjectName("InspectorTitle");
+        auto* help = new QLabel(definition->description);
+        help->setWordWrap(true);
+        help->setObjectName("CompactHelp");
+        beginnerEffectParamsLayout_->addWidget(title);
+        beginnerEffectParamsLayout_->addWidget(help);
+
+        auto* formHost = new QWidget();
+        auto* form = new QFormLayout(formHost);
+        form->setContentsMargins(0, 8, 0, 0);
+        form->setHorizontalSpacing(10);
+        form->setVerticalSpacing(10);
+
+        for(const beginner::ParameterDefinition& parameter : definition->parameters)
+        {
+            if(parameter.kind == beginner::ParameterKind::Color)
+            {
+                QColor value(effect.parameters.value(parameter.key).toString());
+                if(!value.isValid()) value = parameter.defaultColor;
+                auto* button = new QPushButton(value.name(QColor::HexRgb).toUpper());
+                button->setToolTip(parameter.description);
+                button->setStyleSheet(beginnerColorButtonStyle(value));
+                form->addRow(parameter.name, button);
+                connect(button, &QPushButton::clicked, this, [this, instanceId, parameter, button]
+                {
+                    const int index = beginnerEffectIndexById(instanceId);
+                    if(index < 0) return;
+                    QColor current(beginnerProject_.effects[index].parameters.value(parameter.key).toString());
+                    if(!current.isValid()) current = parameter.defaultColor;
+                    const QColor chosen = QColorDialog::getColor(current, this, "Choose " + parameter.name);
+                    if(!chosen.isValid()) return;
+                    beginnerProject_.effects[index].parameters[parameter.key] = chosen.name(QColor::HexRgb);
+                    button->setText(chosen.name(QColor::HexRgb).toUpper());
+                    button->setStyleSheet(beginnerColorButtonStyle(chosen));
+                    markBeginnerProjectModified();
+                    applyBeginnerProjectToEditor(false);
+                });
+                continue;
+            }
+
+            const double value = effect.parameters.value(parameter.key).toDouble(parameter.defaultValue);
+            auto* row = new QWidget();
+            auto* layout = new QHBoxLayout(row);
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(6);
+            auto* slider = new QSlider(Qt::Horizontal);
+            slider->setRange(0, 1000);
+            const double span = std::max(0.000001, parameter.maximum - parameter.minimum);
+            slider->setValue(qBound(0, static_cast<int>(std::round((value - parameter.minimum) / span * 1000.0)), 1000));
+            slider->setToolTip(parameter.description);
+            auto* spin = new QDoubleSpinBox();
+            spin->setRange(parameter.minimum, parameter.maximum);
+            spin->setSingleStep(parameter.step);
+            spin->setDecimals(parameter.step < 0.01 ? 3 : (parameter.step < 0.1 ? 2 : 1));
+            spin->setValue(value);
+            spin->setMaximumWidth(92);
+            spin->setToolTip(parameter.description);
+            layout->addWidget(slider, 1);
+            layout->addWidget(spin);
+            form->addRow(parameter.name, row);
+
+            connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin](int position)
+            {
+                const int index = beginnerEffectIndexById(instanceId);
+                if(index < 0) return;
+                const double normalized = static_cast<double>(position) / 1000.0;
+                const double value = parameter.minimum + (parameter.maximum - parameter.minimum) * normalized;
+                {
+                    QSignalBlocker blocker(spin);
+                    spin->setValue(value);
+                }
+                beginnerProject_.effects[index].parameters[parameter.key] = value;
+                markBeginnerProjectModified();
+                applyBeginnerProjectToEditor(false);
+            });
+            connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, instanceId, parameter, slider](double value)
+            {
+                const int index = beginnerEffectIndexById(instanceId);
+                if(index < 0) return;
+                const double span = std::max(0.000001, parameter.maximum - parameter.minimum);
+                const int position = qBound(0, static_cast<int>(std::round((value - parameter.minimum) / span * 1000.0)), 1000);
+                {
+                    QSignalBlocker blocker(slider);
+                    slider->setValue(position);
+                }
+                beginnerProject_.effects[index].parameters[parameter.key] = value;
+                markBeginnerProjectModified();
+                applyBeginnerProjectToEditor(false);
+            });
+        }
+        beginnerEffectParamsLayout_->addWidget(formHost);
+        beginnerEffectParamsLayout_->addStretch(1);
+    }
+
+    void refreshBeginnerTargetButtons()
+    {
+        for(int i = 0; i < 3; ++i)
+        {
+            if(!beginnerTargetButtons_[i]) continue;
+            QSignalBlocker blocker(beginnerTargetButtons_[i]);
+            beginnerTargetButtons_[i]->setChecked(static_cast<int>(beginnerProject_.target) == i);
+        }
+        refreshBeginnerPresetCombo();
+        rebuildBeginnerBaseAppearance();
+        updateBeginnerBuilderSummary();
+    }
+
+    void refreshBeginnerProjectUi(const QString& preferredEffect = QString())
+    {
+        beginnerRefreshingUi_ = true;
+        if(beginnerProjectNameEdit_)
+        {
+            QSignalBlocker blocker(beginnerProjectNameEdit_);
+            beginnerProjectNameEdit_->setText(beginnerProject_.name);
+        }
+        refreshBeginnerTargetButtons();
+        refreshBeginnerEffectList(preferredEffect);
+        beginnerRefreshingUi_ = false;
+    }
+
+    void clearBeginnerPreviewPackageState()
+    {
+        previewPackageSession_.clear();
+        temporaryPreviewMappings_.clear();
+        temporaryPreviewValidationPassed_ = false;
+        updateTemporaryPreviewActions();
+    }
+
+    void applyBeginnerProjectToEditor(bool immediateCompile)
+    {
+        if(!beginnerProjectActive_ || !editor_) return;
+        const QString generated = beginner::generateHlsl(beginnerProject_);
+        beginnerGeneratedHlsl_ = generated;
+        const CodeEditor::ViewState view = editor_->captureViewState();
+        loadingText_ = true;
+        editor_->setPlainText(generated);
+        editor_->document()->setModified(false);
+        loadingText_ = false;
+        editor_->restoreViewState(view);
+        modified_ = false;
+
+        const PreviewModeDetection detection = detectPreviewMode(generated);
+        setDetectedPreviewMode(detection, true);
+        if(beginnerProject_.target == beginner::Target::Material)
+        {
+            if(meshCombo_) meshCombo_->setCurrentIndex(static_cast<int>(PreviewMesh::Sphere));
+            if(camera3D_) camera3D_->setChecked(true);
+        }
+        else if(beginnerProject_.target == beginner::Target::Sky)
+        {
+            if(camera3D_) camera3D_->setChecked(true);
+        }
+        else
+        {
+            if(camera3D_) camera3D_->setChecked(false);
+        }
+        updateGBufferUi();
+        updateCameraUi();
+        updateBeginnerBuilderSummary();
+        updateTitle();
+
+        if(!preview_) return;
+        if(immediateCompile)
+        {
+            liveCompileTimer_.stop();
+            compileEditor();
+        }
+        else if(!liveCompile_ || liveCompile_->isChecked())
+        {
+            liveCompileTimer_.start();
+        }
+    }
+
+    void startBeginnerProject(beginner::Target target, bool markDirty = true)
+    {
+        beginnerProject_ = beginner::makeDefaultProject(target);
+        beginnerProjectPath_.clear();
+        beginnerProjectActive_ = true;
+        beginnerProjectModified_ = markDirty;
+        shaderPath_.clear();
+        techsetPath_.clear();
+        techsetSource_.clear();
+        techsetOrigin_ = bo3::TechsetOrigin::None;
+        clearBeginnerPreviewPackageState();
+        refreshBeginnerProjectUi();
+        if(authoringStack_ && beginnerBuilderPanel_) authoringStack_->setCurrentWidget(beginnerBuilderPanel_);
+        applyBeginnerProjectToEditor(true);
+    }
+
+    void newBeginnerProjectDialog()
+    {
+        if(!maybeSave()) return;
+        QDialog dlg(this);
+        dlg.setWindowTitle("New Beginner Shader");
+        dlg.resize(650, 330);
+        auto* layout = new QVBoxLayout(&dlg);
+        auto* title = new QLabel("What are you making?");
+        title->setObjectName("InspectorTitle");
+        auto* help = new QLabel("Pick the closest BO3 target. You can change it later. No HLSL knowledge is required.");
+        help->setWordWrap(true);
+        help->setObjectName("CompactHelp");
+        layout->addWidget(title);
+        layout->addWidget(help);
+        auto* choices = new QHBoxLayout();
+        beginner::Target chosenTarget = beginner::Target::PostFx;
+        QVector<QToolButton*> buttons;
+        for(int i = 0; i < 3; ++i)
+        {
+            const beginner::Target target = static_cast<beginner::Target>(i);
+            auto* button = new QToolButton();
+            button->setText(beginner::targetName(target) + "\n\n" + beginner::targetDescription(target));
+            button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            button->setCheckable(true);
+            button->setChecked(i == 0);
+            button->setMinimumSize(185, 150);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            button->setObjectName("BeginnerTargetCard");
+            button->setStyleSheet("QToolButton { text-align:left; padding:12px; } QToolButton:checked { border:2px solid #64A7D4; background:#1D3040; }");
+            choices->addWidget(button);
+            buttons.push_back(button);
+            connect(button, &QToolButton::clicked, &dlg, [&, target, button]
+            {
+                chosenTarget = target;
+                for(QToolButton* candidate : buttons)
+                    candidate->setChecked(candidate == button);
+            });
+        }
+        layout->addLayout(choices, 1);
+        auto* buttonsBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        buttonsBox->button(QDialogButtonBox::Ok)->setText("Create Shader");
+        connect(buttonsBox, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(buttonsBox, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        layout->addWidget(buttonsBox);
+        if(dlg.exec() != QDialog::Accepted) return;
+        // Create the chosen project first so entering Beginner mode does not
+        // briefly create/compile the default PostFX project as an intermediate step.
+        startBeginnerProject(chosenTarget, true);
+        setUiExperienceMode(true);
+    }
+
+    void switchBeginnerTarget(beginner::Target target)
+    {
+        if(target == beginnerProject_.target) return;
+        int incompatible = 0;
+        for(const beginner::Effect& effect : beginnerProject_.effects)
+        {
+            const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
+            if(definition && !beginner::supportsTarget(*definition, target)) ++incompatible;
+        }
+        if(incompatible > 0)
+        {
+            const auto answer = QMessageBox::question(
+                this, "Switch Shader Type",
+                QString("%1 effect%2 cannot be used on %3 and will be removed.\n\nSwitch shader type?")
+                    .arg(incompatible).arg(incompatible == 1 ? "" : "s").arg(beginner::targetName(target)),
+                QMessageBox::Yes | QMessageBox::No);
+            if(answer != QMessageBox::Yes)
+            {
+                refreshBeginnerTargetButtons();
+                return;
+            }
+        }
+
+        const beginner::Target previousTarget = beginnerProject_.target;
+        const beginner::Project previousDefaults = beginner::makeDefaultProject(previousTarget);
+        beginner::Project defaults = beginner::makeDefaultProject(target);
+        const bool stillUsingDefaultName = beginnerProjectPath_.isEmpty() &&
+            beginnerProject_.name == previousDefaults.name;
+        beginnerProject_.target = target;
+        beginnerProject_.settings = defaults.settings;
+        if(stillUsingDefaultName) beginnerProject_.name = defaults.name;
+        QVector<beginner::Effect> compatible;
+        for(const beginner::Effect& effect : beginnerProject_.effects)
+        {
+            const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
+            if(definition && beginner::supportsTarget(*definition, target)) compatible.push_back(effect);
+        }
+        beginnerProject_.effects = compatible;
+        clearBeginnerPreviewPackageState();
+        markBeginnerProjectModified();
+        refreshBeginnerProjectUi();
+        applyBeginnerProjectToEditor(true);
+    }
+
+    void addBeginnerEffect(const QString& typeId)
+    {
+        const beginner::EffectDefinition* definition = beginner::effectDefinition(typeId);
+        if(!definition || !beginner::supportsTarget(*definition, beginnerProject_.target)) return;
+        beginner::Effect effect = beginner::makeDefaultEffect(typeId);
+        beginnerProject_.effects.push_back(effect);
+        markBeginnerProjectModified();
+        refreshBeginnerEffectList(effect.instanceId);
+        applyBeginnerProjectToEditor(false);
+    }
+
+    void showAddBeginnerEffectMenu(QPushButton* anchor)
+    {
+        if(!anchor) return;
+        QMenu menu(this);
+        for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
+        {
+            if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
+            QAction* action = menu.addAction(definition.name);
+            action->setToolTip(definition.description);
+            connect(action, &QAction::triggered, this, [this, id = definition.id]{ addBeginnerEffect(id); });
+        }
+        menu.exec(anchor->mapToGlobal(QPoint(0, anchor->height())));
+    }
+
+    void removeSelectedBeginnerEffect()
+    {
+        QListWidgetItem* item = beginnerEffectList_ ? beginnerEffectList_->currentItem() : nullptr;
+        if(!item) return;
+        const QString id = item->data(Qt::UserRole).toString();
+        const int index = beginnerEffectIndexById(id);
+        if(index < 0) return;
+        beginnerProject_.effects.removeAt(index);
+        markBeginnerProjectModified();
+        refreshBeginnerEffectList();
+        applyBeginnerProjectToEditor(false);
+    }
+
+    void moveSelectedBeginnerEffect(int delta)
+    {
+        QListWidgetItem* item = beginnerEffectList_ ? beginnerEffectList_->currentItem() : nullptr;
+        if(!item) return;
+        const QString id = item->data(Qt::UserRole).toString();
+        const int index = beginnerEffectIndexById(id);
+        const int target = index + delta;
+        if(index < 0 || target < 0 || target >= beginnerProject_.effects.size()) return;
+        beginnerProject_.effects.swapItemsAt(index, target);
+        markBeginnerProjectModified();
+        refreshBeginnerEffectList(id);
+        applyBeginnerProjectToEditor(false);
+    }
+
+    void applySelectedBeginnerPreset()
+    {
+        if(!beginnerPresetCombo_) return;
+        const QString presetId = beginnerPresetCombo_->currentData().toString();
+        if(presetId.isEmpty()) return;
+        if(!beginnerProject_.effects.isEmpty())
+        {
+            const auto answer = QMessageBox::question(
+                this, "Apply Preset", "Replace the current effect stack with this preset?",
+                QMessageBox::Yes | QMessageBox::No);
+            if(answer != QMessageBox::Yes) return;
+        }
+        beginnerProject_ = beginner::makePreset(presetId, beginnerProject_.target);
+        beginnerProjectPath_.clear();
+        beginnerProjectActive_ = true;
+        beginnerProjectModified_ = true;
+        clearBeginnerPreviewPackageState();
+        refreshBeginnerProjectUi();
+        if(beginnerPresetCombo_)
+        {
+            const int presetIndex = beginnerPresetCombo_->findData(presetId);
+            if(presetIndex >= 0) beginnerPresetCombo_->setCurrentIndex(presetIndex);
+        }
+        applyBeginnerProjectToEditor(true);
+    }
+
+    bool saveBeginnerProject(const QString& explicitPath = QString())
+    {
+        if(!beginnerProjectActive_) return false;
+        QString target = explicitPath.isEmpty() ? beginnerProjectPath_ : explicitPath;
+        if(target.isEmpty())
+        {
+            target = QFileDialog::getSaveFileName(
+                this, "Save Beginner Shader Project",
+                currentDirectory() + "/" + sanitizeBo3Name(beginnerProject_.name) + ".bo3shader",
+                "BO3 Shader Studio projects (*.bo3shader);;All files (*.*)");
+        }
+        if(target.isEmpty()) return false;
+        if(QFileInfo(target).suffix().compare("bo3shader", Qt::CaseInsensitive) != 0)
+            target += ".bo3shader";
+        QSaveFile file(target);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text))
+        {
+            QMessageBox::warning(this, "Save Beginner Project", "Could not write:\n" + target);
+            return false;
+        }
+        file.write(QJsonDocument(beginner::projectToJson(beginnerProject_)).toJson(QJsonDocument::Indented));
+        if(!file.commit())
+        {
+            QMessageBox::warning(this, "Save Beginner Project", "Could not finish saving:\n" + target);
+            return false;
+        }
+        beginnerProjectPath_ = QFileInfo(target).absoluteFilePath();
+        beginnerProjectModified_ = false;
+        updateTitle();
+        statusBar()->showMessage("Saved beginner project " + QFileInfo(target).fileName(), 2500);
+        return true;
+    }
+
+    bool saveBeginnerProjectAs()
+    {
+        if(!beginnerProjectActive_) return false;
+        QString target = QFileDialog::getSaveFileName(
+            this, "Save Beginner Shader Project As",
+            beginnerProjectPath_.isEmpty()
+                ? currentDirectory() + "/" + sanitizeBo3Name(beginnerProject_.name) + ".bo3shader"
+                : beginnerProjectPath_,
+            "BO3 Shader Studio projects (*.bo3shader);;All files (*.*)");
+        if(target.isEmpty()) return false;
+        if(QFileInfo(target).suffix().compare("bo3shader", Qt::CaseInsensitive) != 0)
+            target += ".bo3shader";
+        return saveBeginnerProject(target);
+    }
+
+    bool openBeginnerProject(const QString& path)
+    {
+        QFile file(path);
+        if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QMessageBox::warning(this, "Open Beginner Project", "Could not open:\n" + path);
+            return false;
+        }
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+        if(parseError.error != QJsonParseError::NoError || !document.isObject())
+        {
+            QMessageBox::warning(this, "Open Beginner Project",
+                QString("The project JSON could not be read.\n\n%1").arg(parseError.errorString()));
+            return false;
+        }
+        beginner::Project project;
+        QString error;
+        if(!beginner::projectFromJson(document.object(), project, error))
+        {
+            QMessageBox::warning(this, "Open Beginner Project", error);
+            return false;
+        }
+        beginnerProject_ = project;
+        beginnerProjectPath_ = QFileInfo(path).absoluteFilePath();
+        beginnerProjectActive_ = true;
+        beginnerProjectModified_ = false;
+        // openShaderDialog() already resolved any old document save/discard
+        // decision. Do not let stale QTextDocument modified state from the old
+        // Advanced document trigger a second "manual generated HLSL" prompt
+        // while entering this freshly loaded visual project.
+        modified_ = false;
+        if(editor_) editor_->document()->setModified(false);
+        shaderPath_.clear();
+        techsetPath_.clear();
+        techsetSource_.clear();
+        techsetOrigin_ = bo3::TechsetOrigin::None;
+        clearBeginnerPreviewPackageState();
+        setUiExperienceMode(true);
+        refreshBeginnerProjectUi();
+        applyBeginnerProjectToEditor(true);
+        statusBar()->showMessage("Opened beginner project " + QFileInfo(path).fileName(), 3000);
+        return true;
+    }
+
+    bool saveCurrentDocument()
+    {
+        if(beginnerUiMode_ && beginnerProjectActive_) return saveBeginnerProject();
+        return saveShader();
+    }
+
+    bool saveCurrentDocumentAs()
+    {
+        if(beginnerUiMode_ && beginnerProjectActive_) return saveBeginnerProjectAs();
+        return saveShaderAs();
+    }
+
+    QWidget* buildBeginnerBuilderPanel()
+    {
+        auto* panel = new QWidget(this);
+        panel->setObjectName("BeginnerBuilderPanel");
+        auto* root = new QVBoxLayout(panel);
+        root->setContentsMargins(12, 10, 12, 10);
+        root->setSpacing(10);
+
+        auto* heroRow = new QHBoxLayout();
+        auto* heroText = new QWidget();
+        auto* heroLayout = new QVBoxLayout(heroText);
+        heroLayout->setContentsMargins(0, 0, 0, 0);
+        auto* title = new QLabel("BEGINNER SHADER BUILDER");
+        title->setObjectName("SectionHeader");
+        auto* subtitle = new QLabel("Build a real BO3-compatible shader with effects and sliders — no coding required.");
+        subtitle->setObjectName("CompactHelp");
+        subtitle->setWordWrap(true);
+        heroLayout->addWidget(title);
+        heroLayout->addWidget(subtitle);
+        heroRow->addWidget(heroText, 1);
+        beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  BO3-safe modules only"));
+        beginnerCompatibilityLabel_->setStyleSheet("QLabel { color:#B8F0CA; background:#173624; border:1px solid #2C7A49; border-radius:6px; padding:7px 10px; font-weight:600; }");
+        heroRow->addWidget(beginnerCompatibilityLabel_, 0, Qt::AlignTop);
+        root->addLayout(heroRow);
+
+        auto* targetGroup = new QGroupBox("1. What are you making?");
+        auto* targetLayout = new QVBoxLayout(targetGroup);
+        auto* targetCards = new QHBoxLayout();
+        const QStringList targetShort = {"Changes the game screen", "Changes a model / surface", "Creates the environment"};
+        for(int i = 0; i < 3; ++i)
+        {
+            const beginner::Target target = static_cast<beginner::Target>(i);
+            auto* button = new QToolButton();
+            button->setCheckable(true);
+            button->setText(beginner::targetName(target) + "\n" + targetShort[i]);
+            button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            button->setMinimumHeight(62);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            button->setObjectName("BeginnerTargetCard");
+            button->setStyleSheet("QToolButton { text-align:left; padding:8px 12px; border:1px solid #3D4650; border-radius:6px; background:#181C21; } QToolButton:hover { border-color:#5D7488; } QToolButton:checked { border:2px solid #64A7D4; background:#1C3040; color:#FFFFFF; }");
+            beginnerTargetButtons_[i] = button;
+            targetCards->addWidget(button);
+            connect(button, &QToolButton::clicked, this, [this, target]{ switchBeginnerTarget(target); });
+        }
+        targetLayout->addLayout(targetCards);
+        beginnerTargetDescription_ = new QLabel();
+        beginnerTargetDescription_->setWordWrap(true);
+        beginnerTargetDescription_->setObjectName("CompactHelp");
+        targetLayout->addWidget(beginnerTargetDescription_);
+        root->addWidget(targetGroup);
+
+        auto* body = new QSplitter(Qt::Horizontal);
+        body->setChildrenCollapsible(false);
+
+        auto* left = new QWidget();
+        auto* leftLayout = new QVBoxLayout(left);
+        leftLayout->setContentsMargins(0, 0, 6, 0);
+        leftLayout->setSpacing(8);
+
+        auto* projectGroup = new QGroupBox("2. Start with a look");
+        auto* projectForm = new QFormLayout(projectGroup);
+        beginnerProjectNameEdit_ = new QLineEdit();
+        beginnerProjectNameEdit_->setPlaceholderText("My Shader");
+        projectForm->addRow("Name", beginnerProjectNameEdit_);
+        auto* presetRow = new QWidget();
+        auto* presetLayout = new QHBoxLayout(presetRow);
+        presetLayout->setContentsMargins(0, 0, 0, 0);
+        beginnerPresetCombo_ = new QComboBox();
+        auto* applyPreset = new QPushButton("Apply");
+        presetLayout->addWidget(beginnerPresetCombo_, 1);
+        presetLayout->addWidget(applyPreset);
+        projectForm->addRow("Preset", presetRow);
+        leftLayout->addWidget(projectGroup);
+
+        auto* baseGroup = new QGroupBox("Base Appearance");
+        beginnerBaseAppearanceLayout_ = new QVBoxLayout(baseGroup);
+        beginnerBaseAppearanceLayout_->setContentsMargins(8, 8, 8, 8);
+        leftLayout->addWidget(baseGroup);
+
+        auto* effectsGroup = new QGroupBox("3. Build your effect stack");
+        auto* effectsLayout = new QVBoxLayout(effectsGroup);
+        beginnerEffectList_ = new QListWidget();
+        beginnerEffectList_->setSelectionMode(QAbstractItemView::SingleSelection);
+        beginnerEffectList_->setMinimumHeight(170);
+        beginnerEffectList_->setAlternatingRowColors(true);
+        effectsLayout->addWidget(beginnerEffectList_, 1);
+        auto* effectButtons = new QHBoxLayout();
+        auto* addEffect = new QPushButton("+ Add Effect");
+        addEffect->setObjectName("PrimaryAction");
+        auto* removeEffect = new QPushButton("Remove");
+        auto* moveUp = new QPushButton(QString::fromUtf8("↑"));
+        auto* moveDown = new QPushButton(QString::fromUtf8("↓"));
+        moveUp->setFixedWidth(34);
+        moveDown->setFixedWidth(34);
+        effectButtons->addWidget(addEffect, 1);
+        effectButtons->addWidget(removeEffect);
+        effectButtons->addWidget(moveUp);
+        effectButtons->addWidget(moveDown);
+        effectsLayout->addLayout(effectButtons);
+        beginnerSummaryLabel_ = new QLabel();
+        beginnerSummaryLabel_->setWordWrap(true);
+        beginnerSummaryLabel_->setObjectName("CompactHelp");
+        effectsLayout->addWidget(beginnerSummaryLabel_);
+        leftLayout->addWidget(effectsGroup, 1);
+
+        auto* right = new QWidget();
+        auto* rightLayout = new QVBoxLayout(right);
+        rightLayout->setContentsMargins(6, 0, 0, 0);
+        rightLayout->setSpacing(8);
+        auto* paramsGroup = new QGroupBox("4. Adjust the selected effect");
+        beginnerEffectParamsLayout_ = new QVBoxLayout(paramsGroup);
+        beginnerEffectParamsLayout_->setContentsMargins(10, 10, 10, 10);
+        rightLayout->addWidget(paramsGroup, 1);
+
+        auto* explain = new QGroupBox("How did this shader get made?");
+        auto* explainLayout = new QVBoxLayout(explain);
+        auto* explainText = new QLabel("Your project is turned into known-good BO3 HLSL modules in the same order as the effect stack. You can inspect the generated code whenever you want, but you never have to edit it.");
+        explainText->setWordWrap(true);
+        explainText->setObjectName("CompactHelp");
+        explainLayout->addWidget(explainText);
+        rightLayout->addWidget(explain);
+
+        auto* actions = new QHBoxLayout();
+        auto* viewCode = new QPushButton("View Generated HLSL");
+        viewCode->setToolTip("Open the generated code in Advanced mode for learning or manual editing.");
+        auto* exportButton = new QPushButton("Export to Black Ops III");
+        exportButton->setObjectName("PrimaryAction");
+        exportButton->setMinimumHeight(38);
+        actions->addWidget(viewCode);
+        actions->addWidget(exportButton, 1);
+        rightLayout->addLayout(actions);
+
+        body->addWidget(left);
+        body->addWidget(right);
+        body->setStretchFactor(0, 3);
+        body->setStretchFactor(1, 4);
+        root->addWidget(body, 1);
+
+        connect(beginnerProjectNameEdit_, &QLineEdit::textEdited, this, [this](const QString& text)
+        {
+            if(beginnerRefreshingUi_) return;
+            beginnerProject_.name = text.trimmed().isEmpty() ? "Untitled Shader" : text.trimmed();
+            markBeginnerProjectModified();
+            updateBeginnerBuilderSummary();
+        });
+        connect(applyPreset, &QPushButton::clicked, this, [this]{ applySelectedBeginnerPreset(); });
+        connect(addEffect, &QPushButton::clicked, this, [this, addEffect]{ showAddBeginnerEffectMenu(addEffect); });
+        connect(removeEffect, &QPushButton::clicked, this, [this]{ removeSelectedBeginnerEffect(); });
+        connect(moveUp, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(-1); });
+        connect(moveDown, &QPushButton::clicked, this, [this]{ moveSelectedBeginnerEffect(1); });
+        connect(beginnerEffectList_, &QListWidget::currentRowChanged, this, [this]{ rebuildBeginnerEffectParameters(); });
+        connect(beginnerEffectList_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item)
+        {
+            if(beginnerRefreshingUi_ || !item) return;
+            const int index = beginnerEffectIndexById(item->data(Qt::UserRole).toString());
+            if(index < 0) return;
+            const bool enabled = item->checkState() == Qt::Checked;
+            if(beginnerProject_.effects[index].enabled == enabled) return;
+            beginnerProject_.effects[index].enabled = enabled;
+            markBeginnerProjectModified();
+            updateBeginnerBuilderSummary();
+            applyBeginnerProjectToEditor(false);
+        });
+        connect(viewCode, &QPushButton::clicked, this, [this]
+        {
+            applyBeginnerProjectToEditor(false);
+            setUiExperienceMode(false);
+            statusBar()->showMessage("Showing the HLSL generated by Beginner Shader Builder. Your beginner project remains editable.", 4500);
+        });
+        connect(exportButton, &QPushButton::clicked, this, [this]
+        {
+            applyBeginnerProjectToEditor(true);
+            exportToBO3();
+        });
+
+        return panel;
+    }
+
+
     void buildUi()
     {
         setDockNestingEnabled(true);
@@ -13196,7 +14210,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
 
         auto* fileMenu = menuBar()->addMenu("&File");
-        auto* openAction = fileMenu->addAction("Open Shader...");
+        auto* newBeginnerAction = fileMenu->addAction("New Beginner Shader...");
+        auto* openAction = fileMenu->addAction("Open...");
         auto* newExampleMenu = fileMenu->addMenu("New Example");
         auto* examplePostFxAction = newExampleMenu->addAction("BO3 PostFX Shader");
         auto* exampleMaterialAction = newExampleMenu->addAction("BO3 Material Shader");
@@ -13308,11 +14323,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         auto* sourceButton = new QToolButton();
         sourceButton->setDefaultAction(sourceAction);
-        sourceButton->setText("Load Source");
+        sourceButton->setText("Preview Image");
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         sourceButton->setMinimumWidth(104);
         sourceButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-        sourceButton->setToolTip("Load the source image used by frameBuffer / t0.");
+        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects.");
         toolbar->addWidget(sourceButton);
         auto* depthButton = new QToolButton();
         depthButton->setDefaultAction(depthAction);
@@ -13372,6 +14387,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         compileStatusBadge_->setMinimumWidth(132);
         compileStatusBadge_->setAlignment(Qt::AlignCenter);
         toolbar->addWidget(compileStatusBadge_);
+        advancedOnlyWidgets_.append(toolbar->widgetForAction(reloadAction));
+        advancedOnlyWidgets_.append(toolbar->widgetForAction(compileAction));
+        advancedOnlyWidgets_.append(glslToolbarButton);
+        advancedOnlyWidgets_.append(depthButton);
 
         // Controls that used to occupy the second toolbar now live in a vertical
         // Preview Settings inspector. This preserves all functionality while making
@@ -13436,13 +14455,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         includeRootLabel_ = new QLabel("Includes: automatic");
         includeRootLabel_->setWordWrap(true);
         includeRootLabel_->setToolTip("Local shader folder + nearby BO3 folders + bundled compatibility headers are searched automatically.");
+        connect(newBeginnerAction, &QAction::triggered, this, [this]{ newBeginnerProjectDialog(); });
         connect(openAction, &QAction::triggered, this, [this]{ openShaderDialog(); });
         connect(examplePostFxAction, &QAction::triggered, this, [this]{ openBundledExample("sample_bo3_postfx.hlsl"); });
         connect(exampleMaterialAction, &QAction::triggered, this, [this]{ openBundledExample("sample_bo3_material.hlsl"); });
         connect(exampleSkyAction, &QAction::triggered, this, [this]{ openBundledExample("sample_bo3_skybox.hlsl"); });
         connect(exampleHlslAction, &QAction::triggered, this, [this]{ openBundledExample("sample_generic_hlsl.hlsl"); });
-        connect(saveAction, &QAction::triggered, this, [this]{ saveShader(); });
-        connect(saveAsAction, &QAction::triggered, this, [this]{ saveShaderAs(); });
+        connect(saveAction, &QAction::triggered, this, [this]{ saveCurrentDocument(); });
+        connect(saveAsAction, &QAction::triggered, this, [this]{ saveCurrentDocumentAs(); });
         connect(reloadAction, &QAction::triggered, this, [this]{ reloadShader(); });
         connect(compileAction, &QAction::triggered, this, [this]{ compileEditor(); });
         connect(previewAction, &QAction::triggered, this, [this]{ compileEditor(); });
@@ -13514,7 +14534,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         editorLayout->addLayout(editorHeaderRow);
         editor_->setObjectName("shaderEditor");
         editorLayout->addWidget(editor_, 1);
-        setCentralWidget(editorPanel);
+
+        // Beginner mode is now a true no-code authoring surface rather than a
+        // trimmed HLSL editor. Advanced mode keeps the original code editor.
+        authoringStack_ = new QStackedWidget(this);
+        beginnerBuilderPanel_ = buildBeginnerBuilderPanel();
+        advancedEditorPage_ = editorPanel;
+        authoringStack_->addWidget(beginnerBuilderPanel_);
+        authoringStack_->addWidget(advancedEditorPage_);
+        setCentralWidget(authoringStack_);
 
         connect(findEdit_, &QLineEdit::textChanged, this, [this]{ rebuildSearchHighlights(true); });
         connect(findEdit_, &QLineEdit::returnPressed, this, [this]{ findNext(false); });
@@ -15142,6 +16170,45 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     void setUiExperienceMode(bool beginner, bool persist = true)
     {
+        // Never let a mode switch destroy work. Beginner projects are the source
+        // of truth for generated HLSL, so manual Advanced edits cannot be mapped
+        // back into sliders/effects. Offer to save those edits before returning.
+        if(beginner && persist)
+        {
+            if(beginnerProjectActive_ && modified_ && editor_ &&
+               editor_->toPlainText() != beginnerGeneratedHlsl_)
+            {
+                const auto answer = QMessageBox::question(
+                    this, "Return to Beginner Builder",
+                    "The generated HLSL has manual edits that the Beginner Builder cannot represent.\n\n"
+                    "Save a separate HLSL copy before returning to the visual project?",
+                    QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+                if(answer == QMessageBox::Cancel)
+                {
+                    setUiExperienceMode(beginnerUiMode_, false);
+                    return;
+                }
+                if(answer == QMessageBox::Save)
+                {
+                    if(!saveShaderAs())
+                    {
+                        setUiExperienceMode(beginnerUiMode_, false);
+                        return;
+                    }
+                    // Saving is explicitly a detached code copy; the visual
+                    // project remains the active Beginner document.
+                    shaderPath_.clear();
+                }
+                // Recreate the canonical generated HLSL from the visual project.
+                applyBeginnerProjectToEditor(false);
+            }
+            else if(!beginnerProjectActive_ && modified_ && !maybeSave())
+            {
+                setUiExperienceMode(beginnerUiMode_, false);
+                return;
+            }
+        }
+
         beginnerUiMode_ = beginner;
 
         if(beginnerModeButton_)
@@ -15163,6 +16230,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             QSignalBlocker blocker(uiAdvancedModeAction_);
             uiAdvancedModeAction_->setChecked(!beginner);
+        }
+
+        if(authoringStack_)
+        {
+            if(beginner && beginnerBuilderPanel_)
+                authoringStack_->setCurrentWidget(beginnerBuilderPanel_);
+            else if(!beginner && advancedEditorPage_)
+                authoringStack_->setCurrentWidget(advancedEditorPage_);
         }
 
         // The inspector is an owned top-level tool window rather than a normal
@@ -15217,20 +16292,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 previewSettingsOverlayHost_->updateGeometry();
         }
 
-        // Beginner mode removes the two most specialist bottom tabs while keeping
-        // Console, Inputs, Parameters, Material Textures and Performance
-        // available. Advanced mode restores the complete authoring/debug surface.
+        // Beginner mode is intentionally no-code: the Builder and Preview own the
+        // window. Technical/diagnostic docks remain available from View and can
+        // still be raised automatically on a real compile failure, but they do not
+        // compete with the beginner workflow by default.
         if(beginner)
         {
-            if(sceneDock_) sceneDock_->hide();
-            if(scriptDock_) scriptDock_->hide();
+            for(QDockWidget* dock : {outputDock_, sourceValuesDock_, shaderParamsDock_, materialDock_,
+                                     performanceDock_, sceneDock_, scriptDock_})
+                if(dock) dock->hide();
         }
         else if(persist && (!previewMaxButton_ || !previewMaxButton_->isChecked()))
         {
-            // A deliberate switch to Advanced exposes the specialist tabs. When
-            // restoring a saved workspace (persist=false), preserve its visibility.
-            if(sceneDock_) sceneDock_->show();
-            if(scriptDock_) scriptDock_->show();
+            // A deliberate switch to Advanced restores the complete authoring
+            // surface. Workspace restoration (persist=false) keeps saved state.
+            for(QDockWidget* dock : {outputDock_, sourceValuesDock_, shaderParamsDock_, materialDock_,
+                                     performanceDock_, sceneDock_, scriptDock_})
+                if(dock) dock->show();
+            if(outputDock_) outputDock_->raise();
         }
 
         if(previewSettingsToggleButton_ && previewSettingsScroll_ &&
@@ -15254,11 +16333,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             }
         }
 
+        if(beginner && persist && !beginnerProjectActive_)
+        {
+            startBeginnerProject(beginner::Target::PostFx, true);
+        }
         if(beginner && detectedPreviewModeValid_ && selectedPreviewMode() != detectedPreviewMode_)
             selectPreviewMode(detectedPreviewMode_);
         updatePreviewModeInspector();
         updateGBufferUi();
         refreshPostFxRuntimeUi();
+        updateTitle();
         if(persist)
         {
             QSettings settings("OpenAI", "BO3HLSLPreviewer");
@@ -15483,7 +16567,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             connect(s, &QShortcut::activated, this, std::move(fn));
         };
         add("Open Shader", [this]{ openShaderDialog(); });
-        add("Save Shader", [this]{ saveShader(); });
+        add("Save Shader", [this]{ saveCurrentDocument(); });
         add("Compile Shader", [this]{ compileEditor(); });
         add("Compile Shader (F5)", [this]{ compileEditor(); });
         add("Find", [this]{ showFindBar(); });
@@ -15730,18 +16814,35 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     bool maybeSave()
     {
-        if (!modified_) return true;
-        const auto answer = QMessageBox::question(this, "Unsaved shader", "Save changes to the current shader?", QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
-        if (answer == QMessageBox::Cancel) return false;
-        if (answer == QMessageBox::Save) return saveShader();
+        if(beginnerProjectActive_ && beginnerProjectModified_)
+        {
+            const auto answer = QMessageBox::question(
+                this, "Unsaved beginner project",
+                QString("Save changes to '%1'?").arg(beginnerProject_.name),
+                QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+            if(answer == QMessageBox::Cancel) return false;
+            if(answer == QMessageBox::Save && !saveBeginnerProject()) return false;
+            if(answer == QMessageBox::Discard) beginnerProjectModified_ = false;
+        }
+
+        if(!modified_) return true;
+        const auto answer = QMessageBox::question(this, "Unsaved shader", "Save changes to the current HLSL shader?", QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+        if(answer == QMessageBox::Cancel) return false;
+        if(answer == QMessageBox::Save) return saveShader();
         return true;
     }
 
     void openShaderDialog()
     {
-        if (!maybeSave()) return;
-        const QString path = QFileDialog::getOpenFileName(this, "Open HLSL shader", currentDirectory(), "HLSL shaders (*.hlsl *.hlsli *.h);;All files (*.*)");
-        if (!path.isEmpty()) openShader(path);
+        if(!maybeSave()) return;
+        const QString path = QFileDialog::getOpenFileName(
+            this, "Open Shader or Beginner Project", currentDirectory(),
+            "BO3 Shader Studio projects (*.bo3shader);;HLSL shaders (*.hlsl *.hlsli *.h);;All files (*.*)");
+        if(path.isEmpty()) return;
+        if(QFileInfo(path).suffix().compare("bo3shader", Qt::CaseInsensitive) == 0)
+            openBeginnerProject(path);
+        else
+            openShader(path);
     }
 
     void openShader(const QString& path, bool preserveEditorView = false)
@@ -15753,6 +16854,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return;
         }
         const CodeEditor::ViewState previousView = editor_->captureViewState();
+        beginnerProjectActive_ = false;
+        beginnerProjectModified_ = false;
+        beginnerProjectPath_.clear();
+        beginnerGeneratedHlsl_.clear();
+        if(beginnerUiMode_) setUiExperienceMode(false);
         loadingText_ = true;
         editor_->setPlainText(QString::fromUtf8(file.readAll()));
         editor_->document()->setModified(false);
@@ -16962,6 +18068,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 loadCustomModelFromPath(info.absoluteFilePath());
                 return true;
             }
+            if (suffix == "bo3shader")
+            {
+                if(maybeSave()) openBeginnerProject(info.absoluteFilePath());
+                return true;
+            }
             if (suffix == "hlsl" || suffix == "hlsli" || suffix == "h")
             {
                 if (maybeSave()) openShader(info.absoluteFilePath());
@@ -17051,7 +18162,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     QString currentDirectory() const
     {
-        if (!shaderPath_.isEmpty()) return QFileInfo(shaderPath_).absolutePath();
+        if(beginnerProjectActive_ && !beginnerProjectPath_.isEmpty())
+            return QFileInfo(beginnerProjectPath_).absolutePath();
+        if(!shaderPath_.isEmpty()) return QFileInfo(shaderPath_).absolutePath();
         return QDir::currentPath();
     }
 
@@ -17196,11 +18309,41 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     void updateTitle()
     {
-        QString name = shaderPath_.isEmpty() ? "Untitled" : QFileInfo(shaderPath_).fileName();
+        if(beginnerProjectActive_ && beginnerUiMode_)
+        {
+            const QString name = beginnerProjectPath_.isEmpty()
+                ? beginnerProject_.name
+                : QFileInfo(beginnerProjectPath_).fileName();
+            setWindowTitle(QString("BO3 Shader Studio %1 - %2%3")
+                .arg(displayVersion_, name, beginnerProjectModified_ ? " *" : ""));
+            return;
+        }
+        QString name;
+        if(!shaderPath_.isEmpty()) name = QFileInfo(shaderPath_).fileName();
+        else if(beginnerProjectActive_) name = beginnerProject_.name + " — Generated HLSL";
+        else name = "Untitled";
         setWindowTitle(QString("BO3 Shader Studio %1 - %2%3").arg(displayVersion_).arg(name).arg(modified_ ? " *" : ""));
     }
 
     CodeEditor* editor_ = new CodeEditor();
+    QStackedWidget* authoringStack_ = nullptr;
+    QWidget* beginnerBuilderPanel_ = nullptr;
+    QWidget* advancedEditorPage_ = nullptr;
+    QToolButton* beginnerTargetButtons_[3]{};
+    QLineEdit* beginnerProjectNameEdit_ = nullptr;
+    QComboBox* beginnerPresetCombo_ = nullptr;
+    QListWidget* beginnerEffectList_ = nullptr;
+    QVBoxLayout* beginnerBaseAppearanceLayout_ = nullptr;
+    QVBoxLayout* beginnerEffectParamsLayout_ = nullptr;
+    QLabel* beginnerCompatibilityLabel_ = nullptr;
+    QLabel* beginnerSummaryLabel_ = nullptr;
+    QLabel* beginnerTargetDescription_ = nullptr;
+    beginner::Project beginnerProject_;
+    QString beginnerProjectPath_;
+    QString beginnerGeneratedHlsl_;
+    bool beginnerProjectActive_ = false;
+    bool beginnerProjectModified_ = false;
+    bool beginnerRefreshingUi_ = false;
     D3DPreviewWidget* preview_ = nullptr;
     QPlainTextEdit* compilerOutput_ = nullptr;
     QString compilerOutputFullText_;
