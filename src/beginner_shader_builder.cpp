@@ -325,30 +325,32 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString threshold = floatLiteral(parameterFloat(effect, *definition, "depth_threshold"));
             const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
             const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail_edges"));
-            out += QString("    // %1 - BO3 float-Z diagonal finite differences + optional scene-detail edges\n"
-                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
-                           "    float %2_halfFloor = floor(%3 * 0.5);\n"
-                           "    float %2_halfCeil = ceil(%3 * 0.5);\n"
-                           "    float2 %2_blUv = saturate(uv - %2_texel * %2_halfFloor);\n"
-                           "    float2 %2_trUv = saturate(uv + %2_texel * %2_halfCeil);\n"
-                           "    float2 %2_brUv = saturate(uv + float2(%2_texel.x * %2_halfCeil, -%2_texel.y * %2_halfFloor));\n"
-                           "    float2 %2_tlUv = saturate(uv + float2(-%2_texel.x * %2_halfFloor, %2_texel.y * %2_halfCeil));\n"
-                           "    float %2_d0 = DepthSampler.Sample(bilinearClampler, %2_blUv).r;\n"
-                           "    float %2_d1 = DepthSampler.Sample(bilinearClampler, %2_trUv).r;\n"
-                           "    float %2_d2 = DepthSampler.Sample(bilinearClampler, %2_brUv).r;\n"
-                           "    float %2_d3 = DepthSampler.Sample(bilinearClampler, %2_tlUv).r;\n"
-                           "    float2 %2_dd = float2(%2_d1 - %2_d0, %2_d3 - %2_d2);\n"
-                           "    float %2_depthEdge = length(%2_dd) * 100.0;\n"
-                           "    float %2_relativeThreshold = %4 * max(%2_d0, 0.0001);\n"
-                           "    float %2_edge = step(%2_relativeThreshold, %2_depthEdge);\n"
-                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x * %3, 0.0))).rgb);\n"
-                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y * %3))).rgb);\n"
-                           "    float %2_luma = dot(color, float3(0.299, 0.587, 0.114));\n"
-                           "    float %2_detailEdge = saturate((abs(%2_luma - dot(%2_sceneR, float3(0.299,0.587,0.114))) + abs(%2_luma - dot(%2_sceneU, float3(0.299,0.587,0.114)))) * 7.5);\n"
-                           "    %2_edge = saturate(max(%2_edge, %2_detailEdge * %5));\n"
+            out += QString("    // %1 - BO3 Float-Z silhouette edges with restrained cel shading\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
+                           "    float %2_dCraw = DepthSampler.Sample(bilinearClampler, uv).r;\n"
+                           "    float %2_dC = BO3BeginnerLinearDepth(%2_dCraw);\n"
+                           "    float %2_dL = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x, 0.0))).r);\n"
+                           "    float %2_dR = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r);\n"
+                           "    float %2_dU = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv - float2(0.0, %2_texel.y))).r);\n"
+                           "    float %2_dD = BO3BeginnerLinearDepth(DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r);\n"
+                           "    float %2_depthDelta = max(max(abs(%2_dC-%2_dL), abs(%2_dC-%2_dR)), max(abs(%2_dC-%2_dU), abs(%2_dC-%2_dD)));\n"
+                           "    float %2_depthScale = max(%2_dC * (0.0015 * %4), 0.002);\n"
+                           "    float %2_depthEdge = smoothstep(%2_depthScale, %2_depthScale * 2.4, %2_depthDelta);\n"
+                           "    float3 %2_sceneL = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x,0.0))).rgb);\n"
+                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
+                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(0.0,%2_texel.y))).rgb);\n"
+                           "    float3 %2_sceneD = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,%2_texel.y))).rgb);\n"
+                           "    float3 %2_lumaWeights = float3(0.299,0.587,0.114);\n"
+                           "    float %2_gx = dot(%2_sceneR-%2_sceneL, %2_lumaWeights);\n"
+                           "    float %2_gy = dot(%2_sceneD-%2_sceneU, %2_lumaWeights);\n"
+                           "    float %2_detailEdge = smoothstep(0.055, 0.16, length(float2(%2_gx,%2_gy))) * %5;\n"
+                           "    float %2_edge = saturate(max(%2_depthEdge, %2_detailEdge));\n"
                            "    float %2_steps = max(2.0, round(%6));\n"
-                           "    float3 %2_toon = floor(saturate(color) * (%2_steps - 1.0) + 0.5) / (%2_steps - 1.0);\n"
-                           "    color = lerp(%2_toon, %7, saturate(%2_edge * %8));\n")
+                           "    float %2_luma = max(dot(color, %2_lumaWeights), 0.0001);\n"
+                           "    float %2_qLuma = floor(saturate(%2_luma) * (%2_steps - 1.0) + 0.5) / (%2_steps - 1.0);\n"
+                           "    float3 %2_toon = color * (%2_qLuma / %2_luma);\n"
+                           "    float3 %2_cel = lerp(color, %2_toon, 0.22);\n"
+                           "    color = lerp(%2_cel, %7, saturate(%2_edge * %8));\n")
                 .arg(definition->name, tag, thickness, threshold, detail, levels, colorLiteral(outlineColor), strength);
         }
         else if(effect.typeId == "ambient_occlusion" && project.target == Target::PostFx && hasUv)
@@ -356,18 +358,25 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
             const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
             const QString bias = floatLiteral(parameterFloat(effect, *definition, "bias"));
-            out += QString("    // %1\n"
-                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * %3;\n"
-                           "    float %2_depthC = DepthSampler.Sample(bilinearClampler, uv).r;\n"
+            out += QString("    // %1 - compact Float-Z SSAO/contact shading\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
+                           "    float %2_rawC = DepthSampler.Sample(bilinearClampler, uv).r;\n"
+                           "    float %2_depthC = BO3BeginnerLinearDepth(%2_rawC);\n"
                            "    float %2_occ = 0.0;\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(-%2_texel.x, 0.0))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, -%2_texel.y))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + %2_texel)).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv - %2_texel)).r) - %4);\n"
-                           "    %2_occ = saturate(%2_occ * 0.55);\n"
-                           "    color *= 1.0 - %2_occ * %5;\n")
+                           "    float %2_weight = 0.0;\n"
+                           "    float2 %2_dirs[8] = { float2(1,0), float2(-1,0), float2(0,1), float2(0,-1), float2(0.707,0.707), float2(-0.707,0.707), float2(0.707,-0.707), float2(-0.707,-0.707) };\n"
+                           "    [unroll] for(int %2_i=0; %2_i<8; ++%2_i) {\n"
+                           "        float2 %2_suv = saturate(uv + %2_dirs[%2_i] * %2_texel);\n"
+                           "        float %2_rawS = DepthSampler.Sample(bilinearClampler, %2_suv).r;\n"
+                           "        float %2_depthS = BO3BeginnerLinearDepth(%2_rawS);\n"
+                           "        float %2_delta = %2_depthC - %2_depthS;\n"
+                           "        float %2_range = max(%2_depthC * 0.08, 0.05);\n"
+                           "        float %2_front = saturate((%2_delta - %4 * %2_range) / %2_range);\n"
+                           "        float %2_rangeMask = 1.0 - smoothstep(%2_range, %2_range * 4.0, abs(%2_delta));\n"
+                           "        %2_occ += %2_front * %2_rangeMask; %2_weight += 1.0;\n"
+                           "    }\n"
+                           "    %2_occ = pow(saturate(%2_occ / max(%2_weight,1.0)), 0.72);\n"
+                           "    color *= 1.0 - %2_occ * (%5 * 1.35);\n")
                 .arg(definition->name, tag, radius, bias, amount);
         }
         else if(effect.typeId == "depth_fog" && project.target == Target::PostFx && hasUv)
@@ -376,9 +385,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString start = floatLiteral(parameterFloat(effect, *definition, "start"));
             const QString end = floatLiteral(parameterFloat(effect, *definition, "end"));
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            out += QString("    // %1\n"
-                           "    float %2_depth = DepthSampler.Sample(bilinearClampler, uv).r;\n"
-                           "    float %2_fog = smoothstep(%3, max(%3 + 0.001, %4), %2_depth) * %5;\n"
+            out += QString("    // %1 - fog from decoded BO3 Float-Z distance, not screen position\n"
+                           "    float %2_rawDepth = DepthSampler.Sample(bilinearClampler, uv).r;\n"
+                           "    float %2_distance01 = BO3BeginnerDepth01(%2_rawDepth);\n"
+                           "    float %2_fog = smoothstep(%3, max(%3 + 0.001, %4), %2_distance01) * %5;\n"
                            "    color = lerp(color, %6, saturate(%2_fog));\n")
                 .arg(definition->name, tag, start, end, strength, colorLiteral(fogColor));
         }
@@ -872,6 +882,26 @@ float BO3BeginnerHash31(float3 p)
 )HLSL");
     }
 
+    const bool needsSceneDepth = project.target == Target::PostFx &&
+                                 (projectUsesEffect(project, "cartoon_outlines") ||
+                                  projectUsesEffect(project, "ambient_occlusion") ||
+                                  projectUsesEffect(project, "depth_fog"));
+    if(needsSceneDepth)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerLinearDepth(float rawDepth)
+{
+    return max(zNear.x, 0.001) / FloatZ_Process(rawDepth);
+}
+
+float BO3BeginnerDepth01(float rawDepth)
+{
+    float d = BO3BeginnerLinearDepth(rawDepth);
+    return saturate(log2(1.0 + d) / 12.0);
+}
+)HLSL");
+    }
+
     if(needsHash11)
     {
         out += QStringLiteral(R"HLSL(
@@ -1290,21 +1320,21 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("cartoon_outlines", "Cartoon Outlines", "Create cleaner cel-style line work from BO3 scene depth, with optional image-detail edges and toon color bands.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("color", "Outline Color", "Color of the cartoon line work.", "#090909"),
-                   FloatParam("strength", "Outline Strength", "How strongly the detected lines replace the image.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("strength", "Outline Strength", "How strongly the detected lines are drawn over the scene.", 0.0, 1.0, 0.01, 0.72),
                    FloatParam("thickness", "Line Width", "Width of the diagonal depth samples in screen pixels.", 1.0, 6.0, 0.1, 2.0),
                    FloatParam("depth_threshold", "Depth Threshold", "Higher values require a stronger depth change before drawing a line.", 0.5, 12.0, 0.1, 5.0),
-                   FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.18),
-                   FloatParam("levels", "Toon Levels", "How many color bands remain in the cel-shaded scene.", 2.0, 10.0, 1.0, 5.0)}),
+                   FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("levels", "Toon Levels", "How many brightness bands remain in the subtle cel-shaded scene.", 2.0, 12.0, 1.0, 7.0)}),
         EffectDef("ambient_occlusion", "Ambient Occlusion", "Darken places where nearby depth values crowd together, adding extra scene depth.", "Depth & Scene",
                   {Target::PostFx},
-                  {FloatParam("amount", "Strength", "How strongly the shading darkens occluded areas.", 0.0, 1.0, 0.01, 0.45),
-                   FloatParam("radius", "Radius", "How far around each pixel to compare depth.", 0.5, 8.0, 0.05, 2.0),
-                   FloatParam("bias", "Bias", "Ignore tiny depth differences below this amount.", 0.0, 0.20, 0.0025, 0.01)}),
+                  {FloatParam("amount", "Strength", "How strongly contact and corner shading is applied.", 0.0, 1.0, 0.01, 0.55),
+                   FloatParam("radius", "Radius", "How far around each pixel to compare scene depth.", 0.5, 12.0, 0.05, 3.0),
+                   FloatParam("bias", "Bias", "Ignore tiny depth differences to reduce false shadows.", 0.0, 0.35, 0.0025, 0.06)}),
         EffectDef("depth_fog", "Depth Fog", "Fade distant parts of the scene into a chosen color using scene depth.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("color", "Fog Color", "Color of the depth fog.", "#7CA2D9"),
-                   FloatParam("start", "Start Depth", "Depth where fog begins.", 0.0, 1.0, 0.01, 0.35),
-                   FloatParam("end", "End Depth", "Depth where fog reaches full strength.", 0.0, 1.0, 0.01, 0.90),
+                   FloatParam("start", "Near Fade", "Normalized decoded distance where fog begins.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("end", "Far Fade", "Normalized decoded distance where fog reaches full strength.", 0.0, 1.0, 0.01, 0.72),
                    FloatParam("strength", "Strength", "Maximum amount of fog applied.", 0.0, 1.0, 0.01, 0.65)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},

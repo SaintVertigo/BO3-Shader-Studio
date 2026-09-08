@@ -1023,7 +1023,20 @@ public:
 
         liveCompileTimer_.setSingleShot(true);
         liveCompileTimer_.setInterval(550);
-        connect(&liveCompileTimer_, &QTimer::timeout, this, [this]{ compileEditor(); });
+        connect(&liveCompileTimer_, &QTimer::timeout, this, [this]
+        {
+            if(beginnerUiMode_ && beginnerProjectActive_ && !beginnerPendingHlsl_.isEmpty() && editor_)
+            {
+                const CodeEditor::ViewState view = editor_->captureViewState();
+                loadingText_ = true;
+                editor_->setPlainText(beginnerPendingHlsl_);
+                editor_->document()->setModified(false);
+                loadingText_ = false;
+                editor_->restoreViewState(view);
+                beginnerPendingHlsl_.clear();
+            }
+            compileEditor();
+        });
 
         sourceValuesRefreshTimer_.setSingleShot(true);
         sourceValuesRefreshTimer_.setInterval(220);
@@ -14002,6 +14015,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             beginnerPreviewImageToolbarAction_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::PostFx);
         else if(beginnerPreviewImageToolbarButton_)
             beginnerPreviewImageToolbarButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::PostFx);
+        if(beginnerDepthToolbarAction_)
+        {
+            bool usesDepth = false;
+            if(beginnerProject_.target == beginner::Target::PostFx)
+            {
+                for(const beginner::Effect& effect : beginnerProject_.effects)
+                {
+                    if(!effect.enabled) continue;
+                    if(effect.typeId == "cartoon_outlines" || effect.typeId == "ambient_occlusion" || effect.typeId == "depth_fog")
+                    {
+                        usesDepth = true;
+                        break;
+                    }
+                }
+            }
+            beginnerDepthToolbarAction_->setVisible(!beginnerUiMode_ || usesDepth);
+        }
         if(loadModelQuickButton_)
             loadModelQuickButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::Material);
     }
@@ -14357,13 +14387,26 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!beginnerProjectActive_ || !editor_) return;
         const QString generated = beginner::generateHlsl(beginnerProject_);
         beginnerGeneratedHlsl_ = generated;
-        const CodeEditor::ViewState view = editor_->captureViewState();
-        loadingText_ = true;
-        editor_->setPlainText(generated);
-        editor_->document()->setModified(false);
-        loadingText_ = false;
-        editor_->restoreViewState(view);
-        modified_ = false;
+
+        // Slider drags should stay responsive. In Beginner mode, defer the
+        // expensive editor document replacement until the preview compile tick
+        // instead of rebuilding the hidden code editor for every mouse move.
+        if(immediateCompile || !beginnerUiMode_)
+        {
+            const CodeEditor::ViewState view = editor_->captureViewState();
+            loadingText_ = true;
+            editor_->setPlainText(generated);
+            editor_->document()->setModified(false);
+            loadingText_ = false;
+            editor_->restoreViewState(view);
+            beginnerPendingHlsl_.clear();
+            modified_ = false;
+        }
+        else
+        {
+            beginnerPendingHlsl_ = generated;
+            modified_ = false;
+        }
 
         const PreviewModeDetection detection = detectPreviewMode(generated);
         setDetectedPreviewMode(detection, true);
@@ -14393,16 +14436,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
         {
-            // Beginner mode uses a throttle rather than the editor's debounce.
-            // Do not restart an active timer on every slider tick: that old
-            // behavior meant the user had to stop dragging before the preview
-            // could ever compile. This caps generated-shader rebuilds at about
-            // 11 Hz while still updating continuously during a drag.
             if(beginnerUiMode_)
             {
+                // Do not restart an active timer. This is a throttle, not a
+                // debounce: the preview keeps refreshing during a drag while
+                // the slider itself remains smooth.
                 if(!liveCompileTimer_.isActive())
                 {
-                    liveCompileTimer_.setInterval(90);
+                    liveCompileTimer_.setInterval(60);
                     liveCompileTimer_.start();
                 }
             }
@@ -15068,10 +15109,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         presetHelp->setObjectName("CompactHelp");
         presetHelp->setWordWrap(true);
         projectLayout->addWidget(presetHelp);
-        beginnerPresetCardsLayout_ = new QGridLayout();
-        beginnerPresetCardsLayout_->setContentsMargins(0, 0, 0, 0);
+        auto* presetScroll = new QScrollArea();
+        presetScroll->setWidgetResizable(true);
+        presetScroll->setFrameShape(QFrame::NoFrame);
+        presetScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        presetScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        presetScroll->setMinimumHeight(118);
+        presetScroll->setMaximumHeight(250);
+        presetScroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto* presetContainer = new QWidget();
+        beginnerPresetCardsLayout_ = new QGridLayout(presetContainer);
+        beginnerPresetCardsLayout_->setContentsMargins(0, 0, 2, 0);
         beginnerPresetCardsLayout_->setSpacing(6);
-        projectLayout->addLayout(beginnerPresetCardsLayout_);
+        presetScroll->setWidget(presetContainer);
+        projectLayout->addWidget(presetScroll);
         leftLayout->addWidget(projectGroup);
 
         beginnerBaseAppearanceGroup_ = new QGroupBox("Base Appearance");
@@ -15353,7 +15404,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         depthButton->setMinimumWidth(126);
         depthButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
         depthButton->setToolTip("Load the depth texture used by DepthSampler / t1.");
-        auto* depthToolbarAction = toolbar->addWidget(depthButton);
+        beginnerDepthToolbarAction_ = toolbar->addWidget(depthButton);
 
         auto* previewAction = toolbar->addAction("Preview");
         previewAction->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
@@ -15415,7 +15466,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         compileStatusBadge_->setAlignment(Qt::AlignCenter);
         auto* compileStatusToolbarAction = toolbar->addWidget(compileStatusBadge_);
         advancedOnlyToolbarActions_ = {
-            depthToolbarAction,
             pauseToolbarAction,
             liveToolbarAction,
             toolbarSpacerBAction,
@@ -19393,6 +19443,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     beginner::Project beginnerProject_;
     QString beginnerProjectPath_;
     QString beginnerGeneratedHlsl_;
+    QString beginnerPendingHlsl_;
     bool beginnerProjectActive_ = false;
     bool beginnerProjectModified_ = false;
     bool beginnerRefreshingUi_ = false;
@@ -19433,6 +19484,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QToolButton* advancedModeButton_ = nullptr;
     QToolButton* beginnerPreviewImageToolbarButton_ = nullptr;
     QAction* beginnerPreviewImageToolbarAction_ = nullptr;
+    QAction* beginnerDepthToolbarAction_ = nullptr;
     QAction* uiBeginnerModeAction_ = nullptr;
     QAction* uiAdvancedModeAction_ = nullptr;
     QLabel* compileStatusBadge_ = nullptr;
