@@ -72,13 +72,21 @@ if not exist "dist\BO3HLSLPreviewer.exe" (
     exit /b 1
 )
 
-where windeployqt.exe >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: windeployqt.exe is not on PATH.
-    exit /b 1
+if /I "%BO3_CI_FAST%"=="1" if /I "%BO3_LEAN_UPDATE%"=="1" (
+    rem Lean automatic tester packages never resend Qt runtime DLLs. Qt's bin
+    rem directory is already on PATH from install-qt-action, so the regression
+    rem executable can still load Qt directly on the runner. Avoid spending time
+    rem copying a full deployment tree that package_github_release.ps1 discards.
+    echo Lean tester build: skipping windeployqt ^(Qt runtime is already on runner PATH and is not part of the lean payload^).
+) else (
+    where windeployqt.exe >nul 2>nul
+    if errorlevel 1 (
+        echo ERROR: windeployqt.exe is not on PATH.
+        exit /b 1
+    )
+    windeployqt.exe --release --no-translations --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"
+    if errorlevel 1 exit /b 1
 )
-windeployqt.exe --release --no-translations --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"
-if errorlevel 1 exit /b 1
 
 if exist bo3_compat xcopy /E /I /Y /Q bo3_compat dist\bo3_compat >nul
 if exist shaders xcopy /E /I /Y /Q shaders dist\shaders >nul

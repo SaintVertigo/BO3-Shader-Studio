@@ -146,7 +146,9 @@ jobs:
                 if ($normalized -eq '.github/workflows/release.yml' -or
                     $normalized -match '^tools/' -or
                     $normalized -eq 'version.json') {
-                  if ($normalized -eq '.github/workflows/release.yml') { $leanUpdate = $false }
+                  # CI/release plumbing does not change the application's Qt/runtime
+                  # dependency set by itself. BO3HLSLPreviewer.pro remains the
+                  # authoritative trigger for a full runtime payload.
                   continue
                 }
 
@@ -332,42 +334,78 @@ jobs:
             $fastArgs += '--regression-fast'
           }
 
+          # One intentionally enormous macro-library fixture takes ~135 seconds
+          # in the converter itself, even when FXC is skipped. Automatic Tester
+          # pushes defer any fixture explicitly marked BO3_FAST_REGRESSION_DEFER_CASE
+          # before the executable enumerates the corpus. Manual/full CI never does
+          # this and still validates the complete stress fixture end-to-end.
+          $deferredFixtures = @()
+          if ($env:BO3_FAST_TESTER -eq '1') {
+            $corpusDir = Join-Path $PWD 'dist\tests\glsl_converter'
+            if (Test-Path -LiteralPath $corpusDir) {
+              $candidateExtensions = @('.glsl', '.frag', '.fs', '.shader')
+              foreach ($fixture in Get-ChildItem -LiteralPath $corpusDir -File) {
+                if ($candidateExtensions -notcontains $fixture.Extension.ToLowerInvariant()) { continue }
+                $header = (Get-Content -LiteralPath $fixture.FullName -TotalCount 12 -ErrorAction Stop) -join "`n"
+                if ($header -notmatch 'BO3_FAST_REGRESSION_DEFER_CASE') { continue }
+
+                $deferredPath = $fixture.FullName + '.bo3-ci-deferred'
+                Move-Item -LiteralPath $fixture.FullName -Destination $deferredPath -Force
+                $deferredFixtures += [pscustomobject]@{
+                  Original = $fixture.FullName
+                  Deferred = $deferredPath
+                  Name = $fixture.Name
+                }
+                Write-Host "Fast Tester deferred oversized GLSL case to full/manual CI: $($fixture.Name)"
+              }
+            }
+          }
+
           Write-Host "Running GLSL corpus in $workerCount independent shard process(es)."
-          $jobs = @()
-          for ($i = 0; $i -lt $workerCount; ++$i) {
-            $stdoutPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stdout.txt"
-            $stderrPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stderr.txt"
-            $arguments = @('--regression-all') + $fastArgs + @('--regression-shard', "$i/$workerCount")
-            $process = Start-Process -FilePath $exe `
-              -ArgumentList $arguments `
-              -PassThru `
-              -NoNewWindow `
-              -RedirectStandardOutput $stdoutPath `
-              -RedirectStandardError $stderrPath
-            $jobs += [pscustomobject]@{
-              Index = $i
-              Process = $process
-              Stdout = $stdoutPath
-              Stderr = $stderrPath
+          try {
+            $jobs = @()
+            for ($i = 0; $i -lt $workerCount; ++$i) {
+              $stdoutPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stdout.txt"
+              $stderrPath = Join-Path $env:RUNNER_TEMP "bo3_glsl_regression_$i.stderr.txt"
+              $arguments = @('--regression-all') + $fastArgs + @('--regression-shard', "$i/$workerCount")
+              $process = Start-Process -FilePath $exe `
+                -ArgumentList $arguments `
+                -PassThru `
+                -NoNewWindow `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath
+              $jobs += [pscustomobject]@{
+                Index = $i
+                Process = $process
+                Stdout = $stdoutPath
+                Stderr = $stderrPath
+              }
+            }
+
+            $failed = @()
+            foreach ($job in $jobs) {
+              $job.Process.WaitForExit()
+              Write-Host "----- GLSL shard $($job.Index + 1)/$workerCount -----"
+              if (Test-Path -LiteralPath $job.Stdout) { Get-Content -LiteralPath $job.Stdout }
+              if (Test-Path -LiteralPath $job.Stderr) {
+                $stderrText = Get-Content -LiteralPath $job.Stderr
+                if ($stderrText) { $stderrText | Write-Host }
+              }
+              if ($job.Process.ExitCode -ne 0) {
+                $failed += ($job.Index + 1)
+              }
+            }
+
+            if ($failed.Count -gt 0) {
+              throw "GLSL regression shard(s) failed: $($failed -join ', ')"
             }
           }
-
-          $failed = @()
-          foreach ($job in $jobs) {
-            $job.Process.WaitForExit()
-            Write-Host "----- GLSL shard $($job.Index + 1)/$workerCount -----"
-            if (Test-Path -LiteralPath $job.Stdout) { Get-Content -LiteralPath $job.Stdout }
-            if (Test-Path -LiteralPath $job.Stderr) {
-              $stderrText = Get-Content -LiteralPath $job.Stderr
-              if ($stderrText) { $stderrText | Write-Host }
+          finally {
+            foreach ($fixture in $deferredFixtures) {
+              if (Test-Path -LiteralPath $fixture.Deferred) {
+                Move-Item -LiteralPath $fixture.Deferred -Destination $fixture.Original -Force
+              }
             }
-            if ($job.Process.ExitCode -ne 0) {
-              $failed += ($job.Index + 1)
-            }
-          }
-
-          if ($failed.Count -gt 0) {
-            throw "GLSL regression shard(s) failed: $($failed -join ', ')"
           }
 
       - name: Run Shadertoy regression suite

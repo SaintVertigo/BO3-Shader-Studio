@@ -1,3 +1,4 @@
+// BO3_FAST_REGRESSION_DEFER_CASE: oversized macro stress fixture; automatic Tester CI defers full conversion + FXC to full/manual CI
 // BO3_FAST_REGRESSION_SKIP_FXC: oversized macro stress fixture; full/manual CI still performs FXC O3 validation
 
 vec4 iMouseZwFix(vec4 m,bool NewCoke
