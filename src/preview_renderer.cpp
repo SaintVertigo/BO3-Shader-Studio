@@ -554,7 +554,18 @@ public:
         if (vertexOnlyShader_)
             previewMessage += L"[Preview] Vertex-displacement shader detected: compiled vs_main as vs_5_0 and attached the built-in material/GBuffer pixel shader.\r\n";
         if (explicitMaterialSurface)
+        {
             previewMessage += L"[Preview] Material / Surface marker detected: mesh UV vertex path forced (sky-direction detection disabled).\r\n";
+            if (userSource.find("BO3_PREVIEWER_GLSL_PROJECTION: SEAMLESS_TRIPLANAR_V2") == std::string::npos &&
+                (userSource.find("BO3GLSL_EvaluateMaterialSeamSafe") != std::string::npos ||
+                 userSource.find("BO3GLSL_StabilizeMaterialPoles") != std::string::npos ||
+                 userSource.find("BO3GLSL_PeriodicMaterialUWeight") != std::string::npos))
+            {
+                previewMessage += L"[Preview] WARNING: Legacy converted GLSL Material projection detected. This HLSL still embeds the old UV seam/pole wrapper; reconvert the original GLSL with the current converter to receive SEAMLESS_TRIPLANAR_V2.\r\n";
+            }
+        }
+        if (userSource.find("BO3_PREVIEWER_SKY_SOURCE: IMAGE_SPACE_LATLONG") != std::string::npos)
+            previewMessage += L"[Preview] WARNING: Legacy image-space Sky wrapper detected. Reconvert the original GLSL to replace lat-long seam/pole mapping with IMAGE_SPACE_SEAMLESS_3D.\r\n";
         if (postFxCompile)
         {
             if (postFxPreviewContext_ == PostFxPreviewContext::ToolsgfxMaterial)
@@ -3443,6 +3454,8 @@ struct VS_OUT
     float4 texcoord2 : TEXCOORD2;
     float4 texcoord3 : TEXCOORD3;
     float4 texcoord4 : TEXCOORD4;
+    float4 texcoord5 : TEXCOORD5;
+    float4 texcoord6 : TEXCOORD6;
 };
 
 VS_OUT vs_main(VS_IN i)
@@ -3460,6 +3473,11 @@ VS_OUT vs_main(VS_IN i)
     o.texcoord2 = float4(worldNormal, 1.0);
     o.texcoord3 = float4(worldTangent, tangentHandedness);
     o.texcoord4 = float4(worldBitangent, 1.0);
+    // Raw converted GLSL materials use local/object position for the seamless
+    // closed-surface triplanar projection. Supplying it explicitly avoids any
+    // dependence on UV seams, pole vertices, or world-space object placement.
+    o.texcoord5 = float4(i.position, 1.0);
+    o.texcoord6 = float4(normalize(i.normal), 0.0);
     return o;
 }
 )";
@@ -3601,6 +3619,7 @@ struct VS_OUT
     float3 worldPosition : TEXCOORD5;
     float3 viewDirWorld : TEXCOORD6;
     uint instance : TEXCOORD7;
+    float3 objectNormal : TEXCOORD9;
 };
 
 VS_OUT vs_main(VS_IN input)
@@ -3617,6 +3636,7 @@ VS_OUT vs_main(VS_IN input)
     output.tangent = worldTangent;
     output.biTangent = normalize(cross(worldNormal, worldTangent) * handedness);
     output.objectPosition = input.position;
+    output.objectNormal = normalize(input.normal);
     output.worldPosition = worldPosition.xyz;
     output.viewDirWorld = normalize(previewCameraPos.xyz - worldPosition.xyz);
     output.instance = 0;

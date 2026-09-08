@@ -8380,13 +8380,14 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
 )MAT")
             : QString();
 
-        // Converted GLSL Materials are fundamentally image-space shaders being
-        // projected onto 3D meshes. The wrapper keeps the authored image intact
-        // through the interior, repairs only a narrow repeated-U longitude band,
-        // and gives sphere-like geometry a small longitude-independent polar cap.
-        // That removes both closed-mesh meridian seams and the UV-sphere pole
-        // pinwheel without globally crossfading the shader against a shifted copy.
-        // The virtual fragCoord also stays upright; no V flip is introduced.
+        // Converted GLSL Materials begin as 2D image-space shaders, but a single
+        // lat-long UV chart can never be both seamless and non-singular on a closed
+        // 3D surface. Earlier fixes tried to hide that topological mismatch with
+        // U-edge blending and polar caps; those still left visible meridians or
+        // pinwheels on arbitrary shaders. Closed surfaces now use a direction-space
+        // triplanar projection instead. Plane/Card previews keep their authored UVs.
+        // This removes the longitude branch cut and the north/south singularities
+        // entirely rather than trying to blur them after they appear.
         const QString materialEntry = QStringLiteral(R"MAT(
 float4 BO3GLSL_EvaluateMaterialMainImage(float2 fragCoord)
 {
@@ -8396,117 +8397,111 @@ float4 BO3GLSL_EvaluateMaterialMainImage(float2 fragCoord)
     return c;
 }
 
-float BO3GLSL_PeriodicMaterialUWeight(float u)
+float2 BO3GLSL_MaterialUvToFragCoord(float2 uv)
 {
-    // Quintic smootherstep. It reaches both endpoints with zero slope, which is
-    // what we need when two rasterized sides of a closed-mesh seam meet.
-    u = saturate(u);
-    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+    return saturate(uv) * BO3_GLSL_MATERIAL_RESOLUTION;
 }
 
-float4 BO3GLSL_EvaluateMaterialSeamSafe(float2 uv)
+float4 BO3GLSL_EvaluateMaterialUv(float2 uv)
 {
-    // Keep the authored image untouched over almost the whole surface. Only the
-    // narrow longitude band is repaired. This is materially different from the
-    // older full-interval shifted-image crossfade, which could create a second
-    // visible transition through the middle of strongly non-periodic shaders.
-    float materialU = frac(uv.x);
-    float materialV = uv.y;
-    float2 fragCoord = float2(materialU, materialV) * BO3_GLSL_MATERIAL_RESOLUTION;
-    float4 authoredColor = BO3GLSL_EvaluateMaterialMainImage(fragCoord);
+    return BO3GLSL_EvaluateMaterialMainImage(BO3GLSL_MaterialUvToFragCoord(uv));
+}
 
-    const float BO3_GLSL_LONGITUDE_BLEND = 0.035;
-    float seamDistance = min(materialU, 1.0 - materialU);
-    if(seamDistance < BO3_GLSL_LONGITUDE_BLEND)
+float BO3GLSL_IsFlatMaterialCanvas(const MaterialSurfaceInput input)
+{
+    // Decide from LOCAL geometry, not world axes. Plane/Card surfaces centered on
+    // the object origin have their local normal perpendicular to local position,
+    // while sphere/cube/closed surfaces have a substantial radial component. This
+    // remains correct when the BO3 object is rotated in the world.
+    float3 p = input.objectPosition.xyz;
+    float3 n = input.objectNormal.xyz;
+    float pLenSq = dot(p, p);
+    float nLenSq = dot(n, n);
+    if(nLenSq < 1.0e-10)
+        return 0.0;
+    if(pLenSq < 1.0e-10)
+        return 1.0; // center pixel of a Plane/Card
+
+    float radialAlignment = abs(dot(p * rsqrt(pLenSq), n * rsqrt(nLenSq)));
+    float closedSurface = smoothstep(0.25, 0.45, radialAlignment);
+    return 1.0 - closedSurface;
+}
+
+float2 BO3GLSL_FlatMaterialUv(float2 surfaceUv)
+{
+    // Preserve the authored endpoint at the ordinary 1x scale. If the user has
+    // intentionally tiled/offset outside 0..1, wrap the repeated coordinates.
+    float2 uv = surfaceUv;
+    if(uv.x < 0.0 || uv.x > 1.0) uv.x = frac(uv.x);
+    if(uv.y < 0.0 || uv.y > 1.0) uv.y = frac(uv.y);
+    return saturate(uv);
+}
+
+float3 BO3GLSL_ProjectionWeights(float3 direction)
+{
+    // Use a smooth high-order blend. The weight of an axis reaches zero before
+    // that axis' sign-dependent projection can flip, so no hidden face seam is
+    // introduced at +/-X, +/-Y, or +/-Z.
+    float3 a = abs(direction);
+    float3 w = a * a;
+    w *= w; // fourth power: localized faces without a hard dominant-axis switch
+    float sumW = max(w.x + w.y + w.z, 1.0e-8);
+    return w / sumW;
+}
+
+float4 BO3GLSL_EvaluateMaterialSeamless3D(const MaterialSurfaceInput input)
+{
+    float3 p = input.objectPosition.xyz;
+    float lenSq = dot(p, p);
+    float3 d;
+    if(lenSq > 1.0e-10)
+        d = p * rsqrt(lenSq);
+    else
     {
-        // Use the average of the actual left/right authored edge as the seam
-        // anchor. Both U=0 and U=1 therefore converge to exactly the same color,
-        // and smootherstep makes the first derivative converge to zero too.
-        float2 edge0FragCoord = float2(0.0, materialV) * BO3_GLSL_MATERIAL_RESOLUTION;
-        float2 shiftedFragCoord = float2(BO3_GLSL_MATERIAL_RESOLUTION.x,
-                                        materialV * BO3_GLSL_MATERIAL_RESOLUTION.y);
-        float4 edge0Color = BO3GLSL_EvaluateMaterialMainImage(edge0FragCoord);
-        float4 edge1Color = BO3GLSL_EvaluateMaterialMainImage(shiftedFragCoord);
-        float4 seamColor = 0.5 * (edge0Color + edge1Color);
-        float seamWeight = BO3GLSL_PeriodicMaterialUWeight(
-            seamDistance / BO3_GLSL_LONGITUDE_BLEND);
-        authoredColor = lerp(seamColor, authoredColor, seamWeight);
+        float3 n = input.objectNormal.xyz;
+        float nLenSq = dot(n, n);
+        d = nLenSq > 1.0e-10 ? n * rsqrt(nLenSq) : float3(0.0, 0.0, 1.0);
     }
 
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    return authoredColor;
-}
+    float sx = d.x < 0.0 ? -1.0 : 1.0;
+    float sy = d.y < 0.0 ? -1.0 : 1.0;
+    float sz = d.z < 0.0 ? -1.0 : 1.0;
 
-float BO3GLSL_MaterialSphereFactor(const MaterialSurfaceInput input)
-{
-    // The built-in sphere is centered at the preview origin with unit radius.
-    // Gate polar repair to sphere-like geometry so Plane/Card previews retain
-    // their exact top and bottom image rows. The extra radial-normal test also
-    // keeps ordinary flat/cube faces from being mistaken for a sphere.
-    float3 p = input.worldPosition.xyz;
-    float pLenSq = dot(p, p);
-    float nLenSq = dot(input.normal.xyz, input.normal.xyz);
-    if(pLenSq < 1.0e-8 || nLenSq < 1.0e-8)
-        return 0.0;
+    // Sign-aware triplanar coordinates. Opposite lobes get matching handedness,
+    // while the sign flip for a projection happens exactly where its weight is 0.
+    // No atan2(), longitude wrap, or collapsed latitude coordinate exists here.
+    float2 uvX = float2(d.z * sx, d.y) * 0.5 + 0.5;
+    float2 uvY = float2(d.x * sy, d.z) * 0.5 + 0.5;
+    float2 uvZ = float2(-d.x * sz, d.y) * 0.5 + 0.5;
 
-    float pLen = sqrt(pLenSq);
-    float3 radial = p / pLen;
-    float3 n = input.normal.xyz * rsqrt(nLenSq);
-    float radialMatch = smoothstep(0.9975, 0.9995, abs(dot(radial, n)));
-    float unitRadiusMatch = 1.0 - smoothstep(0.03, 0.12, abs(pLen - 1.0));
-    return saturate(radialMatch * unitRadiusMatch);
-}
-
-float4 BO3GLSL_StabilizeMaterialPoles(float2 uv,
-                                      float4 authoredColor,
-                                      float sphereFactor)
-{
-    // Equirectangular coordinates necessarily collapse every longitude to one
-    // geometric point at V=0/1. If the source is an arbitrary 2D mainImage that
-    // produces the familiar pinwheel/star at a sphere pole. Fade the last few
-    // latitude degrees into a longitude-independent cap sampled just inside the
-    // pole. This preserves the panorama across the rest of the sphere while
-    // removing the singular visual collapse at the cap itself.
-    if(sphereFactor <= 0.001)
-        return authoredColor;
-
-    float materialV = saturate(uv.y);
-    const float BO3_GLSL_POLAR_CAP = 0.060;
-    float poleDistance = min(materialV, 1.0 - materialV);
-    if(poleDistance >= BO3_GLSL_POLAR_CAP)
-        return authoredColor;
-
-    float capV = materialV < 0.5
-        ? BO3_GLSL_POLAR_CAP
-        : 1.0 - BO3_GLSL_POLAR_CAP;
-
-    // Two fixed longitudes give a stable, representative cap color without
-    // multiplying the cost of the source shader everywhere on the sphere.
-    float4 capA = BO3GLSL_EvaluateMaterialSeamSafe(float2(0.25, capV));
-    float4 capB = BO3GLSL_EvaluateMaterialSeamSafe(float2(0.75, capV));
-    float4 capColor = 0.5 * (capA + capB);
-    float authoredWeight = BO3GLSL_PeriodicMaterialUWeight(
-        poleDistance / BO3_GLSL_POLAR_CAP);
-    float poleInfluence = sphereFactor * (1.0 - authoredWeight);
-    return lerp(authoredColor, capColor, saturate(poleInfluence));
+    float3 w = BO3GLSL_ProjectionWeights(d);
+    float4 cx = BO3GLSL_EvaluateMaterialUv(uvX);
+    float4 cy = BO3GLSL_EvaluateMaterialUv(uvY);
+    float4 cz = BO3GLSL_EvaluateMaterialUv(uvZ);
+    return cx * w.x + cy * w.y + cz * w.z;
 }
 
 float4 ps_main(const MaterialSurfaceInput input) : SV_TARGET0
 {
-    // The original 2D shader stays upright. Longitude is made C1-continuous in
-    // a narrow edge band, and sphere-like geometry additionally gets a stable
-    // polar cap so neither the UV seam nor the north/south pinwheel is visible.
     float2 surfaceUv = input.texCoords.xy;
-    float4 fragColor = BO3GLSL_EvaluateMaterialSeamSafe(surfaceUv);
-    float sphereFactor = BO3GLSL_MaterialSphereFactor(input);
-    fragColor = BO3GLSL_StabilizeMaterialPoles(surfaceUv, fragColor, sphereFactor);
-
-    float materialU = frac(surfaceUv.x);
-    float2 fragCoord = float2(materialU, surfaceUv.y) * BO3_GLSL_MATERIAL_RESOLUTION;
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
+    float flatCanvas = BO3GLSL_IsFlatMaterialCanvas(input);
+    float4 fragColor;
+    if(flatCanvas > 0.5)
+    {
+        float2 uv = BO3GLSL_FlatMaterialUv(surfaceUv);
+        fragColor = BO3GLSL_EvaluateMaterialUv(uv);
+        GLSL_FRAGCOORD = float4(BO3GLSL_MaterialUvToFragCoord(uv), 0.0, 1.0);
+    }
+    else
+    {
+        fragColor = BO3GLSL_EvaluateMaterialSeamless3D(input);
+        // mainImage updates GLSL_FRAGCOORD for each projection. No later shader
+        // logic depends on a fictitious lat-long coordinate, so leave the final
+        // projection's value intact rather than reintroducing a seam coordinate.
+    }
 )MAT");
 
-        return QString("// BO3_PREVIEWER_MATERIAL_SURFACE: %1\n").arg(surfaceTag) + resources + QStringLiteral(R"MAT(
+        return QString("// BO3_PREVIEWER_MATERIAL_SURFACE: %1\n// BO3_PREVIEWER_GLSL_PROJECTION: SEAMLESS_TRIPLANAR_V2\n").arg(surfaceTag) + resources + QStringLiteral(R"MAT(
 // Material / Surface GLSL wrapper.
 // The original mainImage() is evaluated across mesh UVs instead of the screen.
 // Export with: Export to BO3 -> Material -> Custom HLSL Material.
@@ -8539,6 +8534,8 @@ struct MaterialSurfaceInput
     float4 normal        : TEXCOORD2;
     float4 tangent       : TEXCOORD3;
     float4 biTangent     : TEXCOORD4;
+    float4 objectPosition : TEXCOORD5;
+    float4 objectNormal  : TEXCOORD6;
 };
 
 // -----------------------------------------------------------------------------
@@ -8551,7 +8548,7 @@ struct MaterialSurfaceInput
 
     struct GlslSkySourceAnalysis
     {
-        int recommendedMode = 1; // 1 = image-space/lat-long, 2 = self-camera/view-ray.
+        int recommendedMode = 1; // 1 = image-space/seamless 3D wrap, 2 = self-camera/view-ray.
         int selfCameraScore = 0;
         QString rayVariable;
         QString reason;
@@ -8613,7 +8610,7 @@ struct MaterialSurfaceInput
         else
         {
             analysis.recommendedMode = 1;
-            analysis.reason = QString("No strong self-camera ray was detected (score %1). Use the normal 2D/lat-long sky wrap, or force 360° / Self-Camera if this shader builds its own view ray under an unusual name.")
+            analysis.reason = QString("No strong self-camera ray was detected (score %1). Use the normal 2D/seamless-direction sky wrap, or force 360° / Self-Camera if this shader builds its own view ray under an unusual name.")
                                   .arg(score);
         }
         return analysis;
@@ -8785,7 +8782,7 @@ struct MaterialSurfaceInput
             else
             {
                 if(converterNotes)
-                    converterNotes->append("Sky source requested 360° / Self-Camera, but no safe camera ray could be identified after GLSL conversion. Falling back to the 2D/lat-long sky wrap; inspect the generated HLSL and choose a recognizable ray variable such as rd/rayDir/viewDir.");
+                    converterNotes->append("Sky source requested 360° / Self-Camera, but no safe camera ray could be identified after GLSL conversion. Falling back to the 2D/seamless-direction sky wrap; inspect the generated HLSL and choose a recognizable ray variable such as rd/rayDir/viewDir.");
                 resolvedMode = 1;
             }
         }
@@ -8794,12 +8791,12 @@ struct MaterialSurfaceInput
             if(requestedSkySourceMode == 0)
                 converterNotes->append(QString("Sky source Auto Detect: %1").arg(analysis.reason));
             else
-                converterNotes->append("Sky source: 2D / Image-Space. mainImage is wrapped across BO3 skyDirection using a lat-long projection.");
+                converterNotes->append("Sky source: 2D / Image-Space. mainImage is wrapped across BO3 skyDirection using a seamless triplanar direction projection (no longitude seam or polar singularity).");
         }
 
         const QString modeMarker = resolvedMode == 2
             ? QStringLiteral("// BO3_PREVIEWER_SKY_SOURCE: SELF_CAMERA\n// BO3_PREVIEWER_SKY_SELF_CAMERA\n")
-            : QStringLiteral("// BO3_PREVIEWER_SKY_SOURCE: IMAGE_SPACE_LATLONG\n");
+            : QStringLiteral("// BO3_PREVIEWER_SKY_SOURCE: IMAGE_SPACE_SEAMLESS_3D\n");
 
         const QString commonPreamble = resources + modeMarker + QStringLiteral(R"SKY(
 cbuffer PerSceneConsts : register(b1)
@@ -8869,86 +8866,53 @@ float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 
         return commonPreamble + QStringLiteral(R"SKY(
 // -----------------------------------------------------------------------------
-// Converted GLSL - 2D/image-space lat-long wrap
+// Converted GLSL - 2D/image-space seamless 3D wrap
 // -----------------------------------------------------------------------------
 )SKY") + convertedForSky + QStringLiteral(R"SKY(
-float4 BO3GLSL_EvaluateLatLongSkyMainImage(float2 fragCoord)
+float4 BO3GLSL_EvaluateSkyMainImage(float2 uv)
 {
+    uv = saturate(uv);
+    float2 fragCoord = uv * iResolution.xy;
     GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
     float4 c = float4(0.0, 0.0, 0.0, 1.0);
     mainImage(c, fragCoord);
     return c;
 }
 
-float BO3GLSL_LatLongPeriodicWeight(float u)
+float3 BO3GLSL_SkyProjectionWeights(float3 direction)
 {
-    u = saturate(u);
-    return u * u * u * (u * (u * 6.0 - 15.0) + 10.0);
+    float3 a = abs(direction);
+    float3 w = a * a;
+    w *= w;
+    float sumW = max(w.x + w.y + w.z, 1.0e-8);
+    return w / sumW;
 }
 
-float4 BO3GLSL_EvaluateLatLongSkySeamSafe(float2 uv)
+float4 BO3GLSL_EvaluateSkySeamless3D(float3 direction)
 {
-    float skyU = frac(uv.x);
-    float skyV = saturate(uv.y);
-    float2 fragCoord = float2(skyU, skyV) * iResolution.xy;
-    float4 authoredColor = BO3GLSL_EvaluateLatLongSkyMainImage(fragCoord);
+    float3 d = normalize(direction);
+    float sx = d.x < 0.0 ? -1.0 : 1.0;
+    float sy = d.y < 0.0 ? -1.0 : 1.0;
+    float sz = d.z < 0.0 ? -1.0 : 1.0;
 
-    const float BO3_GLSL_SKY_LONGITUDE_BLEND = 0.035;
-    float seamDistance = min(skyU, 1.0 - skyU);
-    if(seamDistance < BO3_GLSL_SKY_LONGITUDE_BLEND)
-    {
-        float4 edge0Color = BO3GLSL_EvaluateLatLongSkyMainImage(
-            float2(0.0, skyV) * iResolution.xy);
-        float4 edge1Color = BO3GLSL_EvaluateLatLongSkyMainImage(
-            float2(1.0, skyV) * iResolution.xy);
-        float4 seamColor = 0.5 * (edge0Color + edge1Color);
-        float seamWeight = BO3GLSL_LatLongPeriodicWeight(
-            seamDistance / BO3_GLSL_SKY_LONGITUDE_BLEND);
-        authoredColor = lerp(seamColor, authoredColor, seamWeight);
-    }
+    // Three overlapping planar projections cover the sphere continuously.
+    // A projection's handedness flips only on the plane where its blend weight
+    // is zero, so there is no atan2 branch cut and no latitude pole collapse.
+    float2 uvX = float2(d.y * sx, d.z) * 0.5 + 0.5;
+    float2 uvY = float2(d.x * sy, d.z) * 0.5 + 0.5;
+    float2 uvZ = float2(-d.x * sz, d.y) * 0.5 + 0.5;
 
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    return authoredColor;
-}
-
-float4 BO3GLSL_StabilizeLatLongSkyPoles(float2 skyUv, float4 authoredColor)
-{
-    // A latitude/longitude projection has a true topological singularity at the
-    // two poles: every U converges to one direction. Arbitrary image-space GLSL
-    // exposes that as a star/pinwheel. Replace only the final polar band with a
-    // smooth longitude-independent cap sampled from the adjacent latitude ring.
-    float skyV = saturate(skyUv.y);
-    const float BO3_GLSL_SKY_POLAR_CAP = 0.060;
-    float poleDistance = min(skyV, 1.0 - skyV);
-    if(poleDistance >= BO3_GLSL_SKY_POLAR_CAP)
-        return authoredColor;
-
-    float capV = skyV < 0.5
-        ? BO3_GLSL_SKY_POLAR_CAP
-        : 1.0 - BO3_GLSL_SKY_POLAR_CAP;
-    float4 capA = BO3GLSL_EvaluateLatLongSkySeamSafe(float2(0.25, capV));
-    float4 capB = BO3GLSL_EvaluateLatLongSkySeamSafe(float2(0.75, capV));
-    float4 capColor = 0.5 * (capA + capB);
-    float authoredWeight = BO3GLSL_LatLongPeriodicWeight(
-        poleDistance / BO3_GLSL_SKY_POLAR_CAP);
-    return lerp(capColor, authoredColor, authoredWeight);
+    float3 w = BO3GLSL_SkyProjectionWeights(d);
+    float4 cx = BO3GLSL_EvaluateSkyMainImage(uvX);
+    float4 cy = BO3GLSL_EvaluateSkyMainImage(uvY);
+    float4 cz = BO3GLSL_EvaluateSkyMainImage(uvZ);
+    return cx * w.x + cy * w.y + cz * w.z;
 }
 
 float4 ps_main(const PixelShaderInput input) : SV_TARGET0
 {
     float3 rd = normalize(input.skyDirection.xyz);
-    const float PI = 3.14159265358979323846;
-    float2 skyUv;
-    skyUv.x = atan2(rd.y, rd.x) / (2.0 * PI) + 0.5;
-    skyUv.y = asin(clamp(rd.z, -1.0, 1.0)) / PI + 0.5;
-
-    // Repair the atan2 meridian only in a narrow edge band, then separately
-    // stabilize the latitude singularity. The rest of mainImage is untouched.
-    float4 fragColor = BO3GLSL_EvaluateLatLongSkySeamSafe(skyUv);
-    fragColor = BO3GLSL_StabilizeLatLongSkyPoles(skyUv, fragColor);
-    float2 fragCoord = float2(frac(skyUv.x), saturate(skyUv.y)) * iResolution.xy;
-    GLSL_FRAGCOORD = float4(fragCoord, 0.0, 1.0);
-    return fragColor;
+    return BO3GLSL_EvaluateSkySeamless3D(rd);
 }
 )SKY");
     }

@@ -1983,7 +1983,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return {};
         });
 
-        run("converted Material periodicizes closed-mesh U and keeps GLSL orientation", [&]() -> QString
+        run("converted Material uses seam-free closed-surface projection and keeps flat GLSL orientation", [&]() -> QString
         {
             QStringList notes;
             QSet<int> channels;
@@ -1992,11 +1992,17 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 "float noise(float2 p){return frac(sin(dot(p,float2(12.9898,4.1414)))*43758.5453);}"
                 "void mainImage(out float4 c,in float2 p){float2 uv=p/iResolution.x;c=float4(noise(uv),0.0,0.0,1.0);}";
             const QString material = bo3::glsl::makeBo3MaterialFromGlsl(core, channels, varyings, 0);
-            if(!material.contains("BO3GLSL_EvaluateMaterialMainImage") ||
-               !material.contains("BO3GLSL_PeriodicMaterialUWeight") ||
-               !material.contains("shiftedFragCoord") ||
-               material.contains("seamWidthUv"))
-                return "procedural Material did not receive full-interval periodic U mapping";
+            if(!material.contains("BO3GLSL_EvaluateMaterialSeamless3D") ||
+               !material.contains("BO3GLSL_ProjectionWeights") ||
+               !material.contains("BO3_PREVIEWER_GLSL_PROJECTION: SEAMLESS_TRIPLANAR_V2") ||
+               !material.contains("objectPosition : TEXCOORD5") ||
+               !material.contains("objectNormal  : TEXCOORD6") ||
+               material.contains("BO3GLSL_EvaluateMaterialSeamSafe") ||
+               material.contains("BO3GLSL_StabilizeMaterialPoles"))
+                return "procedural Material did not receive the seamless direction-space closed-surface projection";
+            if(material.contains("atan2(") || material.contains("BO3_GLSL_LONGITUDE_BLEND") ||
+               material.contains("BO3_GLSL_POLAR_CAP"))
+                return "converted Material closed-surface path still contains lat-long seam/pole repair logic";
             if(material.contains("1.0 - surfaceUv.y") || material.contains("1.0-surfaceUv.y"))
                 return "converted Material wrapper still vertically flips GLSL UV orientation";
 
@@ -2005,12 +2011,31 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             const QString textured = bo3::glsl::makeBo3MaterialFromGlsl(
                 "void mainImage(out float4 c,in float2 p){c=GLSL_TEXTURE(iChannel0,p/iResolution.xy);}",
                 texturedChannels, varyings, 0);
-            if(!textured.contains("BO3GLSL_EvaluateMaterialMainImage") ||
-               !textured.contains("BO3GLSL_PeriodicMaterialUWeight") ||
-               !textured.contains("shiftedFragCoord"))
-                return "textured/iChannel Material did not receive closed-mesh periodic U mapping";
+            if(!textured.contains("BO3GLSL_EvaluateMaterialSeamless3D") ||
+               !textured.contains("BO3GLSL_FlatMaterialUv"))
+                return "textured/iChannel Material did not receive the seamless closed-surface + flat-canvas split";
             if(textured.contains("1.0 - surfaceUv.y") || textured.contains("1.0-surfaceUv.y"))
                 return "textured/iChannel Material wrapper still vertically flips GLSL UV orientation";
+            return {};
+        });
+
+        run("converted image-space Sky has no longitude seam or polar singularity", [&]() -> QString
+        {
+            QStringList notes;
+            QSet<int> channels;
+            QStringList varyings;
+            const QString source =
+                "void mainImage(out float4 c,in float2 p){float2 uv=p/iResolution.xy;c=float4(uv,0.5,1.0);}";
+            const QString sky = bo3::glsl::makeBo3SkyFromGlsl(
+                source, channels, varyings, 1, source, &notes);
+            if(!sky.contains("BO3_PREVIEWER_SKY_SOURCE: IMAGE_SPACE_SEAMLESS_3D") ||
+               !sky.contains("BO3GLSL_EvaluateSkySeamless3D") ||
+               !sky.contains("BO3GLSL_SkyProjectionWeights"))
+                return "image-space Sky did not receive the seamless 3D direction projection";
+            if(sky.contains("atan2(") || sky.contains("asin(") ||
+               sky.contains("BO3_GLSL_SKY_LONGITUDE_BLEND") ||
+               sky.contains("BO3_GLSL_SKY_POLAR_CAP"))
+                return "image-space Sky still contains lat-long seam/pole singularity code";
             return {};
         });
 
@@ -5289,6 +5314,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         else if(n.contains("skydirection") || n=="direction" || n=="raydirection" || n=="rd" || n=="dir") baseKind="direction";
         else if(n.contains("fogdirection")) baseKind="direction";
         else if(n=="uv" || n.contains("texcoord") || n.contains("texcoords")) baseKind="uv";
+        else if(n.contains("objectnormal") || n=="localnormal") baseKind="objectnormal";
         else if(n=="normal" || n.contains("worldnormal")) baseKind="normal";
         else if(n=="tangent" || n.contains("worldtangent")) baseKind="tangent";
         else if(n.contains("bitangent") || n.contains("binormal")) baseKind="bitangent";
@@ -5301,6 +5327,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         if(baseKind=="clip")      { scalar="pixel.position.x"; v2="pixel.position.xy"; v3="pixel.position.xyz"; v4="pixel.position"; }
         if(baseKind=="direction") { scalar="bo3Direction.x"; v2="bo3Direction.xy"; v3="bo3Direction"; v4="float4(bo3Direction, 1.0)"; }
         if(baseKind=="uv")        { scalar="pixel.texCoords.x"; v2="pixel.texCoords"; v3="float3(pixel.texCoords, 0.0)"; v4="float4(pixel.texCoords, 0.0, 0.0)"; }
+        if(baseKind=="objectnormal") { scalar="pixel.objectNormal.x"; v2="pixel.objectNormal.xy"; v3="pixel.objectNormal"; v4="float4(pixel.objectNormal, 0.0)"; }
         if(baseKind=="normal")    { scalar="pixel.normal.x"; v2="pixel.normal.xy"; v3="pixel.normal"; v4="float4(pixel.normal, 0.0)"; }
         if(baseKind=="tangent")   { scalar="pixel.tangent.x"; v2="pixel.tangent.xy"; v3="pixel.tangent"; v4="float4(pixel.tangent, 0.0)"; }
         if(baseKind=="bitangent") { scalar="pixel.biTangent.x"; v2="pixel.biTangent.xy"; v3="pixel.biTangent"; v4="float4(pixel.biTangent, 0.0)"; }
@@ -5465,6 +5492,7 @@ struct BO3CustomMaterialPixelInput
     float3 worldPosition  : TEXCOORD5;
     float3 viewDirWorld   : TEXCOORD6;
     uint   instance       : TEXCOORD7;
+    float3 objectNormal   : TEXCOORD9;
 #if GENERATE_MOTION_VECTOR
     float4 motionVector   : TEXCOORD8;
 #endif
@@ -5483,6 +5511,7 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
 
     GPUSkin_SkinVertex(position, normal, tangent, vertex.weights, vertex.indices, instance);
     pixel.objectPosition = position;
+    pixel.objectNormal = normalize(normal);
     position = Transform_PositionToWorld(position, instance);
     normal = Transform_NormalToWorld(normal, instance);
     tangent = Transform_NormalToWorld(tangent, instance);
@@ -6967,7 +6996,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 packageAdapterOk =
                     packageResult.confidence == bo3::AutomationConfidence::Auto &&
                     !packageResult.diagnostics.hasErrors() &&
-                    packagedMaterialSource.contains("GBufferPixelOutput ps_main");
+                    packagedMaterialSource.contains("GBufferPixelOutput ps_main") &&
+                    packagedMaterialSource.contains("float3 objectNormal   : TEXCOORD9") &&
+                    packagedMaterialSource.contains("bo3UserInput.objectNormal = float4(pixel.objectNormal, 0.0);");
                 packagedCompileOk = packageAdapterOk &&
                     compileGlslValidationHlsl(packagedMaterialSource, packagedCompileDiagnostics);
             }
@@ -9298,11 +9329,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* skySourceLabel = new QLabel("Sky source");
         auto* skySource = new QComboBox();
         skySource->addItem("Auto Detect", 0);
-        skySource->addItem("2D / Image-Space (Lat-Long Wrap)", 1);
+        skySource->addItem("2D / Image-Space (Seamless 3D Wrap)", 1);
         skySource->addItem("360° / Self-Camera (Replace View Ray)", 2);
         skySource->setToolTip(
             "Sky conversion only. Auto Detect looks for a Shadertoy camera/view ray such as rd/rayDir/viewDir. "
-            "2D wraps mainImage around BO3 skyDirection as a lat-long panorama. 360° / Self-Camera preserves the shader's 3D environment and replaces its authored Shadertoy camera ray with BO3 skyDirection instead of projecting it twice.");
+            "2D wraps mainImage around BO3 skyDirection with a seamless triplanar direction projection, avoiding longitude seams and pole pinching. 360° / Self-Camera preserves the shader's 3D environment and replaces its authored Shadertoy camera ray with BO3 skyDirection instead of projecting it twice.");
         settingsRow->addWidget(skySourceLabel);
         settingsRow->addWidget(skySource);
         auto* projectHandling = new QComboBox();
@@ -10679,7 +10710,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             else
             {
                 skySourceHint->setText(
-                    "2D / Image-Space — preserve the original mainImage and wrap its 2D result around the BO3 sky using lat-long coordinates. "
+                    "2D / Image-Space — preserve the original mainImage and wrap its 2D result around the BO3 sky using a seamless direction-space triplanar projection. "
                     "Use this for image-space skies/panoramas that do not construct their own 3D camera ray. " +
                     detection.reason);
             }
