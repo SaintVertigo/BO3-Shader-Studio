@@ -227,8 +227,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString speedY = floatLiteral(parameterFloat(effect, *definition, "speed_y"));
             out += QString("    // %1\n"
                            "    float2 %2_scrollUv = frac(uv + float2(%3, %4) * t);\n"
-                           "    float3 %2_scrollBase = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv)).rgb);\n"
-                           "    float3 %2_scrollColor = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, %2_scrollUv).rgb);\n"
+                           "    float3 %2_scrollBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_scrollColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_scrollUv).rgb);\n"
                            "    color += (%2_scrollColor - %2_scrollBase) * %5;\n")
                 .arg(definition->name, tag, speedX, speedY, amount);
         }
@@ -242,8 +242,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float %2_rippleD = max(length(%2_rippleP), 0.0001);\n"
                            "    float %2_rippleWave = sin((%2_rippleD * %3 - t * %4) * 6.2831853);\n"
                            "    float2 %2_rippleUv = saturate(uv + (%2_rippleP / %2_rippleD) * %2_rippleWave * %5);\n"
-                           "    float3 %2_rippleBase = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv)).rgb);\n"
-                           "    float3 %2_rippleColor = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, %2_rippleUv).rgb);\n"
+                           "    float3 %2_rippleBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_rippleColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_rippleUv).rgb);\n"
                            "    color += (%2_rippleColor - %2_rippleBase);\n")
                 .arg(definition->name, tag, frequency, speed, amount);
         }
@@ -262,9 +262,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
             out += QString("    // %1\n"
                            "    float2 %2_chromaOffset = float2(%3, 0.0);\n"
-                           "    float3 %2_chromaBase = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv)).rgb);\n"
-                           "    float3 %2_chromaR = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv + %2_chromaOffset)).rgb);\n"
-                           "    float3 %2_chromaB = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv - %2_chromaOffset)).rgb);\n"
+                           "    float3 %2_chromaBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
+                           "    float3 %2_chromaR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + %2_chromaOffset)).rgb);\n"
+                           "    float3 %2_chromaB = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - %2_chromaOffset)).rgb);\n"
                            "    float3 %2_chroma = float3(%2_chromaR.r, %2_chromaBase.g, %2_chromaB.b);\n"
                            "    color += (%2_chroma - %2_chromaBase) * %4;\n")
                 .arg(definition->name, tag, amount, strength);
@@ -318,14 +318,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
             out += QString("    // %1\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * %3;\n"
-                           "    float %2_depthC = DepthSampler.Sample(DepthSamplerState, saturate(uv)).r;\n"
-                           "    float %2_depthR = DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(%2_texel.x, 0.0))).r;\n"
-                           "    float %2_depthL = DepthSampler.Sample(DepthSamplerState, saturate(uv - float2(%2_texel.x, 0.0))).r;\n"
-                           "    float %2_depthU = DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(0.0, %2_texel.y))).r;\n"
-                           "    float %2_depthD = DepthSampler.Sample(DepthSamplerState, saturate(uv - float2(0.0, %2_texel.y))).r;\n"
+                           "    float %2_depthC = DepthSampler.Sample(bilinearClampler, saturate(uv)).r;\n"
+                           "    float %2_depthR = DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r;\n"
+                           "    float %2_depthL = DepthSampler.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x, 0.0))).r;\n"
+                           "    float %2_depthU = DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r;\n"
+                           "    float %2_depthD = DepthSampler.Sample(bilinearClampler, saturate(uv - float2(0.0, %2_texel.y))).r;\n"
                            "    float %2_depthEdge = abs(%2_depthC - %2_depthR) + abs(%2_depthC - %2_depthL) + abs(%2_depthC - %2_depthU) + abs(%2_depthC - %2_depthD);\n"
-                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv + float2(%2_texel.x, 0.0))).rgb);\n"
-                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(uv + float2(0.0, %2_texel.y))).rgb);\n"
+                           "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).rgb);\n"
+                           "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).rgb);\n"
                            "    float %2_luma = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
                            "    float %2_lumaEdge = abs(%2_luma - dot(%2_sceneR, float3(0.2126, 0.7152, 0.0722))) + abs(%2_luma - dot(%2_sceneU, float3(0.2126, 0.7152, 0.0722)));\n"
                            "    float %2_edge = saturate(%2_depthEdge * (220.0 * %4) + %2_lumaEdge * 3.0);\n"
@@ -341,14 +341,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString bias = floatLiteral(parameterFloat(effect, *definition, "bias"));
             out += QString("    // %1\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * %3;\n"
-                           "    float %2_depthC = DepthSampler.Sample(DepthSamplerState, uv).r;\n"
+                           "    float %2_depthC = DepthSampler.Sample(bilinearClampler, uv).r;\n"
                            "    float %2_occ = 0.0;\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(%2_texel.x, 0.0))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(-%2_texel.x, 0.0))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(0.0, %2_texel.y))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv + float2(0.0, -%2_texel.y))).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv + %2_texel)).r) - %4);\n"
-                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(DepthSamplerState, saturate(uv - %2_texel)).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x, 0.0))).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(-%2_texel.x, 0.0))).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, %2_texel.y))).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, -%2_texel.y))).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv + %2_texel)).r) - %4);\n"
+                           "    %2_occ += saturate(abs(%2_depthC - DepthSampler.Sample(bilinearClampler, saturate(uv - %2_texel)).r) - %4);\n"
                            "    %2_occ = saturate(%2_occ * 0.55);\n"
                            "    color *= 1.0 - %2_occ * %5;\n")
                 .arg(definition->name, tag, radius, bias, amount);
@@ -360,7 +360,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString end = floatLiteral(parameterFloat(effect, *definition, "end"));
             const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
             out += QString("    // %1\n"
-                           "    float %2_depth = DepthSampler.Sample(DepthSamplerState, uv).r;\n"
+                           "    float %2_depth = DepthSampler.Sample(bilinearClampler, uv).r;\n"
                            "    float %2_fog = smoothstep(%3, max(%3 + 0.001, %4), %2_depth) * %5;\n"
                            "    color = lerp(color, %6, saturate(%2_fog));\n")
                 .arg(definition->name, tag, start, end, strength, colorLiteral(fogColor));
@@ -398,7 +398,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float %2_r2 = dot(%2_p, %2_p);\n"
                            "    float2 %2_distorted = %2_p * (1.0 + %2_r2 * %3) / max(%4, 0.001);\n"
                            "    float2 %2_uv = saturate(%2_distorted * 0.5 + 0.5);\n"
-                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, %2_uv).rgb);\n"
+                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_uv).rgb);\n"
                            "    color = lerp(color, %2_sample, %5);\n")
                 .arg(definition->name, tag, amount, zoom, strength);
         }
@@ -412,8 +412,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float2 %2_cell = float2(%3, max(1.0, %3 * (%2_rt.y / max(%2_rt.x, 1.0))));\n"
                            "    float2 %2_uv0 = (floor(uv * %2_cell) + 0.5) / %2_cell;\n"
                            "    float2 %2_jitter = (float2(BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 1.3), BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 7.1)) - 0.5) * PostFx_GetRenderTargetSize().zw * %4 * 120.0;\n"
-                           "    float3 %2_a = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(%2_uv0 - %2_jitter)).rgb);\n"
-                           "    float3 %2_b = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, saturate(%2_uv0 + %2_jitter)).rgb);\n"
+                           "    float3 %2_a = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_uv0 - %2_jitter)).rgb);\n"
+                           "    float3 %2_b = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_uv0 + %2_jitter)).rgb);\n"
                            "    float3 %2_paint = lerp(%2_a, %2_b, 0.5 + 0.5 * BO3BeginnerHash21(floor(%2_uv0 * %2_cell) + 4.9));\n"
                            "    float %2_luma = dot(%2_paint, float3(0.2126, 0.7152, 0.0722));\n"
                            "    float %2_streak = 0.75 + 0.25 * sin((uv.x + uv.y * 0.35) * %3 * 5.5 + %2_luma * 9.0);\n"
@@ -458,7 +458,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "        sin((uv.y * %3 + t * %4) * 6.2831853) + cos((uv.y * (%3 * 0.47) - t * %4 * 0.6) * 6.2831853),\n"
                            "        cos((uv.x * %3 - t * %4 * 0.8) * 6.2831853) + sin((uv.x * (%3 * 0.63) + t * %4 * 0.45) * 6.2831853));\n"
                            "    float2 %2_uv = saturate(uv + %2_wave * (%5 * 0.01));\n"
-                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, %2_uv).rgb);\n"
+                           "    float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_uv).rgb);\n"
                            "    color = lerp(color, %2_sample, %6);\n")
                 .arg(definition->name, tag, scale, speed, amount, strength);
         }
@@ -580,8 +580,7 @@ QString generatePostFx(const Project& project)
 
 Texture2D<float4> frameBuffer : register(t0);
 Texture2D<float4> DepthSampler : register(t1);
-SamplerState frameBufferSampler : register(s0);
-SamplerState DepthSamplerState : register(s1);
+SamplerState bilinearClampler : register(s1);
 
 struct VS_INPUT
 {
@@ -607,7 +606,7 @@ float4 ps_main(PS_INPUT input) : SV_Target
     float2 uv = saturate(input.texcoord);
     float t = GetTime();
     float beginnerVertical = uv.y;
-    float3 color = PostFx_NormalizeColor(frameBuffer.Sample(frameBufferSampler, uv).rgb);
+    float3 color = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, uv).rgb);
 %3
     color = max(color, 0.0);
     return float4(PostFx_DenormalizeColor(color), 1.0);
