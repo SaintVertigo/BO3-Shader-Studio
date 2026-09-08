@@ -2000,9 +2000,16 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                material.contains("BO3GLSL_EvaluateMaterialSeamSafe") ||
                material.contains("BO3GLSL_StabilizeMaterialPoles"))
                 return "procedural Material did not receive the seamless direction-space closed-surface projection";
-            if(material.contains("atan2(") || material.contains("BO3_GLSL_LONGITUDE_BLEND") ||
+            // Do not reject generic atan2() usage here. Arbitrary converted GLSL may
+            // legitimately use atan(y, x), and even explanatory comments can mention
+            // atan2 without reintroducing a longitude projection. Guard specifically
+            // against the legacy wrapper helpers/constants that implemented the old
+            // lat-long seam/pole repair path.
+            if(material.contains("BO3GLSL_EvaluateMaterialSeamSafe") ||
+               material.contains("BO3GLSL_StabilizeMaterialPoles") ||
+               material.contains("BO3_GLSL_LONGITUDE_BLEND") ||
                material.contains("BO3_GLSL_POLAR_CAP"))
-                return "converted Material closed-surface path still contains lat-long seam/pole repair logic";
+                return "converted Material closed-surface path still contains legacy lat-long seam/pole repair logic";
             if(material.contains("1.0 - surfaceUv.y") || material.contains("1.0-surfaceUv.y"))
                 return "converted Material wrapper still vertically flips GLSL UV orientation";
 
@@ -2032,10 +2039,16 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                !sky.contains("BO3GLSL_EvaluateSkySeamless3D") ||
                !sky.contains("BO3GLSL_SkyProjectionWeights"))
                 return "image-space Sky did not receive the seamless 3D direction projection";
-            if(sky.contains("atan2(") || sky.contains("asin(") ||
+            // The source shader itself is allowed to use atan(y, x) / asin() for its
+            // own procedural math. Only reject the converter's retired latitude/
+            // longitude wrapper. This keeps the regression targeted at projection
+            // plumbing instead of banning normal GLSL intrinsics globally.
+            if(sky.contains("BO3GLSL_EvaluateLatLongSkyMainImage") ||
+               sky.contains("BO3GLSL_EvaluateLatLongSkySeamSafe") ||
+               sky.contains("BO3GLSL_StabilizeLatLongSkyPoles") ||
                sky.contains("BO3_GLSL_SKY_LONGITUDE_BLEND") ||
                sky.contains("BO3_GLSL_SKY_POLAR_CAP"))
-                return "image-space Sky still contains lat-long seam/pole singularity code";
+                return "image-space Sky still contains the legacy lat-long seam/pole wrapper";
             return {};
         });
 
