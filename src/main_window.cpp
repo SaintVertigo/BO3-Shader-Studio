@@ -1569,6 +1569,14 @@ public:
                !postHlsl.contains("BO3BeginnerViewmodelBoundary") ||
                !postHlsl.contains("BO3BeginnerTargetMask") ||
                !postHlsl.contains("BO3BeginnerSSAOPair") ||
+               !postHlsl.contains("BO3BeginnerSampleMatchingDepth") ||
+               !postHlsl.contains("BO3BeginnerWorldToDepthControl") ||
+               !postHlsl.contains("same-surface-class 16-tap Float-Z SSAO") ||
+               !postHlsl.contains("Float-Z depth of field") ||
+               !postHlsl.contains("Depth Edge Glow") ||
+               !postHlsl.contains("Depth Contours") ||
+               !postHlsl.contains("Depth Heatmap") ||
+               !postHlsl.contains("Contact Shadows") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
@@ -13929,7 +13937,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     static bool beginnerEffectUsesSceneDepth(const QString& id)
     {
-        return id == "cartoon_outlines" || id == "ambient_occlusion" || id == "depth_fog";
+        return id == "cartoon_outlines" || id == "ambient_occlusion" || id == "depth_fog" ||
+               id == "depth_of_field" || id == "depth_edge_glow" || id == "distance_tint" ||
+               id == "depth_desaturation" || id == "distance_darkening" || id == "depth_pixelation" ||
+               id == "depth_chromatic_aberration" || id == "depth_contours" || id == "depth_heatmap" ||
+               id == "depth_isolation" || id == "contact_shadows";
     }
 
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
@@ -14119,6 +14131,87 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             painter.setPen(QPen(QColor(255,255,255,120), 2.0));
             painter.drawLine(QPointF(inner.left() + 16, inner.bottom() - 20), QPointF(inner.center().x() - 8, inner.center().y() + 6));
             painter.drawLine(QPointF(inner.left() + 32, inner.bottom() - 20), QPointF(inner.center().x() + 10, inner.center().y() + 6));
+        }
+        else if(id == "depth_of_field")
+        {
+            fillLinear(QColor("#1A2633"), QColor("#AFC4D6"));
+            painter.setPen(QPen(QColor(255,255,255,80), 8.0));
+            painter.drawEllipse(QRectF(inner.center().x()-22, inner.center().y()-16, 44, 32));
+            painter.setPen(QPen(QColor("#FFFFFF"), 2.0));
+            painter.drawEllipse(QRectF(inner.center().x()-13, inner.center().y()-10, 26, 20));
+        }
+        else if(id == "depth_edge_glow")
+        {
+            painter.fillRect(inner, QColor("#0A1118"));
+            painter.setBrush(QColor("#213747"));
+            painter.setPen(QPen(QColor("#58C8FF"), 5.0));
+            painter.drawRoundedRect(QRectF(inner.left()+28, inner.top()+11, inner.width()-56, inner.height()-22), 9, 9);
+        }
+        else if(id == "distance_tint" || id == "depth_heatmap")
+        {
+            QLinearGradient g(inner.topLeft(), inner.topRight());
+            if(id == "depth_heatmap")
+            {
+                g.setColorAt(0.0, QColor("#2B4CFF")); g.setColorAt(0.5, QColor("#3DFF88")); g.setColorAt(1.0, QColor("#FF4D37"));
+            }
+            else
+            {
+                g.setColorAt(0.0, QColor("#FFD9B0")); g.setColorAt(1.0, QColor("#6A8FD4"));
+            }
+            painter.fillRect(inner, g);
+        }
+        else if(id == "depth_desaturation" || id == "distance_darkening")
+        {
+            QLinearGradient g(inner.topLeft(), inner.topRight());
+            g.setColorAt(0.0, QColor("#A86D4A"));
+            g.setColorAt(0.55, id == "depth_desaturation" ? QColor("#777777") : QColor("#493B36"));
+            g.setColorAt(1.0, id == "depth_desaturation" ? QColor("#242424") : QColor("#050607"));
+            painter.fillRect(inner, g);
+        }
+        else if(id == "depth_pixelation")
+        {
+            painter.fillRect(inner, QColor("#18232E"));
+            const int cols = 12;
+            for(int x=0; x<cols; ++x)
+            {
+                const int block = 2 + x/3;
+                painter.fillRect(QRectF(inner.left()+x*inner.width()/cols, inner.top()+8+(x%3)*5,
+                                        inner.width()/cols+1, inner.height()-16-(x%3)*5),
+                                 QColor::fromHsl((205+x*7)%360, 105, 75+block*11));
+            }
+        }
+        else if(id == "depth_chromatic_aberration")
+        {
+            painter.fillRect(inner, QColor("#0D1118"));
+            const QRectF r(inner.center().x()-35, inner.top()+10, 70, inner.height()-20);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255,55,70,160)); painter.drawEllipse(r.translated(-7,0));
+            painter.setBrush(QColor(65,220,150,160)); painter.drawEllipse(r);
+            painter.setBrush(QColor(55,105,255,160)); painter.drawEllipse(r.translated(7,0));
+        }
+        else if(id == "depth_contours")
+        {
+            painter.fillRect(inner, QColor("#071915"));
+            painter.setPen(QPen(QColor("#5BFFE1"), 2.0));
+            for(int i=0; i<6; ++i)
+                painter.drawEllipse(inner.center(), 14.0 + i*18.0, 5.0 + i*6.0);
+        }
+        else if(id == "depth_isolation")
+        {
+            fillLinear(QColor("#15191E"), QColor("#15191E"));
+            painter.fillRect(QRectF(inner.center().x()-32, inner.top(), 64, inner.height()), QColor("#A9C9E8"));
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.5));
+            painter.drawLine(QPointF(inner.center().x()-32, inner.top()), QPointF(inner.center().x()-32, inner.bottom()));
+            painter.drawLine(QPointF(inner.center().x()+32, inner.top()), QPointF(inner.center().x()+32, inner.bottom()));
+        }
+        else if(id == "contact_shadows")
+        {
+            painter.fillRect(inner, QColor("#D4D7D9"));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor("#45505A"));
+            painter.drawEllipse(QRectF(inner.center().x()-22, inner.center().y()-15, 44, 30));
+            painter.setBrush(QColor(20,24,28,155));
+            painter.drawEllipse(QRectF(inner.center().x()-5, inner.center().y()+7, 78, 15));
         }
         else if(id == "luminance_tint")
         {
@@ -15495,10 +15588,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 availability->setWordWrap(true);
                 if(supported)
                 {
-                    const bool usesSceneDepth =
-                        definition.id == "cartoon_outlines" ||
-                        definition.id == "ambient_occlusion" ||
-                        definition.id == "depth_fog";
+                    const bool usesSceneDepth = beginnerEffectUsesSceneDepth(definition.id);
                     availability->setText(usesSceneDepth
                         ? QString::fromUtf8("✓ Works with this shader   •   Uses scene depth")
                         : QString::fromUtf8("✓ Works with this shader"));

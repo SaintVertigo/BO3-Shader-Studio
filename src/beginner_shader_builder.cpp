@@ -460,38 +460,41 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString amount = parameterExpr(project, effect, *definition, "amount");
             const QString radius = parameterExpr(project, effect, *definition, "radius");
             const QString bias = parameterExpr(project, effect, *definition, "bias");
-            out += QString("    // %1 - 12-tap opposing-pair Float-Z SSAO/contact shading\n"
+            const QString power = parameterExpr(project, effect, *definition, "power");
+            const QString falloff = parameterExpr(project, effect, *definition, "falloff");
+            out += QString("    // %1 - same-surface-class 16-tap Float-Z SSAO/contact shading\n"
                            "    float %2_rawCenter = BO3BeginnerSampleRawDepthPoint(uv);\n"
-                           "    float %2_worldMask = %2_rawCenter < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? 1.0 : 0.0;\n"
+                           "    float %2_centerVM = BO3BeginnerViewmodelMask(%2_rawCenter);\n"
                            "    float %2_centerDepth = BO3BeginnerLinearDepth(%2_rawCenter);\n"
-                           "    float %2_surfaceMask = %2_worldMask * (1.0 - smoothstep(6200.0, 12500.0, %2_centerDepth));\n"
-                           "    float %2_depthRadiusScale = clamp(sqrt(430.0 / max(%2_centerDepth, 1.0)), 0.52, 1.85);\n"
+                           "    float %2_depth01 = BO3BeginnerWorldToDepthControl(%2_centerDepth);\n"
+                           "    float %2_depthRadiusScale = clamp(sqrt(360.0 / max(%2_centerDepth, 1.0)), 0.42, 2.15);\n"
                            "    float %2_radiusPixels = max(%3, 0.5) * %2_depthRadiusScale;\n"
-                           "    float %2_depthBias = max(0.22 + %4 * 1.80, %2_centerDepth * (0.00040 + %4 * 0.0012));\n"
-                           "    float %2_depthRange = max(lerp(7.0, 22.0, %5), %2_centerDepth * lerp(0.016, 0.046, %5));\n"
+                           "    float %2_depthBias = max(0.12 + %4 * 1.65, %2_centerDepth * (0.00028 + %4 * 0.0011));\n"
+                           "    float %2_depthRange = max(lerp(5.0, 28.0, %5), %2_centerDepth * lerp(0.012, 0.060, %5));\n"
                            "    float2 %2_pixel = floor(uv * PostFx_GetRenderTargetSize().xy);\n"
                            "    float %2_phase = BO3BeginnerSSAOHash12(%2_pixel * 0.0713) * 6.28318530718;\n"
                            "    float %2_pairSum = 0.0;\n"
-                           "    [unroll] for(int %2_i=0; %2_i<6; ++%2_i)\n"
+                           "    [loop] for(int %2_i=0; %2_i<8; ++%2_i)\n"
                            "    {\n"
-                           "        float %2_progress = (float(%2_i) + 1.0) / 6.0;\n"
+                           "        float %2_progress = (float(%2_i) + 1.0) / 8.0;\n"
                            "        float %2_pairRadius = sqrt(%2_progress) * %2_radiusPixels;\n"
                            "        float2 %2_dir = float2(sin(%2_phase), cos(%2_phase));\n"
                            "        float2 %2_offset = %2_dir * PostFx_GetRenderTargetSize().zw * %2_pairRadius;\n"
-                           "        float %2_depthA = BO3BeginnerSampleWorldDepth(uv + %2_offset);\n"
-                           "        float %2_depthB = BO3BeginnerSampleWorldDepth(uv - %2_offset);\n"
-                           "        float %2_pairWeight = lerp(1.18, 0.72, %2_progress);\n"
+                           "        float %2_depthA = BO3BeginnerSampleMatchingDepth(uv + %2_offset, %2_centerVM);\n"
+                           "        float %2_depthB = BO3BeginnerSampleMatchingDepth(uv - %2_offset, %2_centerVM);\n"
+                           "        float %2_pairWeight = lerp(1.24, 0.58, %2_progress);\n"
                            "        %2_pairSum += BO3BeginnerSSAOPair(%2_centerDepth, %2_depthA, %2_depthB, %2_depthBias, %2_depthRange) * %2_pairWeight;\n"
                            "        %2_phase += 2.39996322973;\n"
                            "    }\n"
-                           "    float %2_occ = saturate((%2_pairSum / 5.70) * lerp(2.70, 6.80, %5));\n"
-                           "    %2_occ = pow(%2_occ, lerp(1.30, 0.72, %5));\n"
+                           "    float %2_occ = saturate((%2_pairSum / 7.25) * lerp(2.5, 7.8, %5));\n"
+                           "    %2_occ = pow(%2_occ, max(%6, 0.25));\n"
+                           "    float %2_distanceFade = 1.0 - smoothstep(max(0.0, %7 - 0.18), min(1.0, %7 + 0.18), %2_depth01);\n"
                            "    float2 %2_edgeUv = min(uv, 1.0 - uv);\n"
                            "    float %2_edgePixels = min(%2_edgeUv.x / max(PostFx_GetRenderTargetSize().z,1e-6), %2_edgeUv.y / max(PostFx_GetRenderTargetSize().w,1e-6));\n"
-                           "    float %2_frameMask = smoothstep(2.0, 14.0, %2_edgePixels);\n"
-                           "    float %2_darkening = %2_occ * %2_surfaceMask * %2_frameMask * lerp(0.18, 0.78, %5);\n"
+                           "    float %2_frameMask = smoothstep(2.0, 12.0, %2_edgePixels);\n"
+                           "    float %2_darkening = %2_occ * %2_distanceFade * %2_frameMask * %8;\n"
                            "    color *= 1.0 - saturate(%2_darkening);\n")
-                .arg(definition->name, tag, radius, bias, amount);
+                .arg(definition->name, tag, radius, bias, amount, power, falloff, amount);
         }
         else if(effect.typeId == "depth_fog" && project.target == Target::PostFx && hasUv)
         {
@@ -502,7 +505,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString falloff = parameterExpr(project, effect, *definition, "falloff");
             out += QString("    // %1 - true linear Float-Z distance fog\n"
                            "    float %2_rawDepth = BO3BeginnerSampleRawDepthPoint(uv);\n"
-                           "    float %2_worldDepth = %2_rawDepth < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? BO3BeginnerLinearDepth(%2_rawDepth) : -1.0;\n"
+                           "    float %2_worldDepth = BO3BeginnerLinearDepth(%2_rawDepth);\n"
                            "    float %2_startWorld = BO3BeginnerDepthControlToWorld(%3);\n"
                            "    float %2_endWorld = max(%2_startWorld + 1.0, BO3BeginnerDepthControlToWorld(max(%4, %3 + 0.01)));\n"
                            "    float %2_valid = step(0.0001, %2_worldDepth);\n"
@@ -510,6 +513,203 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    %2_fog = pow(saturate(%2_fog), max(%5,0.05)) * %2_valid * %6;\n"
                            "    color = lerp(color, %7, saturate(%2_fog));\n")
                 .arg(definition->name, tag, startControl, endControl, falloff, strength, colorLiteral(fogColor));
+        }
+        else if(effect.typeId == "depth_of_field" && project.target == Target::PostFx && hasUv)
+        {
+            const QString focus = parameterExpr(project, effect, *definition, "focus");
+            const QString focusRange = parameterExpr(project, effect, *definition, "focus_range");
+            const QString radius = parameterExpr(project, effect, *definition, "radius");
+            const QString nearBlur = parameterExpr(project, effect, *definition, "near_blur");
+            const QString farBlur = parameterExpr(project, effect, *definition, "far_blur");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - Float-Z depth of field with independent near/far blur\n"
+                           "    float %2_dofRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_dofDepth = BO3BeginnerNormalizedDepth(%2_dofRaw);\n"
+                           "    float %2_dofDelta = %2_dofDepth - %3;\n"
+                           "    float %2_dofNear = smoothstep(%4, %4 * 2.4 + 0.0001, -%2_dofDelta) * %5;\n"
+                           "    float %2_dofFar = smoothstep(%4, %4 * 2.4 + 0.0001, %2_dofDelta) * %6;\n"
+                           "    float %2_dofCoc = saturate(max(%2_dofNear, %2_dofFar) * %7);\n"
+                           "    float2 %2_dofTexel = PostFx_GetRenderTargetSize().zw * max(%8, 0.5) * %2_dofCoc;\n"
+                           "    float3 %2_dofAccum = color * 1.35;\n"
+                           "    float %2_dofWeight = 1.35;\n"
+                           "    [loop] for(int %2_i=0; %2_i<12; ++%2_i)\n"
+                           "    {\n"
+                           "        float %2_fi = float(%2_i);\n"
+                           "        float %2_a = %2_fi * 2.39996323;\n"
+                           "        float %2_r = sqrt((%2_fi + 0.5) / 12.0);\n"
+                           "        float2 %2_off = float2(cos(%2_a), sin(%2_a)) * %2_dofTexel * %2_r;\n"
+                           "        float3 %2_sample = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + %2_off)).rgb);\n"
+                           "        float %2_w = lerp(1.0, 0.62, %2_r);\n"
+                           "        %2_dofAccum += %2_sample * %2_w;\n"
+                           "        %2_dofWeight += %2_w;\n"
+                           "    }\n"
+                           "    float3 %2_dofBlur = %2_dofAccum / max(%2_dofWeight, 0.001);\n"
+                           "    color = lerp(color, %2_dofBlur, %2_dofCoc);\n")
+                .arg(definition->name, tag, focus, focusRange, nearBlur, farBlur, strength, radius);
+        }
+        else if(effect.typeId == "depth_edge_glow" && project.target == Target::PostFx && hasUv)
+        {
+            const QColor glowColor = parameterColor(effect, *definition, "color");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString width = parameterExpr(project, effect, *definition, "width");
+            const QString threshold = parameterExpr(project, effect, *definition, "threshold");
+            out += QString("    // %1 - glow only on real Float-Z geometry/viewmodel boundaries\n"
+                           "    float %2_glowGeom = BO3BeginnerDepthGeometryEdge(uv, max(%3,0.5), %4);\n"
+                           "    float %2_glowVM = BO3BeginnerViewmodelBoundary(uv, max(%3,0.5));\n"
+                           "    float %2_glowEdge = saturate(max(%2_glowGeom, %2_glowVM));\n"
+                           "    color += %5 * (%2_glowEdge * %6);\n")
+                .arg(definition->name, tag, width, threshold, colorLiteral(glowColor), strength);
+        }
+        else if(effect.typeId == "distance_tint" && project.target == Target::PostFx && hasUv)
+        {
+            const QColor nearColor = parameterColor(effect, *definition, "near_color");
+            const QColor farColor = parameterColor(effect, *definition, "far_color");
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - near/far color grade from normalized Float-Z distance\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_t = smoothstep(min(%3,%4), max(%3 + 0.0001,%4), %2_depth01);\n"
+                           "    float3 %2_tint = lerp(%5, %6, %2_t);\n"
+                           "    color = lerp(color, color * (%2_tint * 1.65), %7);\n")
+                .arg(definition->name, tag, start, end, colorLiteral(nearColor), colorLiteral(farColor), strength);
+        }
+        else if(effect.typeId == "depth_desaturation" && project.target == Target::PostFx && hasUv)
+        {
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString curve = parameterExpr(project, effect, *definition, "curve");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - progressively remove color with Float-Z distance\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_factor = BO3BeginnerDepthWindow(%2_depth01, %3, %4, %5) * %6;\n"
+                           "    float %2_luma = dot(color, float3(0.2126,0.7152,0.0722));\n"
+                           "    color = lerp(color, %2_luma.xxx, saturate(%2_factor));\n")
+                .arg(definition->name, tag, start, end, curve, strength);
+        }
+        else if(effect.typeId == "distance_darkening" && project.target == Target::PostFx && hasUv)
+        {
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString curve = parameterExpr(project, effect, *definition, "curve");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - darken distant geometry without changing nearby exposure\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_factor = BO3BeginnerDepthWindow(%2_depth01, %3, %4, %5) * %6;\n"
+                           "    color *= 1.0 - saturate(%2_factor);\n")
+                .arg(definition->name, tag, start, end, curve, strength);
+        }
+        else if(effect.typeId == "depth_pixelation" && project.target == Target::PostFx && hasUv)
+        {
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString pixelSize = parameterExpr(project, effect, *definition, "pixel_size");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - pixel blocks grow with Float-Z distance\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_factor = smoothstep(min(%3,%4), max(%3 + 0.0001,%4), %2_depth01);\n"
+                           "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
+                           "    float %2_pixels = lerp(1.0, max(%5,1.0), %2_factor);\n"
+                           "    float2 %2_grid = max(float2(1.0,1.0), %2_rt / %2_pixels);\n"
+                           "    float2 %2_snapUv = (floor(uv * %2_grid) + 0.5) / %2_grid;\n"
+                           "    float3 %2_pixelColor = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_snapUv)).rgb);\n"
+                           "    color = lerp(color, %2_pixelColor, saturate(%2_factor * %6));\n")
+                .arg(definition->name, tag, start, end, pixelSize, strength);
+        }
+        else if(effect.typeId == "depth_chromatic_aberration" && project.target == Target::PostFx && hasUv)
+        {
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString offset = parameterExpr(project, effect, *definition, "offset");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - distance-driven RGB lens separation\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_factor = smoothstep(min(%3,%4), max(%3 + 0.0001,%4), %2_depth01) * %6;\n"
+                           "    float2 %2_dir = uv - 0.5;\n"
+                           "    float %2_len = max(length(%2_dir), 0.001);\n"
+                           "    %2_dir /= %2_len;\n"
+                           "    float2 %2_ca = %2_dir * PostFx_GetRenderTargetSize().zw * %5 * %2_factor;\n"
+                           "    float3 %2_base = color;\n"
+                           "    float %2_r = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + %2_ca)).rgb).r;\n"
+                           "    float %2_b = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - %2_ca)).rgb).b;\n"
+                           "    color = lerp(%2_base, float3(%2_r,%2_base.g,%2_b), saturate(%2_factor));\n")
+                .arg(definition->name, tag, start, end, offset, strength);
+        }
+        else if(effect.typeId == "depth_contours" && project.target == Target::PostFx && hasUv && hasTime)
+        {
+            const QColor contourColor = parameterColor(effect, *definition, "color");
+            const QString spacing = parameterExpr(project, effect, *definition, "spacing");
+            const QString width = parameterExpr(project, effect, *definition, "width");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - animated contour lines through normalized scene depth\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_cell = frac(%2_depth01 / max(%3,0.002) - t * %5);\n"
+                           "    float %2_dist = min(%2_cell, 1.0 - %2_cell);\n"
+                           "    float %2_line = 1.0 - smoothstep(%4, %4 * 2.2 + 0.001, %2_dist);\n"
+                           "    color = lerp(color, %6, saturate(%2_line * %7));\n")
+                .arg(definition->name, tag, spacing, width, speed, colorLiteral(contourColor), strength);
+        }
+        else if(effect.typeId == "depth_heatmap" && project.target == Target::PostFx && hasUv)
+        {
+            const QColor nearColor = parameterColor(effect, *definition, "near_color");
+            const QColor midColor = parameterColor(effect, *definition, "mid_color");
+            const QColor farColor = parameterColor(effect, *definition, "far_color");
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - three-color Float-Z distance visualization/stylization\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_t = smoothstep(min(%3,%4), max(%3 + 0.0001,%4), %2_depth01);\n"
+                           "    float3 %2_heatA = lerp(%5, %6, saturate(%2_t * 2.0));\n"
+                           "    float3 %2_heatB = lerp(%6, %7, saturate(%2_t * 2.0 - 1.0));\n"
+                           "    float3 %2_heat = lerp(%2_heatA, %2_heatB, step(0.5,%2_t));\n"
+                           "    color = lerp(color, %2_heat, %8);\n")
+                .arg(definition->name, tag, start, end, colorLiteral(nearColor), colorLiteral(midColor), colorLiteral(farColor), strength);
+        }
+        else if(effect.typeId == "depth_isolation" && project.target == Target::PostFx && hasUv)
+        {
+            const QString focus = parameterExpr(project, effect, *definition, "focus");
+            const QString range = parameterExpr(project, effect, *definition, "range");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            const QString dim = parameterExpr(project, effect, *definition, "dim");
+            const QString desaturate = parameterExpr(project, effect, *definition, "desaturate");
+            out += QString("    // %1 - keep one depth slice clear and suppress everything outside it\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
+                           "    float %2_delta = abs(%2_depth01 - %3);\n"
+                           "    float %2_outside = smoothstep(%4, %4 + max(%5,0.001), %2_delta);\n"
+                           "    float %2_luma = dot(color, float3(0.2126,0.7152,0.0722));\n"
+                           "    color = lerp(color, %2_luma.xxx, saturate(%2_outside * %7));\n"
+                           "    color *= 1.0 - saturate(%2_outside * %6);\n")
+                .arg(definition->name, tag, focus, range, softness, dim, desaturate);
+        }
+        else if(effect.typeId == "contact_shadows" && project.target == Target::PostFx && hasUv)
+        {
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString lengthPx = parameterExpr(project, effect, *definition, "length");
+            const QString bias = parameterExpr(project, effect, *definition, "bias");
+            const QString angle = parameterExpr(project, effect, *definition, "angle");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            out += QString("    // %1 - short screen-space Float-Z ray for directional contact shadows\n"
+                           "    float %2_rawCenter = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_centerVM = BO3BeginnerViewmodelMask(%2_rawCenter);\n"
+                           "    float %2_centerDepth = BO3BeginnerLinearDepth(%2_rawCenter);\n"
+                           "    float %2_a = %6 * 0.01745329252;\n"
+                           "    float2 %2_dir = float2(cos(%2_a), sin(%2_a));\n"
+                           "    float %2_occ = 0.0;\n"
+                           "    [loop] for(int %2_i=1; %2_i<=8; ++%2_i)\n"
+                           "    {\n"
+                           "        float %2_fi = float(%2_i) / 8.0;\n"
+                           "        float2 %2_off = %2_dir * PostFx_GetRenderTargetSize().zw * (%3 * %2_fi);\n"
+                           "        float %2_sd = BO3BeginnerSampleMatchingDepth(uv - %2_off, %2_centerVM);\n"
+                           "        float %2_valid = step(0.0001, %2_sd);\n"
+                           "        float %2_delta = %2_centerDepth - %2_sd;\n"
+                           "        float %2_depthBias = max(%4, %2_centerDepth * 0.00055);\n"
+                           "        float %2_hit = smoothstep(%2_depthBias, %2_depthBias + max(%5,0.01) * (1.0 + %2_centerDepth * 0.002), %2_delta) * %2_valid;\n"
+                           "        %2_occ = max(%2_occ, %2_hit * (1.0 - %2_fi * 0.55));\n"
+                           "    }\n"
+                           "    color *= 1.0 - saturate(%2_occ * %7);\n")
+                .arg(definition->name, tag, lengthPx, bias, softness, angle, strength);
         }
         else if(effect.typeId == "luminance_tint")
         {
@@ -1153,7 +1353,18 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
 {
     return typeId == QStringLiteral("cartoon_outlines") ||
            typeId == QStringLiteral("ambient_occlusion") ||
-           typeId == QStringLiteral("depth_fog");
+           typeId == QStringLiteral("depth_fog") ||
+           typeId == QStringLiteral("depth_of_field") ||
+           typeId == QStringLiteral("depth_edge_glow") ||
+           typeId == QStringLiteral("distance_tint") ||
+           typeId == QStringLiteral("depth_desaturation") ||
+           typeId == QStringLiteral("distance_darkening") ||
+           typeId == QStringLiteral("depth_pixelation") ||
+           typeId == QStringLiteral("depth_chromatic_aberration") ||
+           typeId == QStringLiteral("depth_contours") ||
+           typeId == QStringLiteral("depth_heatmap") ||
+           typeId == QStringLiteral("depth_isolation") ||
+           typeId == QStringLiteral("contact_shadows");
 }
 
 bool projectRequiresSceneDepth(const Project& project)
@@ -1318,6 +1529,33 @@ float BO3BeginnerDepthControlToWorld(float control)
     // Beginner-facing 0..1 distance control mapped over the useful BO3
     // Float-Z scene range. Exponential spacing gives much finer control nearby.
     return exp2(lerp(3.0, 13.6, saturate(control)));
+}
+
+float BO3BeginnerWorldToDepthControl(float worldDepth)
+{
+    return saturate((log2(max(worldDepth, 1.0)) - 3.0) / 10.6);
+}
+
+float BO3BeginnerNormalizedDepth(float rawDepth)
+{
+    return BO3BeginnerWorldToDepthControl(BO3BeginnerLinearDepth(rawDepth));
+}
+
+float BO3BeginnerSampleMatchingDepth(float2 sampleUv, float centerViewmodel)
+{
+    float rawDepth = BO3BeginnerSampleRawDepthPoint(sampleUv);
+    float sampleViewmodel = BO3BeginnerViewmodelMask(rawDepth);
+    if(abs(sampleViewmodel - centerViewmodel) > 0.5)
+        return -1.0;
+    return BO3BeginnerLinearDepth(rawDepth);
+}
+
+float BO3BeginnerDepthWindow(float depth01, float start01, float end01, float curve)
+{
+    float lo = min(start01, end01);
+    float hi = max(start01, end01);
+    float t = smoothstep(lo, max(lo + 0.0001, hi), depth01);
+    return pow(saturate(t), max(curve, 0.05));
 }
 
 float BO3BeginnerSSAOHash12(float2 p)
@@ -1976,11 +2214,13 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.14),
                    FloatParam("cel_amount", "Cel Shading", "How much luminance banding is mixed into the original scene. Zero keeps only the outlines.", 0.0, 1.0, 0.01, 0.08),
                    FloatParam("levels", "Toon Levels", "Number of brightness bands used when Cel Shading is above zero.", 2.0, 12.0, 1.0, 6.0)}),
-        EffectDef("ambient_occlusion", "Ambient Occlusion", "Add depth-only screen-space contact and corner shading using twelve BO3 Float-Z samples arranged in opposing spiral pairs.", "Depth & Scene",
+        EffectDef("ambient_occlusion", "Ambient Occlusion", "Add same-surface-class Float-Z contact and corner shading with sixteen depth taps, including proper viewmodel support.", "Depth & Scene",
                   {Target::PostFx},
                   {FloatParam("amount", "Strength", "How strongly contact and corner shading is applied.", 0.0, 1.0, 0.01, 0.52),
-                   FloatParam("radius", "Radius", "Maximum screen-space sampling radius before distance scaling.", 1.0, 14.0, 0.1, 6.0),
-                   FloatParam("bias", "Bias", "Reject shallow depth differences and detached silhouettes that should not cast AO.", 0.0, 1.0, 0.01, 0.10)}),
+                   FloatParam("radius", "Radius", "Maximum screen-space sampling radius before distance scaling.", 1.0, 18.0, 0.1, 6.5),
+                   FloatParam("bias", "Bias", "Reject shallow depth differences and detached silhouettes that should not cast AO.", 0.0, 1.0, 0.01, 0.10),
+                   FloatParam("power", "Occlusion Power", "Shape the darkness response; lower values make AO broader, higher values concentrate it.", 0.35, 2.5, 0.05, 0.95),
+                   FloatParam("falloff", "Distance Falloff", "Fade AO away toward the far end of the scene to reduce distant noise.", 0.20, 1.0, 0.01, 0.88)}),
         EffectDef("depth_fog", "Depth Fog", "Fade distant world geometry using linearized BO3 Float-Z distance instead of the raw depth texture.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("color", "Fog Color", "Color of the depth fog.", "#7CA2D9"),
@@ -1988,6 +2228,80 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("end", "Far Distance", "Where fog reaches full strength across the useful BO3 scene-distance range.", 0.0, 1.0, 0.01, 0.76),
                    FloatParam("falloff", "Distance Curve", "Lower values fill sooner; higher values keep fog concentrated farther away.", 0.25, 3.0, 0.05, 1.0),
                    FloatParam("strength", "Strength", "Maximum amount of fog applied.", 0.0, 1.0, 0.01, 0.65)}),
+        EffectDef("depth_of_field", "Depth of Field", "Blur near and far scene layers around a chosen Float-Z focus distance, with separate near/far control.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("focus", "Focus Distance", "Depth plane that remains sharp.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("focus_range", "Focus Range", "Width of the sharp depth region around the focus plane.", 0.01, 0.40, 0.01, 0.08),
+                   FloatParam("radius", "Blur Radius", "Maximum blur radius in screen pixels.", 0.5, 12.0, 0.1, 4.0),
+                   FloatParam("near_blur", "Near Blur", "How strongly geometry in front of focus is blurred.", 0.0, 1.0, 0.01, 0.85),
+                   FloatParam("far_blur", "Far Blur", "How strongly geometry behind focus is blurred.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("strength", "Strength", "Overall blend amount of the depth blur.", 0.0, 1.0, 0.01, 0.85)}),
+        EffectDef("depth_edge_glow", "Depth Edge Glow", "Add a colored glow along real Float-Z geometry breaks and the viewmodel silhouette.", "Depth & Scene",
+                  {Target::PostFx},
+                  {ColorParam("color", "Glow Color", "Color drawn along depth silhouettes.", "#58C8FF"),
+                   FloatParam("strength", "Strength", "Brightness of the depth edge glow.", 0.0, 3.0, 0.01, 0.75),
+                   FloatParam("width", "Width", "Screen-space depth sampling radius.", 0.5, 8.0, 0.1, 2.0),
+                   FloatParam("threshold", "Depth Threshold", "Reject shallow surface changes and keep stronger geometry breaks.", 0.5, 12.0, 0.1, 5.0)}),
+        EffectDef("distance_tint", "Distance Tint", "Blend between near and far colors using the real Float-Z scene distance.", "Depth & Scene",
+                  {Target::PostFx},
+                  {ColorParam("near_color", "Near Color", "Tint used for nearby geometry.", "#FFD9B0"),
+                   ColorParam("far_color", "Far Color", "Tint used for distant geometry.", "#6A8FD4"),
+                   FloatParam("start", "Near Distance", "Start of the near-to-far color transition.", 0.0, 1.0, 0.01, 0.18),
+                   FloatParam("end", "Far Distance", "End of the near-to-far color transition.", 0.0, 1.0, 0.01, 0.78),
+                   FloatParam("strength", "Strength", "How strongly the tint changes the scene.", 0.0, 1.0, 0.01, 0.35)}),
+        EffectDef("depth_desaturation", "Depth Desaturation", "Progressively remove color with Float-Z distance while leaving nearby detail untouched.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("start", "Start Distance", "Where desaturation begins.", 0.0, 1.0, 0.01, 0.35),
+                   FloatParam("end", "Full Distance", "Where the chosen desaturation strength is fully reached.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("curve", "Distance Curve", "Shape of the depth transition.", 0.25, 3.0, 0.05, 1.0),
+                   FloatParam("strength", "Strength", "Maximum amount of color removed.", 0.0, 1.0, 0.01, 0.75)}),
+        EffectDef("distance_darkening", "Distance Darkening", "Darken distant scene layers using Float-Z for stylized depth falloff and atmosphere.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("start", "Start Distance", "Where distant darkening begins.", 0.0, 1.0, 0.01, 0.48),
+                   FloatParam("end", "Full Distance", "Where the maximum darkening is reached.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("curve", "Distance Curve", "Shape of the distance falloff.", 0.25, 3.0, 0.05, 1.0),
+                   FloatParam("strength", "Strength", "Maximum amount of darkening.", 0.0, 1.0, 0.01, 0.42)}),
+        EffectDef("depth_pixelation", "Depth Pixelation", "Increase pixel block size with scene distance for PSX, dream, scanner and stylized looks.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("start", "Start Distance", "Where depth-driven pixelation begins.", 0.0, 1.0, 0.01, 0.30),
+                   FloatParam("end", "Full Distance", "Where the maximum pixel size is reached.", 0.0, 1.0, 0.01, 0.90),
+                   FloatParam("pixel_size", "Max Pixel Size", "Largest screen-space pixel block size.", 1.0, 32.0, 1.0, 10.0),
+                   FloatParam("strength", "Strength", "Blend amount of the distance pixelation.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("depth_chromatic_aberration", "Depth Chromatic Aberration", "Separate red and blue channels increasingly with Float-Z distance.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("start", "Start Distance", "Where color separation begins.", 0.0, 1.0, 0.01, 0.32),
+                   FloatParam("end", "Full Distance", "Where the maximum separation is reached.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("offset", "Max Offset", "Maximum RGB separation in screen pixels.", 0.0, 16.0, 0.1, 4.0),
+                   FloatParam("strength", "Strength", "Overall depth-driven channel separation.", 0.0, 1.0, 0.01, 0.70)}),
+        EffectDef("depth_contours", "Depth Contours", "Draw repeating animated contour lines through real Float-Z distance like a scanner or topographic display.", "Depth & Scene",
+                  {Target::PostFx},
+                  {ColorParam("color", "Contour Color", "Color of the depth contour lines.", "#5BFFE1"),
+                   FloatParam("spacing", "Spacing", "Distance between contour bands.", 0.01, 0.50, 0.01, 0.08),
+                   FloatParam("width", "Line Width", "Width of each contour band.", 0.005, 0.20, 0.005, 0.025),
+                   FloatParam("speed", "Scroll Speed", "Animate the depth contours forward or backward.", -1.0, 1.0, 0.01, 0.0),
+                   FloatParam("strength", "Strength", "Blend amount of the contour color.", 0.0, 1.0, 0.01, 0.85)}),
+        EffectDef("depth_heatmap", "Depth Heatmap", "Colorize near, middle and far scene layers from the actual Float-Z distance.", "Depth & Scene",
+                  {Target::PostFx},
+                  {ColorParam("near_color", "Near Color", "Heatmap color for nearby surfaces.", "#2B4CFF"),
+                   ColorParam("mid_color", "Middle Color", "Heatmap color for middle distances.", "#3DFF88"),
+                   ColorParam("far_color", "Far Color", "Heatmap color for far surfaces.", "#FF4D37"),
+                   FloatParam("start", "Near Distance", "Start of the heatmap range.", 0.0, 1.0, 0.01, 0.05),
+                   FloatParam("end", "Far Distance", "End of the heatmap range.", 0.0, 1.0, 0.01, 0.95),
+                   FloatParam("strength", "Strength", "Blend amount of the heatmap colors.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("depth_isolation", "Depth Isolation", "Keep one Float-Z distance slice clear while dimming or desaturating everything outside it.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("focus", "Focus Distance", "Center of the depth slice that stays clear.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("range", "Focus Range", "Half-width of the clear depth slice.", 0.01, 0.45, 0.01, 0.10),
+                   FloatParam("softness", "Softness", "Soft transition outside the focus slice.", 0.005, 0.35, 0.005, 0.06),
+                   FloatParam("dim", "Outside Dim", "How much geometry outside the slice is darkened.", 0.0, 1.0, 0.01, 0.55),
+                   FloatParam("desaturate", "Outside Desaturate", "How much geometry outside the slice loses color.", 0.0, 1.0, 0.01, 0.75)}),
+        EffectDef("contact_shadows", "Contact Shadows", "Cast short directional screen-space shadows from nearby Float-Z occluders using same-class depth samples.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "Darkness of the contact shadows.", 0.0, 1.0, 0.01, 0.45),
+                   FloatParam("length", "Shadow Length", "Maximum screen-space ray length in pixels.", 1.0, 32.0, 0.5, 10.0),
+                   FloatParam("bias", "Depth Bias", "Reject tiny depth differences that would self-shadow.", 0.0, 8.0, 0.05, 0.45),
+                   FloatParam("angle", "Screen Light Angle", "Direction the light arrives from in screen space, in degrees.", 0.0, 360.0, 1.0, 135.0),
+                   FloatParam("softness", "Softness", "Depth softness used to blend shadow hits.", 0.01, 6.0, 0.05, 1.25)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color used in darker areas.", "#4F65B4"),
