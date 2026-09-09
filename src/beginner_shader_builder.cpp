@@ -834,27 +834,87 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor splatColor = parameterColor(effect, *definition, "color");
             const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString scale = parameterExpr(project, effect, *definition, "scale");
-            out += QString("    // %1\n"
-                           "    float2 %2_p = uv * %3;\n"
-                           "    float2 %2_cell = floor(%2_p);\n"
-                           "    float2 %2_local = frac(%2_p) - 0.5;\n"
-                           "    float %2_splat = 0.0;\n"
-                           "    [unroll] for(int %2_y = -1; %2_y <= 1; ++%2_y)\n"
+            const QString count = parameterExpr(project, effect, *definition, "scale");
+            const QString size = parameterExpr(project, effect, *definition, "size");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString droplets = parameterExpr(project, effect, *definition, "droplets");
+            const QString drips = parameterExpr(project, effect, *definition, "drips");
+            const QString dripLength = parameterExpr(project, effect, *definition, "drip_length");
+            out += QString("    // %1 - sparse irregular impacts, directional satellites and gravity drips\n"
+                           "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
+                           "    float %2_aspect = %2_rt.x / %2_rt.y;\n"
+                           "    float2 %2_uv = float2((uv.x - 0.5) * %2_aspect, uv.y - 0.5);\n"
+                           "    float %2_mask = 0.0;\n"
+                           "    float %2_core = 0.0;\n"
+                           "    float %2_gloss = 0.0;\n"
+                           "    [loop] for(int %2_i = 0; %2_i < 10; ++%2_i)\n"
                            "    {\n"
-                           "        [unroll] for(int %2_x = -1; %2_x <= 1; ++%2_x)\n"
+                           "        float %2_fi = (float)%2_i;\n"
+                           "        if(%2_fi + 0.5 > %3) break;\n"
+                           "        float2 %2_seed = float2(%2_fi * 7.13 + 1.71, %2_fi * 13.37 + 5.29);\n"
+                           "        float2 %2_center01 = float2(BO3BeginnerHash21(%2_seed), BO3BeginnerHash21(%2_seed + 17.9));\n"
+                           "        float2 %2_center = float2((%2_center01.x - 0.5) * %2_aspect, %2_center01.y - 0.5);\n"
+                           "        float %2_rnd = BO3BeginnerHash21(%2_seed + 31.4);\n"
+                           "        float %2_radius = %4 * lerp(0.72, 1.38, %2_rnd);\n"
+                           "        float2 %2_d = %2_uv - %2_center;\n"
+                           "        float %2_mainDist = length(%2_d);\n"
+                           "        float %2_main = 1.0 - smoothstep(%2_radius * 0.90, %2_radius, %2_mainDist);\n"
+                           "        float %2_localMask = %2_main;\n"
+                           "        float %2_localCore = 1.0 - smoothstep(%2_radius * 0.60, %2_radius * 0.82, %2_mainDist);\n"
+                           "        // Break the perfect circle with several uneven lobes around the impact.\n"
+                           "        [unroll] for(int %2_l = 0; %2_l < 4; ++%2_l)\n"
                            "        {\n"
-                           "            float2 %2_id = %2_cell + float2(%2_x, %2_y);\n"
-                           "            float2 %2_center = (float2(BO3BeginnerHash21(%2_id + 1.7), BO3BeginnerHash21(%2_id + 9.2)) - 0.5) * 0.9;\n"
-                           "            float %2_radius = 0.14 + BO3BeginnerHash21(%2_id + 4.6) * 0.28;\n"
-                           "            float2 %2_delta = %2_local - float2(%2_x, %2_y) - %2_center;\n"
-                           "            float %2_blob = 1.0 - smoothstep(%2_radius, %2_radius + 0.12, length(%2_delta));\n"
-                           "            float %2_drip = 1.0 - smoothstep(0.02, 0.11, abs(%2_delta.x)) * smoothstep(-0.38, 0.24, %2_delta.y);\n"
-                           "            %2_splat = max(%2_splat, max(%2_blob, %2_drip * 0.55 * step(0.0, %2_delta.y)));\n"
+                           "            float %2_fl = (float)%2_l;\n"
+                           "            float2 %2_lobeDir = float2(BO3BeginnerHash21(%2_seed + 41.0 + %2_fl * 2.91), BO3BeginnerHash21(%2_seed + 53.0 + %2_fl * 4.17)) - 0.5;\n"
+                           "            %2_lobeDir = normalize(%2_lobeDir + float2(0.0001,0.0));\n"
+                           "            float %2_lobeRand = BO3BeginnerHash21(%2_seed + 47.0 + %2_fl * 3.1);\n"
+                           "            float %2_lobeDist = %2_radius * lerp(0.48, 0.92, %2_lobeRand);\n"
+                           "            float2 %2_lobePos = %2_center + %2_lobeDir * %2_lobeDist;\n"
+                           "            float %2_lobeR = %2_radius * lerp(0.18, 0.46, BO3BeginnerHash21(%2_seed + 61.0 + %2_fl * 5.7)) * lerp(0.32, 1.0, %5);\n"
+                           "            float %2_lobe = 1.0 - smoothstep(%2_lobeR * 0.78, %2_lobeR, length(%2_uv - %2_lobePos));\n"
+                           "            %2_localMask = max(%2_localMask, %2_lobe);\n"
                            "        }\n"
+                           "        // Directional satellite droplets make the impact read as a splash instead of a tiled pattern.\n"
+                           "        [unroll] for(int %2_s = 0; %2_s < 5; ++%2_s)\n"
+                           "        {\n"
+                           "            float %2_fs = (float)%2_s;\n"
+                           "            float2 %2_sdir = float2(BO3BeginnerHash21(%2_seed + 83.0 + %2_fs * 4.33), BO3BeginnerHash21(%2_seed + 91.0 + %2_fs * 6.11)) - 0.5;\n"
+                           "            %2_sdir = normalize(%2_sdir + float2(0.0001,0.0));\n"
+                           "            float %2_travel = %2_radius * lerp(1.05, 3.4, BO3BeginnerHash21(%2_seed + 96.0 + %2_fs * 7.17));\n"
+                           "            float2 %2_sp = %2_center + %2_sdir * %2_travel;\n"
+                           "            float %2_sr = %2_radius * lerp(0.035, 0.13, BO3BeginnerHash21(%2_seed + 114.0 + %2_fs * 2.47));\n"
+                           "            float %2_drop = (1.0 - smoothstep(%2_sr * 0.72, %2_sr, length(%2_uv - %2_sp))) * %6;\n"
+                           "            %2_localMask = max(%2_localMask, %2_drop);\n"
+                           "        }\n"
+                           "        // A few impacts pull downward into tapered gravity runs attached to the main body.\n"
+                           "        float %2_dripGate = step(1.0 - %7, BO3BeginnerHash21(%2_seed + 141.0));\n"
+                           "        float %2_dripX = %2_center.x + (BO3BeginnerHash21(%2_seed + 153.0) - 0.5) * %2_radius * 0.85;\n"
+                           "        float %2_dripStart = %2_center.y + %2_radius * lerp(0.28,0.72,BO3BeginnerHash21(%2_seed + 167.0));\n"
+                           "        float %2_len = %2_radius * lerp(0.8, 4.8, BO3BeginnerHash21(%2_seed + 181.0)) * %8;\n"
+                           "        float %2_yAlong = %2_uv.y - %2_dripStart;\n"
+                           "        float %2_t = saturate(%2_yAlong / max(%2_len, 0.0001));\n"
+                           "        float %2_w = %2_radius * lerp(0.055, 0.13, BO3BeginnerHash21(%2_seed + 193.0)) * lerp(1.0, 0.48, %2_t);\n"
+                           "        float %2_inY = step(0.0, %2_yAlong) * step(%2_yAlong, %2_len);\n"
+                           "        float %2_dripBody = (1.0 - smoothstep(%2_w * 0.72, %2_w, abs(%2_uv.x - %2_dripX))) * %2_inY;\n"
+                           "        float2 %2_tipPos = float2(%2_dripX, %2_dripStart + %2_len);\n"
+                           "        float %2_tip = 1.0 - smoothstep(%2_w * 0.8, %2_w * 1.35, length(%2_uv - %2_tipPos));\n"
+                           "        %2_localMask = max(%2_localMask, max(%2_dripBody, %2_tip) * %2_dripGate);\n"
+                           "        %2_mask = max(%2_mask, %2_localMask);\n"
+                           "        %2_core = max(%2_core, %2_localCore);\n"
+                           "        // Tiny offset highlight, restrained so it still looks like thick paint rather than neon blobs.\n"
+                           "        float2 %2_hiPos = %2_center - normalize(float2(0.7,1.0)) * %2_radius * 0.22;\n"
+                           "        float %2_hi = 1.0 - smoothstep(%2_radius * 0.08, %2_radius * 0.28, length(%2_uv - %2_hiPos));\n"
+                           "        %2_gloss = max(%2_gloss, %2_hi * %2_localCore);\n"
                            "    }\n"
-                           "    color = lerp(color, color * 0.35 + %4 * 0.9, saturate(%2_splat * %5));\n")
-                .arg(definition->name, tag, scale, colorLiteral(splatColor), strength);
+                           "    %2_mask = saturate(%2_mask);\n"
+                           "    float %2_rim = saturate(%2_mask - %2_core * 0.76);\n"
+                           "    float3 %2_basePaint = %9 * lerp(0.58, 0.94, %2_core);\n"
+                           "    %2_basePaint = lerp(%2_basePaint, %9 * 0.42, %2_rim * 0.42);\n"
+                           "    %2_basePaint += %2_gloss * lerp(%9, float3(1.0,0.92,0.90), 0.55) * 0.20;\n"
+                           "    float %2_alpha = saturate(%2_mask * %10);\n"
+                           "    color = lerp(color, %2_basePaint, %2_alpha);\n")
+                .arg(definition->name, tag, count, size, roughness, droplets, drips, dripLength, colorLiteral(splatColor))
+                .arg(strength);
         }
         else if(effect.typeId == "water_distortion" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -2385,11 +2445,16 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("smear", "Paint Smear", "How far color is pulled along each brush direction.", 0.0, 2.0, 0.01, 0.85),
                    FloatParam("bend", "Stroke Bend", "Curve the brush shape instead of keeping every stroke straight.", -1.0, 1.0, 0.01, 0.22),
                    FloatParam("detail", "Edge Detail", "Use a wider local gradient to orient strokes around larger forms.", 0.0, 1.0, 0.01, 0.45)}),
-        EffectDef("red_paint_splatter", "Red Paint Splatter", "Overlay procedural red paint splashes and drips across the screen.", "Stylized Screen",
+        EffectDef("red_paint_splatter", "Red Paint Splatter", "Overlay sparse irregular paint impacts with satellite droplets and gravity-driven drips instead of repeated oval stamps.", "Stylized Screen",
                   {Target::PostFx},
                   {ColorParam("color", "Paint Color", "Color of the splatter overlay.", "#9E1424"),
-                   FloatParam("strength", "Strength", "How visible the splatter becomes.", 0.0, 1.0, 0.01, 0.55),
-                   FloatParam("scale", "Splash Count", "Higher values create more, smaller splatters.", 2.0, 18.0, 0.1, 6.0)}),
+                   FloatParam("strength", "Strength", "Overall opacity of the paint on the screen.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("scale", "Splash Count", "Number of major paint impacts. Lower values create a cleaner composition.", 1.0, 10.0, 1.0, 4.0),
+                   FloatParam("size", "Splash Size", "Average size of the major impacts.", 0.035, 0.22, 0.005, 0.105),
+                   FloatParam("roughness", "Edge Roughness", "Break up the impact edges with asymmetric lobes and directional spray.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("droplets", "Satellite Droplets", "Amount of small droplets thrown away from the main impacts.", 0.0, 1.0, 0.01, 0.70),
+                   FloatParam("drips", "Drip Amount", "How often impacts form gravity-driven runs.", 0.0, 1.0, 0.01, 0.48),
+                   FloatParam("drip_length", "Drip Length", "Maximum length of the vertical paint runs.", 0.0, 1.0, 0.01, 0.52)}),
         EffectDef("water_distortion", "Water Distortion", "Refract the screen like a watery surface or wet camera lens.", "Water & Weather",
                   {Target::PostFx},
                   {FloatParam("amount", "Distortion", "How far the refraction bends the image.", 0.0, 3.0, 0.01, 0.75),
