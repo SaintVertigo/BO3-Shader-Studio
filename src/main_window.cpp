@@ -1579,10 +1579,9 @@ public:
                !postHlsl.contains("Depth Contours") ||
                !postHlsl.contains("Depth Heatmap") ||
                !postHlsl.contains("Contact Shadows") ||
-               !postHlsl.contains("BO3_BEGINNER_SSR") ||
-               !postHlsl.contains("Screen-Space Reflections") ||
-               !postHlsl.contains("Wet Ground Reflections") ||
-               !postHlsl.contains("BO3BeginnerSSRTrace") ||
+               !postHlsl.contains("BO3_BEGINNER_ASCII_DEPTH") ||
+               !postHlsl.contains("BO3BeginnerAsciiGlyph") ||
+               !postHlsl.contains("ASCII Depth") ||
                !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
                !postHlsl.contains("Rain Drops") ||
                !postHlsl.contains("Shadertoy fragCoord space (Y-up)") ||
@@ -1590,6 +1589,12 @@ public:
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
+            if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
+               beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
+               beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||
+               beginner::effectDefinition(QStringLiteral("material_mirror")) ||
+               postHlsl.contains("BO3_BEGINNER_SSR") || postHlsl.contains("BO3BeginnerSSRTrace"))
+                return "Removed SSR / mirror effects are still registered or emitted by Beginner mode.";
             if(!postHlsl.contains("#if TOOLSGFX") ||
                !postHlsl.contains("return max(gScene.nearClip, 0.001);") ||
                !postHlsl.contains("return max(zNear.x, 0.001);"))
@@ -1645,10 +1650,14 @@ public:
 
             const beginner::Project material = projects[1].first;
             const QString materialHlsl = beginner::generateHlsl(material);
-            if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT"))
-                return "Beginner Material coverage with scene reflections is missing its Geometry Effect surface contract.";
-            if(materialHlsl.contains("value / 32768.0"))
-                return "Beginner Material scene sampling still applies the PostFX resolvedScene 32768 color bridge.";
+            if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: OPAQUE") ||
+               materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT"))
+                return "Beginner Material coverage no longer matches the opaque non-SSR material contract.";
+            if(materialHlsl.contains("BO3_BEGINNER_SSR") ||
+               materialHlsl.contains("BO3BeginnerMaterialReflectionSample") ||
+               materialHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               materialHlsl.contains("Texture2D<float4> frameBuffer : register(t0);"))
+                return "Beginner Material still emits removed SSR/live-scene resources.";
             if(!materialHlsl.contains("localPosition : TEXCOORD5") ||
                !materialHlsl.contains("BO3BeginnerHash31") ||
                !materialHlsl.contains("surfacePosition"))
@@ -1657,31 +1666,20 @@ public:
                !materialHlsl.contains("surfaceViewDir") ||
                !materialHlsl.contains("clip("))
                 return "Beginner Material glow/dissolve modules are missing their BO3 runtime inputs.";
-            if(!materialHlsl.contains("BO3_BEGINNER_MATERIAL_SSR: 1") ||
-               !materialHlsl.contains("material SSR uses the authored surface normal") ||
-               !materialHlsl.contains("Texture2D<float4> frameBuffer : register(t0);") ||
-               !materialHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
-               !materialHlsl.contains("BO3_BEGINNER_SSR") ||
-               !materialHlsl.contains("BO3BeginnerMaterialSSRTrace") ||
-               !materialHlsl.contains("Transform_OffsetToCamera") ||
-               !materialHlsl.contains("Transform_OffsetToClip") ||
-               !materialHlsl.contains("BO3_SHADER_STUDIO_MATERIAL_PREVIEW") ||
-               !materialHlsl.contains("BO3BeginnerMaterialPreviewEnvironmentUv"))
-                return "Beginner Material screen-space reflection module is missing its surface-normal runtime trace or camera-matched preview contract.";
-            if(!beginner::effectDefinition(QStringLiteral("material_mirror")) ||
-               !beginner::effectDefinition(QStringLiteral("material_wet_surface")) ||
+            if(!beginner::effectDefinition(QStringLiteral("material_wet_surface")) ||
                !beginner::effectDefinition(QStringLiteral("material_clear_coat")) ||
                !beginner::effectDefinition(QStringLiteral("material_chrome")) ||
                !beginner::effectDefinition(QStringLiteral("material_frosted_glass")) ||
                !beginner::effectDefinition(QStringLiteral("material_water_surface")) ||
                !beginner::effectDefinition(QStringLiteral("material_carbon_fiber")) ||
                !beginner::effectDefinition(QStringLiteral("material_marble")))
-                return "Beginner Material expansion is missing one or more core surface definitions.";
-            if(!materialHlsl.contains("Mirror - near-perfect material mirror") ||
-               !materialHlsl.contains("BO3BeginnerMaterialReflectionSample") ||
+                return "Beginner Material expansion is missing one or more retained surface definitions.";
+            if(!materialHlsl.contains("analytic environment chrome") ||
+               !materialHlsl.contains("procedural frosted-glass look") ||
+               !materialHlsl.contains("animated analytic water") ||
                !materialHlsl.contains("BO3BeginnerFbm3") ||
                !materialHlsl.contains("BO3BeginnerHexEdge"))
-                return "Beginner Material expansion is missing mirror/reflection or procedural surface generation paths.";
+                return "Beginner Material non-SSR surface generation paths are incomplete.";
 
             // The package adapter validates the authored Material contract above,
             // but Beginner export ultimately passes through the Custom Material
@@ -1690,7 +1688,7 @@ public:
             QString materialAdapterDescription;
             QString materialAdapterError;
             const QString exportedMaterial = makeBo3CustomMaterialShader(
-                materialHlsl, materialAdapterDescription, materialAdapterError, 8);
+                materialHlsl, materialAdapterDescription, materialAdapterError, 0);
             if(exportedMaterial.isEmpty() || !materialAdapterError.isEmpty())
                 return "Beginner Material failed the real BO3 Custom Material export bridge: " + materialAdapterError;
             if(!exportedMaterial.contains("pixel.objectPosition"))
@@ -1738,78 +1736,6 @@ public:
             if(!plainMaterialGbuffer.found)
                 return "Ordinary Beginner Material did not serialize a resolvable gbuffer technique: " +
                        plainMaterialGbuffer.validation.toText();
-
-            // Keep this techset-binding regression focused on SSR itself. The
-            // coverage material above intentionally stacks every Material effect,
-            // which is useful for FXC coverage but not representative of one
-            // practical runtime parameter set.
-            beginner::Project focusedMaterialSsr = beginner::makeDefaultProject(beginner::Target::Material);
-            focusedMaterialSsr.effects.push_back(beginner::makeDefaultEffect(QStringLiteral("material_screen_space_reflections")));
-            const QString focusedMaterialSsrHlsl = beginner::generateHlsl(focusedMaterialSsr);
-            QString focusedMaterialDescription;
-            QString focusedMaterialError;
-            const QString focusedExportedMaterial = makeBo3CustomMaterialShader(
-                focusedMaterialSsrHlsl, focusedMaterialDescription, focusedMaterialError, 8);
-            if(focusedExportedMaterial.isEmpty() || !focusedMaterialError.isEmpty())
-                return "Focused Beginner Material SSR failed the BO3 Custom Material bridge: " + focusedMaterialError;
-
-            QVector<ExportParamBinding> materialSsrBindings =
-                buildBeginnerExportParamBindings(focusedMaterialSsr, focusedExportedMaterial);
-            for(const ExportParamBinding& binding : materialSsrBindings)
-            {
-                if(binding.name == QStringLiteral("bb_material_screen_space_reflections_0_perspective"))
-                    return "Beginner Material SSR still exports the removed Perspective Match runtime parameter.";
-            }
-
-            // Simulate an older project/export caller handing the techset writer
-            // the pre-rework Perspective Match binding. The writer must discard
-            // it because the current material HLSL no longer declares that global.
-            ExportParamBinding staleMaterialSsrPerspective;
-            staleMaterialSsrPerspective.name =
-                QStringLiteral("bb_material_screen_space_reflections_0_perspective");
-            staleMaterialSsrPerspective.value = 1.30f;
-            staleMaterialSsrPerspective.storage = QStringLiteral("cg29_x");
-            materialSsrBindings.push_back(staleMaterialSsrPerspective);
-
-            const QString materialSsrTechset = makeMaterialTechset(
-                focusedExportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 8,
-                bo3::PackageConfiguration::Runtime);
-            if(!materialSsrTechset.contains("category = \"Geometry Effect\"") ||
-               !materialSsrTechset.contains("renderFlags = \"distortion fx\""))
-                return "Beginner Material SSR did not serialize the BO3 Geometry Effect / distortion-fx contract.";
-            bo3::TechsetParseOptions materialSsrParseOptions;
-            materialSsrParseOptions.configuration = bo3::PackageConfiguration::Runtime;
-            const bo3::TechsetParseResult materialSsrParsed = bo3::parseTechset(
-                materialSsrTechset, QStringLiteral("beginner_material_ssr.techsetdef"),
-                materialSsrParseOptions);
-            if(materialSsrParsed.validation.hasErrors())
-                return "Beginner Material SSR runtime techset failed to parse after serialization: " +
-                       materialSsrParsed.validation.toText();
-            for(const bo3::ParameterModel& parameter : materialSsrParsed.model.parameters)
-            {
-                if(parameter.name == QStringLiteral("bb_material_screen_space_reflections_0_perspective"))
-                    return "Beginner Material techset serialized a stale SSR Perspective Match parameter that is absent from HLSL.";
-            }
-            const bo3::TechniqueResolutionResult materialSsrResolved =
-                bo3::resolveTechnique(materialSsrParsed.model, QStringLiteral("lit"));
-            if(!materialSsrResolved.found)
-                return "Beginner Material SSR runtime techset lost its lit technique: " +
-                       materialSsrResolved.validation.toText();
-            bool materialSsrSceneBound = false;
-            bool materialSsrDepthBound = false;
-            for(const bo3::StageResourceBindingModel& binding :
-                materialSsrResolved.technique.pixelShader.resourceBindings)
-            {
-                if(binding.valueKind != bo3::BindingValueKind::CodeTexture) continue;
-                if(binding.parameterName.compare(QStringLiteral("frameBuffer"), Qt::CaseInsensitive) == 0 &&
-                   binding.valueName.compare(QStringLiteral("resolvedPostSun"), Qt::CaseInsensitive) == 0)
-                    materialSsrSceneBound = true;
-                if(binding.parameterName.compare(QStringLiteral("DepthSampler"), Qt::CaseInsensitive) == 0 &&
-                   binding.valueName.compare(QStringLiteral("floatZ"), Qt::CaseInsensitive) == 0)
-                    materialSsrDepthBound = true;
-            }
-            if(!materialSsrSceneBound || !materialSsrDepthBound)
-                return "Beginner Material SSR runtime techset did not bind resolvedPostSun + floatZ CodeTextures.";
 
             const beginner::Project sky = projects[2].first;
             const QString skyHlsl = beginner::generateHlsl(sky);
@@ -5978,7 +5904,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             // Final material-techset guard: never serialize a constant parameter
             // that the actual exported HLSL no longer declares. This catches
             // stale/migrated Beginner fields (for example the removed material
-            // SSR Perspective Match control) even if an older caller hands us a
+            // removed legacy runtime control) even if an older caller hands us a
             // binding list that still contains them.
             if(!shaderDeclaresLooseScalarParameter(src, binding.name))
                 continue;
@@ -6097,7 +6023,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             // Stage-local bindings are serialized only for PixelShader() blocks.
             // A plain ps = "ps_generic" assignment intentionally has no body, so
             // attaching scene/Float-Z bindings to that model silently drops them
-            // from the generated techset. Material SSR owns a real ps_main in
+            // from the generated techset. A scene-sampling material owns a real ps_main in
             // shaderRel, therefore switch only the affected runtime techniques to
             // an inline custom pixel stage and keep the stock generic VS unchanged.
             if(boundSceneResource &&
@@ -12753,8 +12679,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         materialSurfaceMode->addItem("Decal / Alpha Blend",5);
         materialSurfaceMode->addItem("Decal / Additive",6);
         materialSurfaceMode->addItem("Glass-like / Transparent (no refraction)",7);
-        materialSurfaceMode->addItem("Scene-Sampling Geometry Effect (SSR / Mirror)",8);
-        materialSurfaceMode->setToolTip("Controls BO3 render/blend behavior for Custom HLSL Materials. Scene-Sampling Geometry Effect uses BO3's Geometry Effect / resolvedPostSun path for SSR, mirrors and other live-scene material effects.");
+        materialSurfaceMode->addItem("Scene-Sampling Geometry Effect",8);
+        materialSurfaceMode->setToolTip("Controls BO3 render/blend behavior for Custom HLSL Materials. Scene-Sampling Geometry Effect is an advanced live-scene material mode and is not used by Beginner materials.");
 
         // Material / Surface shaders created by the GLSL converter carry a small
         // recommendation marker. Use it only as the dialog default; the user can
@@ -12792,14 +12718,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                                   (beginnerProject_.target == beginner::Target::Sky ? 2 : 0));
             if(beginnerProject_.target == beginner::Target::Material)
             {
-                // Physical Beginner materials default to BO3's deferred opaque
-                // geometry path. Effects that need the live rendered scene
-                // (SSR, Mirror, wet/clear-coat reflection finishes, etc.) use a
-                // dedicated Geometry Effect contract instead of masquerading as
-                // an emissive Geometry Custom material.
-                materialSurfaceMode->setCurrentIndex(
-                    currentShaderText.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT",
-                                               Qt::CaseInsensitive) ? 8 : 0);
+                // Beginner materials are deliberately scene-independent. Reflective-looking
+                // finishes use analytic/procedural shading and export through the normal
+                // opaque deferred Geometry Custom path.
+                materialSurfaceMode->setCurrentIndex(0);
             }
             if(beginnerProject_.target == beginner::Target::PostFx)
                 includePostFxFilterSupport->setChecked(true);
@@ -14270,11 +14192,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                id == "depth_of_field" || id == "depth_edge_glow" || id == "distance_tint" ||
                id == "depth_desaturation" || id == "distance_darkening" || id == "depth_pixelation" ||
                id == "depth_chromatic_aberration" || id == "depth_contours" || id == "depth_heatmap" ||
-               id == "depth_isolation" || id == "contact_shadows" ||
-               id == "screen_space_reflections" || id == "wet_ground_reflections" ||
-               id == "material_screen_space_reflections" || id == "material_mirror" ||
-               id == "material_wet_surface" || id == "material_clear_coat" || id == "material_chrome" ||
-               id == "material_frosted_glass" || id == "material_water_surface" || id == "material_wet_concrete";
+               id == "ascii_depth" || id == "depth_isolation" || id == "contact_shadows";
     }
 
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
@@ -14288,8 +14206,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         if(id == "cinematic") return "Film contrast + soft color + vignette";
         if(id == "retro_crt") return "Scanlines + film grain + color split";
-        if(id == "mirror") return "Near-perfect live scene reflection";
-        if(id == "wet_surface") return "Dark wet finish + glossy reflections";
+        if(id == "wet_surface") return "Dark wet finish + local glossy highlight";
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
         if(id == "sunset") return "Warm horizon + low sun + haze";

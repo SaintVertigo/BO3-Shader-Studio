@@ -748,6 +748,42 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, %2_heat, %8);\n")
                 .arg(definition->name, tag, start, end, colorLiteral(nearColor), colorLiteral(midColor), colorLiteral(farColor), strength);
         }
+        else if(effect.typeId == "ascii_depth" && project.target == Target::PostFx && hasUv)
+        {
+            const QColor textColor = parameterColor(effect, *definition, "text_color");
+            const QColor backgroundColor = parameterColor(effect, *definition, "background_color");
+            const QString charSize = parameterExpr(project, effect, *definition, "char_size");
+            const QString glyphScale = parameterExpr(project, effect, *definition, "glyph_scale");
+            const QString start = parameterExpr(project, effect, *definition, "start");
+            const QString end = parameterExpr(project, effect, *definition, "end");
+            const QString curve = parameterExpr(project, effect, *definition, "curve");
+            const QString levels = parameterExpr(project, effect, *definition, "levels");
+            const QString direction = parameterExpr(project, effect, *definition, "direction");
+            const QString backgroundOpacity = parameterExpr(project, effect, *definition, "background_opacity");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            out += QString("    // %1 - depth-driven procedural ASCII raster\n"
+                           "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
+                           "    float %2_h = max(%3, 6.0);\n"
+                           "    float2 %2_cellPx = float2(max(%2_h*0.64,4.0), %2_h);\n"
+                           "    float2 %2_grid = uv * %2_rt / %2_cellPx;\n"
+                           "    float2 %2_cell = floor(%2_grid);\n"
+                           "    float2 %2_local = frac(%2_grid);\n"
+                           "    float2 %2_centerUv = saturate((%2_cell + 0.5) * %2_cellPx / %2_rt);\n"
+                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(%2_centerUv));\n"
+                           "    float %2_lo = min(%5,%6); float %2_hi = max(%5,%6);\n"
+                           "    float %2_d = saturate((%2_depth01-%2_lo)/max(%2_hi-%2_lo,0.0001));\n"
+                           "    float %2_dense = lerp(1.0-%2_d,%2_d,step(0.5,%9));\n"
+                           "    %2_dense = pow(saturate(%2_dense),max(%7,0.05));\n"
+                           "    float %2_levelCount = clamp(round(%8),2.0,10.0);\n"
+                           "    int %2_band = (int)round(%2_dense * (%2_levelCount-1.0));\n"
+                           "    int %2_glyph = (int)round(float(%2_band) * 9.0 / max(%2_levelCount-1.0,1.0));\n"
+                           "    float %2_ink = BO3BeginnerAsciiGlyph(%2_local,%2_glyph,%4);\n"
+                           "    float3 %2_bg = lerp(color,%11,saturate(%10));\n"
+                           "    float3 %2_ascii = lerp(%2_bg,%12,%2_ink);\n"
+                           "    color = lerp(color,%2_ascii,saturate(%13));\n")
+                .arg(definition->name, tag, charSize, glyphScale, start, end, curve, levels, direction,
+                     backgroundOpacity, colorLiteral(backgroundColor), colorLiteral(textColor), strength);
+        }
         else if(effect.typeId == "depth_isolation" && project.target == Target::PostFx && hasUv)
         {
             const QString focus = parameterExpr(project, effect, *definition, "focus");
@@ -792,96 +828,38 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color *= 1.0 - saturate(%2_occ * %7);\n")
                 .arg(definition->name, tag, lengthPx, bias, softness, angle, strength);
         }
-        else if(effect.typeId == "screen_space_reflections" && project.target == Target::PostFx && hasUv)
-        {
-            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QString perspective = parameterExpr(project, effect, *definition, "perspective");
-            const QString distanceFade = parameterExpr(project, effect, *definition, "distance_fade");
-            out += QString("    // %1 - BO3 Float-Z screen-space reflection raymarch\n"
-                           "    float %2_ssrRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
-                           "    float %2_ssrTarget = BO3BeginnerTargetMask(%2_ssrRaw, %3);\n"
-                           "    float3 %2_ssrNormal = BO3BeginnerSSRNormal(uv, %2_ssrRaw, %10);\n"
-                           "    float3 %2_ssrPos = BO3BeginnerSSRViewPosition(uv, BO3BeginnerLinearDepth(%2_ssrRaw), %10);\n"
-                           "    float3 %2_ssrView = normalize(-%2_ssrPos);\n"
-                           "    float %2_ssrFresnel = pow(1.0 - saturate(dot(%2_ssrNormal, %2_ssrView)), lerp(5.0, 1.0, saturate(%9)));\n"
-                           "    float4 %2_ssrTrace = BO3BeginnerSSRTrace(uv, %2_ssrRaw, %5, %7, %6, %10, %8, 0.0, 1.0, t);\n"
-                           "    float %2_ssrDepth01 = BO3BeginnerNormalizedDepth(%2_ssrRaw);\n"
-                           "    float %2_ssrDistanceMask = 1.0 - smoothstep(max(0.0,%11), 1.0, %2_ssrDepth01);\n"
-                           "    float %2_ssrBlend = saturate(%2_ssrTrace.a * %4 * %2_ssrTarget * %2_ssrDistanceMask * lerp(1.0, %2_ssrFresnel, saturate(%9)));\n"
-                           "    color = lerp(color, %2_ssrTrace.rgb, %2_ssrBlend);\n")
-                .arg(definition->name, tag, targetScope, strength, maxDistance, steps, thickness, roughness, fresnel, perspective, distanceFade);
-        }
-        else if(effect.typeId == "material_screen_space_reflections" && project.target == Target::Material && hasUv)
-        {
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QColor tint = parameterColor(effect, *definition, "tint");
-            out += QString("    // %1 - material SSR uses the authored surface normal; preview uses the studio environment only\n"
-                           "    float %2_surfaceFresnel = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.0, 1.0, saturate(%8)));\n"
-                           "    float4 %2_trace = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %4, %6, %5, %7);\n"
-                           "    float %2_blend = saturate(%2_trace.a * %3 * lerp(0.35, 1.0, %2_surfaceFresnel));\n"
-                           "    color = lerp(color, %2_trace.rgb * %9, %2_blend);\n")
-                .arg(definition->name, tag, strength, maxDistance, steps, thickness, roughness, fresnel, colorLiteral(tint));
-        }
-        else if(effect.typeId == "material_mirror" && project.target == Target::Material)
-        {
-            const QColor tint = parameterColor(effect, *definition, "tint");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            out += QString("    // %1 - near-perfect material mirror using the same live scene trace as SSR\n"
-                           "    float4 %2_mirrorTrace = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %4, %6, %5, 0.0);\n"
-                           "    float %2_mirrorF = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), 3.5);\n"
-                           "    float %2_mirrorBlend = saturate(%2_mirrorTrace.a * %3 * lerp(1.0, 1.0 + %7 * 0.20, %2_mirrorF));\n"
-                           "    float3 %2_mirrorColor = %2_mirrorTrace.rgb * %8;\n"
-                           "    color = lerp(color * 0.05, %2_mirrorColor, %2_mirrorBlend);\n")
-                .arg(definition->name, tag, strength, maxDistance, steps, thickness, fresnel, colorLiteral(tint));
-        }
         else if(effect.typeId == "material_wet_surface" && project.target == Target::Material)
         {
             const QString wetness = parameterExpr(project, effect, *definition, "wetness");
             const QString darkening = parameterExpr(project, effect, *definition, "darkening");
             const QString roughness = parameterExpr(project, effect, *definition, "roughness");
             const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            out += QString("    // %1\n"
+            out += QString("    // %1 - local wet-film shading; no screen-space reflection dependency\n"
                            "    float %2_wet = saturate(%3);\n"
                            "    color *= 1.0 - %2_wet * %4;\n"
-                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.0,1.2,saturate(%6)));\n"
-                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %7, %9, %8, %5);\n"
-                           "    float %2_b = saturate(%2_r.a * %2_wet * lerp(0.32,1.0,%2_f));\n"
-                           "    color = lerp(color, %2_r.rgb, %2_b);\n")
-                .arg(definition->name, tag, wetness, darkening, roughness, fresnel, maxDistance, steps, thickness);
+                           "    float %2_ndv = saturate(dot(surfaceNormal, surfaceViewDir));\n"
+                           "    float %2_f = pow(1.0 - %2_ndv, lerp(6.0, 1.35, saturate(%6)));\n"
+                           "    float3 %2_lightDir = normalize(float3(0.28,0.76,0.58));\n"
+                           "    float3 %2_halfDir = normalize(%2_lightDir + surfaceViewDir);\n"
+                           "    float %2_specPower = lerp(96.0, 5.0, saturate(%5));\n"
+                           "    float %2_spec = pow(saturate(dot(surfaceNormal,%2_halfDir)), %2_specPower);\n"
+                           "    color += (%2_spec * (0.16 + 0.70*(1.0-saturate(%5))) + %2_f*0.18) * %2_wet;\n")
+                .arg(definition->name, tag, wetness, darkening, roughness, fresnel);
         }
         else if(effect.typeId == "material_clear_coat" && project.target == Target::Material)
         {
             const QString coat = parameterExpr(project, effect, *definition, "coat");
             const QString roughness = parameterExpr(project, effect, *definition, "roughness");
             const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            out += QString("    // %1\n"
-                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.5,1.1,saturate(%5)));\n"
-                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %6, %8, %7, %4);\n"
-                           "    float %2_b = saturate(%2_r.a * %3 * lerp(0.12,0.88,%2_f));\n"
-                           "    color = lerp(color, %2_r.rgb, %2_b);\n"
-                           "    color += %2_f.xxx * (%3 * 0.08);\n")
-                .arg(definition->name, tag, coat, roughness, fresnel, maxDistance, steps, thickness);
+            out += QString("    // %1 - analytic clear-coat highlight without live-scene sampling\n"
+                           "    float %2_ndv = saturate(dot(surfaceNormal, surfaceViewDir));\n"
+                           "    float %2_f = pow(1.0-%2_ndv, lerp(6.0,1.25,saturate(%5)));\n"
+                           "    float3 %2_l = normalize(float3(-0.24,0.82,0.52));\n"
+                           "    float3 %2_h = normalize(%2_l + surfaceViewDir);\n"
+                           "    float %2_spec = pow(saturate(dot(surfaceNormal,%2_h)), lerp(128.0,4.0,saturate(%4)));\n"
+                           "    float %2_coatLight = saturate((%2_spec * 0.82 + %2_f * 0.28) * %3);\n"
+                           "    color = lerp(color, color + %2_coatLight.xxx, saturate(%3));\n")
+                .arg(definition->name, tag, coat, roughness, fresnel);
         }
         else if(effect.typeId == "material_chrome" && project.target == Target::Material)
         {
@@ -889,16 +867,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString reflectivity = parameterExpr(project, effect, *definition, "reflectivity");
             const QString roughness = parameterExpr(project, effect, *definition, "roughness");
             const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            out += QString("    // %1\n"
-                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal,surfaceViewDir)), lerp(4.5,1.0,saturate(%6)));\n"
-                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %7, %9, %8, %5);\n"
-                           "    float3 %2_metalBase = lerp(color * 0.18, %3 * max(dot(surfaceNormal, normalize(float3(0.35,0.75,0.55))),0.0), 0.42);\n"
-                           "    float %2_b = saturate(%2_r.a * %4 * lerp(0.68,1.0,%2_f));\n"
-                           "    color = lerp(%2_metalBase, %2_r.rgb * %3, %2_b);\n")
-                .arg(definition->name, tag, colorLiteral(tint), reflectivity, roughness, fresnel, maxDistance, steps, thickness);
+            out += QString("    // %1 - analytic environment chrome; no SSR or framebuffer sampling\n"
+                           "    float3 %2_r = normalize(reflect(-surfaceViewDir, surfaceNormal));\n"
+                           "    float %2_sky = saturate(%2_r.z * 0.5 + 0.5);\n"
+                           "    float3 %2_env = lerp(float3(0.055,0.060,0.068), float3(0.72,0.82,0.96), pow(%2_sky,0.72));\n"
+                           "    float3 %2_sunDir = normalize(float3(0.32,0.61,0.72));\n"
+                           "    float %2_sun = pow(saturate(dot(%2_r,%2_sunDir)), lerp(220.0,8.0,saturate(%5)));\n"
+                           "    float %2_f = pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)), lerp(5.0,1.0,saturate(%6)));\n"
+                           "    float3 %2_chrome = (%2_env + %2_sun.xxx * (0.45 + 0.75*(1.0-saturate(%5)))) * %3;\n"
+                           "    float %2_mix = saturate(%4 * lerp(0.72,1.0,%2_f));\n"
+                           "    color = lerp(color * 0.16, %2_chrome, %2_mix);\n")
+                .arg(definition->name, tag, colorLiteral(tint), reflectivity, roughness, fresnel);
         }
         else if(effect.typeId == "material_metallic" && project.target == Target::Material)
         {
@@ -969,24 +948,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor tint = parameterColor(effect, *definition, "tint");
             const QString opacity = parameterExpr(project, effect, *definition, "opacity");
-            const QString blur = parameterExpr(project, effect, *definition, "blur");
+            const QString frost = parameterExpr(project, effect, *definition, "frost");
             const QString distortion = parameterExpr(project, effect, *definition, "distortion");
             const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            out += QString("    // %1 - screen-sampled frosted glass approximation\n"
-                           "    float2 %2_uv = BO3BeginnerMaterialSSRProjectUv(input.worldPosition.xyz);\n"
-                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
-                           "    float2 %2_refract = surfaceNormal.xy * %6 * %2_texel * 7.0;\n"
-                           "    %2_uv = saturate(%2_uv + %2_refract);\n"
-                           "    float2 %2_bx = float2(%2_texel.x*%5,0); float2 %2_by=float2(0,%2_texel.y*%5);\n"
-                           "    float3 %2_bg = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,%2_uv).rgb)*0.44;\n"
-                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv+%2_bx)).rgb)*0.14;\n"
-                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv-%2_bx)).rgb)*0.14;\n"
-                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv+%2_by)).rgb)*0.14;\n"
-                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv-%2_by)).rgb)*0.14;\n"
-                           "    float %2_f=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),lerp(5.0,1.2,%7));\n"
-                           "    float3 %2_glass=lerp(%2_bg*%3,%3,0.13+%2_f*0.15);\n"
-                           "    color=lerp(color,%2_glass,saturate(%4));\n")
-                .arg(definition->name, tag, colorLiteral(tint), opacity, blur, distortion, fresnel);
+            out += QString("    // %1 - procedural frosted-glass look without scene sampling\n"
+                           "    float %2_n = BO3BeginnerFbm3(surfacePosition * (0.018 * max(%5,0.1)) + surfaceNormal*1.7);\n"
+                           "    float %2_f = pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)), lerp(5.0,1.25,saturate(%7)));\n"
+                           "    float %2_scatter = lerp(0.72,1.18,%2_n);\n"
+                           "    float3 %2_glass = %3 * %2_scatter;\n"
+                           "    %2_glass += (%2_f * 0.42 + abs(%2_n-0.5) * %6 * 0.10).xxx;\n"
+                           "    color = lerp(color, %2_glass, saturate(%4));\n")
+                .arg(definition->name, tag, colorLiteral(tint), opacity, frost, distortion, fresnel);
         }
         else if(effect.typeId == "material_ice" && project.target == Target::Material)
         {
@@ -1013,19 +985,19 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString scale = parameterExpr(project, effect, *definition, "scale");
             const QString speed = parameterExpr(project, effect, *definition, "speed");
             const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            out += QString("    // %1\n"
+            out += QString("    // %1 - animated analytic water; no screen-space raymarching\n"
                            "    float2 %2_wp=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%6);\n"
                            "    float2 %2_wave=float2(sin((%2_wp.x+t*%7)*6.2831853)+cos((%2_wp.y-t*%7*0.73)*6.2831853), cos((%2_wp.y+t*%7*0.61)*6.2831853)+sin((%2_wp.x-t*%7*0.47)*6.2831853));\n"
                            "    float3 %2_n=normalize(surfaceNormal+float3(%2_wave.x,%2_wave.y,0.0)*(%5*0.16));\n"
                            "    float %2_f=pow(1.0-saturate(dot(%2_n,surfaceViewDir)),2.6);\n"
-                           "    float4 %2_r=BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz,%2_n,surfaceViewDir,%9,%11,%10,%8);\n"
+                           "    float3 %2_r=normalize(reflect(-surfaceViewDir,%2_n));\n"
+                           "    float %2_sky=saturate(%2_r.z*0.5+0.5);\n"
+                           "    float3 %2_env=lerp(float3(0.015,0.035,0.045),float3(0.42,0.70,0.92),%2_sky);\n"
+                           "    float %2_sun=pow(saturate(dot(%2_r,normalize(float3(0.28,0.64,0.72)))),lerp(140.0,8.0,saturate(%8)));\n"
                            "    float3 %2_body=%3*(0.38+0.30*saturate(dot(%2_n,normalize(float3(0.2,0.8,0.55)))));\n"
-                           "    float3 %2_water=lerp(%2_body,%2_r.rgb,saturate(%2_r.a*(0.32+%2_f*0.68)));\n"
+                           "    float3 %2_water=lerp(%2_body,%2_env + %2_sun.xxx*0.7,saturate(0.18+%2_f*0.72));\n"
                            "    color=lerp(color,%2_water,%4);\n")
-                .arg(definition->name, tag, colorLiteral(water), strength, ripples, scale, speed, roughness, maxDistance, steps, thickness);
+                .arg(definition->name, tag, colorLiteral(water), strength, ripples, scale, speed, roughness);
         }
         else if(effect.typeId == "material_wet_concrete" && project.target == Target::Material)
         {
@@ -1035,51 +1007,18 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString scale = parameterExpr(project, effect, *definition, "scale");
             const QString reflectivity = parameterExpr(project, effect, *definition, "reflectivity");
             const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            out += QString("    // %1\n"
+            out += QString("    // %1 - procedural wet patches with local specular response\n"
                            "    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%6));\n"
                            "    float %2_mask=smoothstep(0.86-saturate(%5)*0.68,0.94-saturate(%5)*0.58,%2_n);\n"
                            "    float3 %2_base=lerp(%3,%4,%2_mask)*(0.82+%2_n*0.18);\n"
-                           "    float4 %2_r=BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz,surfaceNormal,surfaceViewDir,%9,%11,%10,%8);\n"
-                           "    color=lerp(%2_base,%2_r.rgb,saturate(%2_mask*%7*%2_r.a));\n")
-                .arg(definition->name, tag, colorLiteral(dry), colorLiteral(wet), coverage, scale, reflectivity, roughness, maxDistance, steps, thickness);
+                           "    float3 %2_l=normalize(float3(0.30,0.78,0.55));\n"
+                           "    float3 %2_h=normalize(%2_l+surfaceViewDir);\n"
+                           "    float %2_spec=pow(saturate(dot(surfaceNormal,%2_h)),lerp(110.0,5.0,saturate(%8)));\n"
+                           "    float %2_f=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),3.2);\n"
+                           "    color=%2_base + (%2_spec*0.55+%2_f*0.12).xxx*saturate(%2_mask*%7);\n")
+                .arg(definition->name, tag, colorLiteral(dry), colorLiteral(wet), coverage, scale, reflectivity, roughness);
         }
-        else if(effect.typeId == "wet_ground_reflections" && project.target == Target::PostFx && hasUv)
-        {
-            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
-            const QString steps = parameterExpr(project, effect, *definition, "steps");
-            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
-            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
-            const QString wetness = parameterExpr(project, effect, *definition, "wetness");
-            const QString groundSelect = parameterExpr(project, effect, *definition, "ground_selectivity");
-            const QString coverage = parameterExpr(project, effect, *definition, "coverage");
-            const QString ripple = parameterExpr(project, effect, *definition, "ripple");
-            const QString rippleScale = parameterExpr(project, effect, *definition, "ripple_scale");
-            const QString perspective = parameterExpr(project, effect, *definition, "perspective");
-            out += QString("    // %1 - Float-Z wet-ground SSR with ground-normal gating and ripples\n"
-                           "    float %2_wetRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
-                           "    float %2_wetTarget = BO3BeginnerTargetMask(%2_wetRaw, %3);\n"
-                           "    float %2_wetDepth = BO3BeginnerLinearDepth(%2_wetRaw);\n"
-                           "    float3 %2_wetPos = BO3BeginnerSSRViewPosition(uv, %2_wetDepth, %15);\n"
-                           "    float3 %2_wetNormal = BO3BeginnerSSRNormal(uv, %2_wetRaw, %15);\n"
-                           "    float3 %2_wetView = normalize(-%2_wetPos);\n"
-                           "    float %2_ground = smoothstep(lerp(0.20,0.78,saturate(%10)), lerp(0.56,0.94,saturate(%10)), abs(%2_wetNormal.y));\n"
-                           "    float %2_puddleNoise = 0.5 + 0.25*sin(%2_wetPos.x*0.018) + 0.25*cos(%2_wetPos.z*0.013 + %2_wetPos.x*0.006);\n"
-                           "    float %2_puddle = smoothstep(1.0-saturate(%11), 1.12-saturate(%11), %2_puddleNoise);\n"
-                           "    float %2_wetFresnel = pow(1.0 - saturate(dot(%2_wetNormal, %2_wetView)), lerp(5.5,1.2,saturate(%14)));\n"
-                           "    float4 %2_wetTrace = BO3BeginnerSSRTrace(uv, %2_wetRaw, %5, %7, %6, %15, %8, %12, %13, t);\n"
-                           "    float %2_wetMask = saturate(%2_wetTarget * %2_ground * lerp(1.0,%2_puddle,saturate(1.0-%11)) * %4 * %9);\n"
-                           "    float %2_wetBlend = saturate(%2_wetTrace.a * %2_wetMask * lerp(0.65, %2_wetFresnel, saturate(%14)));\n"
-                           "    float3 %2_wetColor = lerp(%2_wetTrace.rgb, %2_wetTrace.rgb * float3(0.88,0.94,1.03), 0.35);\n"
-                           "    color = lerp(color, %2_wetColor, %2_wetBlend);\n")
-                .arg(definition->name, tag, targetScope, strength, maxDistance, steps, thickness, roughness,
-                     wetness, groundSelect, coverage, ripple, rippleScale, fresnel, perspective);
-        }
+        else if(effect.typeId == "luminance_tint")
         else if(effect.typeId == "luminance_tint")
         {
             const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
@@ -1732,26 +1671,6 @@ bool projectUsesEffect(const Project& project, const QString& id)
     return false;
 }
 
-bool isMaterialSceneSamplingEffect(const QString& id)
-{
-    return id == QStringLiteral("material_screen_space_reflections") ||
-           id == QStringLiteral("material_mirror") ||
-           id == QStringLiteral("material_wet_surface") ||
-           id == QStringLiteral("material_clear_coat") ||
-           id == QStringLiteral("material_chrome") ||
-           id == QStringLiteral("material_frosted_glass") ||
-           id == QStringLiteral("material_water_surface") ||
-           id == QStringLiteral("material_wet_concrete");
-}
-
-bool projectUsesMaterialSceneSampling(const Project& project)
-{
-    if(project.target != Target::Material) return false;
-    for(const Effect& effect : project.effects)
-        if(effect.enabled && isMaterialSceneSamplingEffect(effect.typeId)) return true;
-    return false;
-}
-
 const Effect* firstEnabledEffect(const Project& project, const QString& id)
 {
     for(const Effect& effect : project.effects)
@@ -1775,14 +1694,11 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
            typeId == QStringLiteral("depth_heatmap") ||
            typeId == QStringLiteral("depth_isolation") ||
            typeId == QStringLiteral("contact_shadows") ||
-           typeId == QStringLiteral("screen_space_reflections") ||
-           typeId == QStringLiteral("wet_ground_reflections");
+           typeId == QStringLiteral("ascii_depth");
 }
 
 bool projectRequiresSceneDepth(const Project& project)
 {
-    if(project.target == Target::Material)
-        return projectUsesMaterialSceneSampling(project);
     if(project.target != Target::PostFx) return false;
     for(const Effect& effect : project.effects)
     {
@@ -1816,6 +1732,7 @@ QString optionalHelpers(const Project& project, bool forceSceneDepth = false)
         projectUsesEffect(project, "material_leather") || projectUsesEffect(project, "material_fabric") ||
         projectUsesEffect(project, "material_wood") || projectUsesEffect(project, "material_marble") ||
         projectUsesEffect(project, "material_stone") || projectUsesEffect(project, "material_ice") ||
+        projectUsesEffect(project, "material_frosted_glass") ||
         projectUsesEffect(project, "material_brushed_metal") || projectUsesEffect(project, "material_water_surface"));
     const bool needsHash31 =
         needsMaterialProcedural ||
@@ -2173,255 +2090,48 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
 )HLSL");
     }
 
-    if(projectUsesEffect(project, "screen_space_reflections") ||
-       projectUsesEffect(project, "wet_ground_reflections") ||
-       projectUsesMaterialSceneSampling(project))
+    if(projectUsesEffect(project, "ascii_depth"))
     {
         out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX and custom materials.
-// Screen PostFX samples resolvedScene; Geometry Effect materials sample
-// resolvedPostSun. Runtime depth comes from Float-Z. The view-space
-// reconstruction stays independent of an unavailable material G-buffer.
-float3 BO3BeginnerSSRViewPosition(float2 uv, float depth, float perspectiveScale)
+// BO3_BEGINNER_ASCII_DEPTH: procedural 5x7 ASCII glyphs selected from Float-Z.
+// Density ramp: [space] . : - = + * # % @
+uint BO3BeginnerAsciiRowMask(int glyph, int row)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    float aspect = PostFx_GetRenderTargetSize().x / max(PostFx_GetRenderTargetSize().y, 1.0);
-    float focal = max(perspectiveScale, 0.35);
-    return float3(ndc.x * aspect / focal, ndc.y / focal, 1.0) * max(depth, 0.001);
+    if(glyph <= 0) return 0u;
+    if(glyph == 1) { if(row == 5 || row == 6) return 4u; return 0u; }                    // .
+    if(glyph == 2) { if(row == 1 || row == 2 || row == 4 || row == 5) return 4u; return 0u; } // :
+    if(glyph == 3) { return row == 3 ? 31u : 0u; }                                     // -
+    if(glyph == 4) { return (row == 2 || row == 4) ? 31u : 0u; }                       // =
+    if(glyph == 5) { if(row == 3) return 31u; if(row >= 1 && row <= 5) return 4u; return 0u; } // +
+    if(glyph == 6) { if(row == 1 || row == 5) return 21u; if(row == 2 || row == 4) return 14u; return row == 3 ? 31u : 0u; } // *
+    if(glyph == 7) { if(row == 1 || row == 4) return 31u; if(row <= 5) return 10u; return 0u; } // #
+    if(glyph == 8) { if(row == 0) return 25u; if(row == 1) return 26u; if(row == 2) return 4u; if(row == 3) return 8u; if(row == 4) return 22u; if(row == 5) return 19u; return 0u; } // %
+    // @
+    if(row == 0) return 14u;
+    if(row == 1) return 17u;
+    if(row == 2) return 23u;
+    if(row == 3) return 21u;
+    if(row == 4) return 23u;
+    if(row == 5) return 16u;
+    return 15u;
 }
 
-float2 BO3BeginnerSSRProjectUv(float3 viewPos, float perspectiveScale)
+float BO3BeginnerAsciiGlyph(float2 localUv, int glyph, float glyphScale)
 {
-    float aspect = PostFx_GetRenderTargetSize().x / max(PostFx_GetRenderTargetSize().y, 1.0);
-    float focal = max(perspectiveScale, 0.35);
-    float invZ = 1.0 / max(viewPos.z, 0.001);
-    float2 ndc = float2(viewPos.x * invZ * focal / aspect,
-                        -viewPos.y * invZ * focal);
-    return ndc * 0.5 + 0.5;
-}
-
-float3 BO3BeginnerSSRNormal(float2 uv, float rawCenter, float perspectiveScale)
-{
-    float centerVM = BO3BeginnerViewmodelMask(rawCenter);
-    float centerDepth = BO3BeginnerLinearDepth(rawCenter);
-    float2 texel = PostFx_GetRenderTargetSize().zw;
-    float depthR = BO3BeginnerSampleMatchingDepth(uv + float2(texel.x, 0.0), centerVM);
-    float depthD = BO3BeginnerSampleMatchingDepth(uv + float2(0.0, texel.y), centerVM);
-    if(depthR <= 0.0) depthR = centerDepth;
-    if(depthD <= 0.0) depthD = centerDepth;
-
-    float3 pC = BO3BeginnerSSRViewPosition(uv, centerDepth, perspectiveScale);
-    float3 pR = BO3BeginnerSSRViewPosition(uv + float2(texel.x, 0.0), depthR, perspectiveScale);
-    float3 pD = BO3BeginnerSSRViewPosition(uv + float2(0.0, texel.y), depthD, perspectiveScale);
-    float3 n = normalize(cross(pD - pC, pR - pC));
-    if(dot(n, pC) > 0.0) n = -n;
-    return n;
-}
-
-float BO3BeginnerSSREdgeFade(float2 uv)
-{
-    float2 e = min(uv, 1.0 - uv);
-    return saturate(min(e.x, e.y) * 10.0);
-}
-
-float4 BO3BeginnerSSRTrace(float2 uv, float rawCenter,
-                           float maxDistance, float thickness, float stepCount,
-                           float perspectiveScale, float roughness,
-                           float rippleAmount, float rippleScale, float timeValue)
-{
-    float centerVM = BO3BeginnerViewmodelMask(rawCenter);
-    float centerDepth = BO3BeginnerLinearDepth(rawCenter);
-    float3 origin = BO3BeginnerSSRViewPosition(uv, centerDepth, perspectiveScale);
-    float3 normal = BO3BeginnerSSRNormal(uv, rawCenter, perspectiveScale);
-    float3 incident = normalize(origin);
-    float3 reflectionDir = normalize(reflect(incident, normal));
-
-    // Rays headed immediately behind the camera cannot produce an on-screen hit.
-    float forwardMask = smoothstep(-0.10, 0.08, reflectionDir.z);
-    float count = clamp(round(stepCount), 6.0, 32.0);
-    float traceDistance = min(max(maxDistance, 1.0), max(centerDepth * 0.85, 48.0));
-    float baseStep = traceDistance / count;
-    float travel = baseStep * 0.30;
-    float prevDelta = -max(thickness, 0.05) * 2.0;
-    float hitMask = 0.0;
-    float2 hitUv = uv;
-    float hitProgress = 1.0;
-
-    [loop] for(int i = 0; i < 32; ++i)
-    {
-        if(float(i) >= count || hitMask > 0.5) break;
-        float progress = (float(i) + 1.0) / count;
-        travel += baseStep * lerp(0.62, 1.45, progress);
-        float3 rayPos = origin + reflectionDir * travel;
-        if(rayPos.z <= BO3BeginnerNearClip() * 1.05) break;
-
-        float2 sampleUv = BO3BeginnerSSRProjectUv(rayPos, perspectiveScale);
-        if(any(sampleUv <= 0.001) || any(sampleUv >= 0.999)) break;
-
-        float sceneDepth = BO3BeginnerSampleMatchingDepth(sampleUv, centerVM);
-        if(sceneDepth > 0.0)
-        {
-            float delta = rayPos.z - sceneDepth;
-            float adaptiveThickness = max(thickness, rayPos.z * 0.0015);
-            float crossed = step(prevDelta, 0.0) * step(0.0, delta);
-            float nearHit = 1.0 - step(adaptiveThickness, abs(delta));
-            float accept = saturate(max(crossed, nearHit));
-            if(accept > 0.5 && progress > 0.035)
-            {
-                hitMask = 1.0;
-                hitUv = sampleUv;
-                hitProgress = progress;
-            }
-            prevDelta = delta;
-        }
-    }
-
-    float2 texel = PostFx_GetRenderTargetSize().zw;
-    float2 ripple = float2(
-        sin((hitUv.y * max(rippleScale, 0.1) + timeValue * 0.37) * 6.2831853),
-        cos((hitUv.x * max(rippleScale, 0.1) - timeValue * 0.29) * 6.2831853));
-    hitUv = saturate(hitUv + ripple * texel * rippleAmount);
-
-    float blurPixels = roughness * roughness * 8.0;
-    float2 blurX = float2(texel.x * blurPixels, 0.0);
-    float2 blurY = float2(0.0, texel.y * blurPixels);
-    float3 reflected = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, hitUv).rgb) * 0.44;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurX)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurX)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurY)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurY)).rgb) * 0.14;
-
-    float confidence = hitMask * forwardMask * BO3BeginnerSSREdgeFade(hitUv) * (1.0 - hitProgress * 0.55);
-    return float4(reflected, confidence);
+    float scale = max(glyphScale, 0.10);
+    float2 p = (localUv - 0.5) / scale + 0.5;
+    if(any(p < 0.0) || any(p >= 1.0)) return 0.0;
+    float2 raster = p * float2(5.0, 7.0);
+    int x = min((int)floor(raster.x), 4);
+    int y = min((int)floor(raster.y), 6);
+    uint mask = BO3BeginnerAsciiRowMask(min(max(glyph,0),9), y);
+    uint bit = 1u << (4 - x);
+    float on = (mask & bit) != 0u ? 1.0 : 0.0;
+    float2 q = frac(raster);
+    float edge = min(min(q.x,1.0-q.x), min(q.y,1.0-q.y));
+    return on * smoothstep(0.035, 0.16, edge);
 }
 )HLSL");
-
-        if(projectUsesMaterialSceneSampling(project))
-        {
-            out += QStringLiteral(R"HLSL(
-// Material SSR must use the material's actual world-space surface normal and
-// position. Sampling a depth-derived normal at the same screen pixel projects
-// the background scene onto the mesh instead of producing a reflection.
-float2 BO3BeginnerMaterialSSRProjectUv(float3 worldPosition)
-{
-    float4 clipPos = Transform_OffsetToClip(worldPosition);
-    float safeW = max(abs(clipPos.w), 0.0001);
-    float2 ndc = clipPos.xy / safeW;
-    return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-}
-
-float4 BO3BeginnerMaterialSSRTrace(float3 worldPosition, float3 worldNormal, float3 surfaceViewDir,
-                                   float maxDistance, float thickness, float stepCount, float roughness)
-{
-    float3 normal = normalize(worldNormal);
-    float3 incident = normalize(-surfaceViewDir);
-    float3 reflectionDir = normalize(reflect(incident, normal));
-    float count = clamp(round(stepCount), 6.0, 32.0);
-    float traceDistance = max(maxDistance, 1.0);
-    float baseStep = traceDistance / count;
-    float travel = baseStep * 0.55;
-    float3 origin = worldPosition + normal * max(0.08, baseStep * 0.025);
-    float prevDelta = -max(thickness, 0.05) * 2.0;
-    float hitMask = 0.0;
-    float2 hitUv = 0.5;
-    float hitProgress = 1.0;
-
-    [loop] for(int i = 0; i < 32; ++i)
-    {
-        if(float(i) >= count || hitMask > 0.5) break;
-        float progress = (float(i) + 1.0) / count;
-        travel += baseStep * lerp(0.68, 1.38, progress);
-        float3 rayWorld = origin + reflectionDir * travel;
-        float3 rayCamera = Transform_OffsetToCamera(rayWorld);
-        float rayDepth = rayCamera.z;
-        if(rayDepth <= BO3BeginnerNearClip() * 1.02) break;
-
-        float2 sampleUv = BO3BeginnerMaterialSSRProjectUv(rayWorld);
-        if(any(sampleUv <= 0.001) || any(sampleUv >= 0.999)) break;
-
-        float sceneDepth = BO3BeginnerSampleWorldDepth(sampleUv);
-        if(sceneDepth > 0.0)
-        {
-            float delta = rayDepth - sceneDepth;
-            float adaptiveThickness = max(thickness, rayDepth * 0.0015);
-            float crossed = step(prevDelta, 0.0) * step(0.0, delta);
-            float nearHit = 1.0 - step(adaptiveThickness, abs(delta));
-            if(max(crossed, nearHit) > 0.5 && progress > 0.045)
-            {
-                hitMask = 1.0;
-                hitUv = sampleUv;
-                hitProgress = progress;
-            }
-            prevDelta = delta;
-        }
-    }
-
-    float2 texel = PostFx_GetRenderTargetSize().zw;
-    float blurPixels = roughness * roughness * 8.0;
-    float2 blurX = float2(texel.x * blurPixels, 0.0);
-    float2 blurY = float2(0.0, texel.y * blurPixels);
-    float3 reflected = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, hitUv).rgb) * 0.44;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurX)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurX)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurY)).rgb) * 0.14;
-    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurY)).rgb) * 0.14;
-
-    float confidence = hitMask * BO3BeginnerSSREdgeFade(hitUv) * (1.0 - hitProgress * 0.55);
-    return float4(reflected, confidence);
-}
-
-// The standalone material lookdev viewport has its own camera, so a captured
-// gameplay resolvedScene/Float-Z pair cannot be raymarched against the preview
-// sphere/cube. In Shader Studio only, sample the matching studio environment as
-// an equirectangular reflection. Export/runtime still uses the real SSR path.
-float2 BO3BeginnerMaterialPreviewEnvironmentUv(float3 direction)
-{
-    float3 d = normalize(direction);
-    float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
-    float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
-    return float2(frac(u), saturate(v));
-}
-
-float4 BO3BeginnerMaterialReflectionSample(float3 worldPosition, float3 worldNormal, float3 surfaceViewDir,
-                                           float maxDistance, float thickness, float stepCount, float roughness)
-{
-#ifdef BO3_SHADER_STUDIO_MATERIAL_PREVIEW
-    float3 reflectionDir = normalize(reflect(-surfaceViewDir, normalize(worldNormal)));
-    float2 envUv = BO3BeginnerMaterialPreviewEnvironmentUv(reflectionDir);
-    float blur = roughness * roughness * 0.035;
-    float3 reflected = frameBuffer.Sample(bilinearClampler, envUv).rgb * 0.52;
-    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2( blur,0.0)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(-blur,0.0)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0, blur*0.5)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0,-blur*0.5)).rgb * 0.12;
-    return float4(reflected, 1.0);
-#elif TOOLSGFX
-    // APE does not expose the runtime Float-Z contract used by the SSR trace.
-    // Geometry Effect shaders do expose the editor viewport scene at t49, so
-    // use a screen-space reflection approximation there. This keeps APE useful
-    // without pretending its preview is the depth-accurate in-game result.
-    float3 reflectionDir = normalize(reflect(-surfaceViewDir, normalize(worldNormal)));
-    float2 sceneUv = BO3BeginnerMaterialSSRProjectUv(worldPosition);
-    float2 reflectionOffset = reflectionDir.xy * lerp(0.035, 0.008, saturate(roughness));
-    sceneUv = saturate(sceneUv + reflectionOffset);
-    float2 texel = PostFx_GetRenderTargetSize().zw;
-    float blurPixels = roughness * roughness * 6.0;
-    float2 blurX = float2(texel.x * blurPixels, 0.0);
-    float2 blurY = float2(0.0, texel.y * blurPixels);
-    float3 reflected = frameBuffer.Sample(bilinearClampler, sceneUv).rgb * 0.52;
-    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv + blurX)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv - blurX)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv + blurY)).rgb * 0.12;
-    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv - blurY)).rgb * 0.12;
-    return float4(reflected, BO3BeginnerSSREdgeFade(sceneUv));
-#else
-    return BO3BeginnerMaterialSSRTrace(worldPosition, worldNormal, surfaceViewDir,
-                                       maxDistance, thickness, stepCount, roughness);
-#endif
-}
-)HLSL");
-        }
     }
 
     if(needsHash11)
@@ -2763,40 +2473,13 @@ float4 ps_main(PS_INPUT input) : SV_Target
 QString generateMaterial(const Project& project)
 {
     const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
-    const bool usesSceneReflections = projectUsesMaterialSceneSampling(project);
     const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
-    const QString screenIncludes = usesSceneReflections
-        ? QStringLiteral("// BO3_BEGINNER_MATERIAL_SSR: 1\n#include \"lib/floatz.hlsl\"\n")
-        : QString();
-    const QString screenResources = usesSceneReflections
-        ? QStringLiteral(R"HLSL(Texture2D<float4> frameBuffer : register(t0);
-Texture2D<float4> DepthSampler : register(t1);
-SamplerState bilinearClampler : register(s1);
-
-// Geometry Effect materials sample BO3's resolvedPostSun scene color rather
-// than the PostFX resolvedScene buffer. resolvedPostSun is already in the
-// material/geometry color domain, so the PostFX 32768 normalization bridge
-// must NOT be applied here.
-float4 PostFx_GetRenderTargetSize()
-{
-    return GetRenderTargetSize();
-}
-
-float3 PostFx_NormalizeColor(float3 value)
-{
-    return value;
-}
-)HLSL")
-        : QString();
-    const QString surfaceMarker = usesSceneReflections
-        ? QStringLiteral("SCENE_EFFECT")
-        : QStringLiteral("OPAQUE");
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
 // BO3_BEGINNER_TARGET: MATERIAL
 // BO3_BEGINNER_EFFECT_STACK: %1
-// BO3_PREVIEWER_MATERIAL_SURFACE: %7
+// BO3_PREVIEWER_MATERIAL_SURFACE: OPAQUE
 
 #include "lib/globals.hlsl"
 #include "lib/transform.hlsl"
@@ -2804,7 +2487,7 @@ float3 PostFx_NormalizeColor(float3 value)
 #include "lib/vertdecl_vertex_tangentspace.hlsl"
 #include "lib/gpu_skin.hlsl"
 #include "lib/gbuffer.hlsl"
-%5%6
+
 struct BeginnerMaterialInput
 {
     float4 position      : SV_POSITION;
@@ -2846,12 +2529,9 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
     float t = GetTime();
     float3 color = %3;
 %4
-    // Keep authored values above 1.0 in the editor source. Export decides
-    // whether this becomes deferred albedo or a forward Geometry Effect.
     return float4(max(color, 0.0), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects,
-             screenIncludes, screenResources, surfaceMarker);
+)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects);
 }
 
 QString generateSky(const Project& project)
@@ -3153,6 +2833,19 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("start", "Near Distance", "Start of the heatmap range.", 0.0, 1.0, 0.01, 0.05),
                    FloatParam("end", "Far Distance", "End of the heatmap range.", 0.0, 1.0, 0.01, 0.95),
                    FloatParam("strength", "Strength", "Blend amount of the heatmap colors.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("ascii_depth", "ASCII Depth", "Turn BO3 Float-Z into a procedural ASCII-art screen made from real 5x7 glyphs. Character size, glyph scale, depth range, density, colors and background are all adjustable.", "Depth & Scene",
+                  {Target::PostFx},
+                  {ColorParam("text_color", "Text Color", "Color of the ASCII characters.", "#D8F7FF"),
+                   ColorParam("background_color", "Background Color", "Color behind the ASCII characters.", "#05080B"),
+                   FloatParam("char_size", "Character Size", "Height of each ASCII character cell in screen pixels.", 6.0, 64.0, 1.0, 18.0),
+                   FloatParam("glyph_scale", "Glyph Scale", "Scale of the 5x7 glyph inside each character cell.", 0.45, 1.25, 0.01, 0.88),
+                   FloatParam("start", "Near Depth", "Near end of the depth range used to choose characters.", 0.0, 1.0, 0.01, 0.05),
+                   FloatParam("end", "Far Depth", "Far end of the depth range used to choose characters.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("curve", "Depth Curve", "Shapes how quickly character density changes with depth.", 0.25, 4.0, 0.05, 1.0),
+                   FloatParam("levels", "Character Levels", "How many entries of the ASCII density ramp are used.", 2.0, 10.0, 1.0, 10.0),
+                   ChoiceParam("direction", "Depth Direction", "Choose whether nearby or distant geometry uses denser ASCII characters.", {"Near = Dense", "Far = Dense"}, 0),
+                   FloatParam("background_opacity", "Background Opacity", "How strongly the chosen background color replaces the original scene between characters.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("strength", "Strength", "Blend between the original scene and the ASCII depth rendering.", 0.0, 1.0, 0.01, 1.0)}),
         EffectDef("depth_isolation", "Depth Isolation", "Keep one Float-Z distance slice clear while dimming or desaturating everything outside it.", "Depth & Scene",
                   {Target::PostFx},
                   {FloatParam("focus", "Focus Distance", "Center of the depth slice that stays clear.", 0.0, 1.0, 0.01, 0.42),
@@ -3167,73 +2860,23 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("bias", "Depth Bias", "Reject tiny depth differences that would self-shadow.", 0.0, 8.0, 0.05, 0.45),
                    FloatParam("angle", "Screen Light Angle", "Direction the light arrives from in screen space, in degrees.", 0.0, 360.0, 1.0, 135.0),
                    FloatParam("softness", "Softness", "Depth softness used to blend shadow hits.", 0.01, 6.0, 0.05, 1.25)}),
-        EffectDef("screen_space_reflections", "Screen-Space Reflections", "Raymarch the resolved scene against real BO3 Float-Z to create depth-derived screen-space reflections on visible geometry.", "Depth & Scene",
-                  {Target::PostFx},
-                  {FloatParam("strength", "Strength", "Overall reflection blend amount.", 0.0, 1.5, 0.01, 0.65),
-                   FloatParam("max_distance", "Max Distance", "Maximum view-space distance traced by each reflection ray.", 25.0, 2400.0, 25.0, 700.0),
-                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray. Higher values improve coverage but cost more GPU time.", 6.0, 32.0, 1.0, 18.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used when a ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
-                   FloatParam("roughness", "Surface Roughness", "Blur the reflected scene to imitate rougher surfaces.", 0.0, 1.0, 0.01, 0.20),
-                   FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.65),
-                   FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30),
-                   FloatParam("distance_fade", "Far Fade Start", "Normalized depth where distant SSR begins fading out.", 0.0, 0.95, 0.01, 0.70)}),
-        EffectDef("wet_ground_reflections", "Wet Ground Reflections", "Use Float-Z normals and screen-space raymarching to add wet pavement, puddle and water-like reflections to ground-facing surfaces.", "Depth & Scene",
-                  {Target::PostFx},
-                  {FloatParam("strength", "Strength", "Overall wet reflection blend amount.", 0.0, 1.5, 0.01, 0.85),
-                   FloatParam("max_distance", "Max Distance", "Maximum distance traced across the reflected scene.", 25.0, 2400.0, 25.0, 900.0),
-                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray.", 6.0, 32.0, 1.0, 20.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection intersections.", 0.1, 24.0, 0.1, 4.5),
-                   FloatParam("roughness", "Roughness", "Blur reflections to imitate wet asphalt or rough water.", 0.0, 1.0, 0.01, 0.36),
-                   FloatParam("fresnel", "Fresnel", "Strength of grazing-angle wet reflections.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("wetness", "Wetness", "How strongly eligible ground surfaces behave as reflective wet material.", 0.0, 1.0, 0.01, 0.90),
-                   FloatParam("ground_selectivity", "Ground Selectivity", "Higher values restrict the reflection to flatter ground-facing surfaces.", 0.0, 1.0, 0.01, 0.55),
-                   FloatParam("coverage", "Puddle Coverage", "Amount of eligible ground covered by wet reflective patches. 1 makes the whole ground wet.", 0.0, 1.0, 0.01, 1.0),
-                   FloatParam("ripple", "Ripple Distortion", "Screen-space distortion applied to reflected color.", 0.0, 10.0, 0.1, 1.2),
-                   FloatParam("ripple_scale", "Ripple Scale", "Spatial frequency of the water ripple distortion.", 0.5, 20.0, 0.1, 5.0),
-                   FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30)}),
-        EffectDef("material_screen_space_reflections", "Screen-Space Reflections", "Give a custom material a live screen-space reflection finish using BO3 Geometry Effect resolvedPostSun and Float-Z at runtime.", "Reflections & Surface",
-                  {Target::Material},
-                  {ColorParam("tint", "Reflection Tint", "Tint applied to the reflected scene. White keeps the original reflected colors.", "#FFFFFF"),
-                   FloatParam("strength", "Strength", "Overall reflection blend on the material.", 0.0, 1.5, 0.01, 0.72),
-                   FloatParam("max_distance", "Max Distance", "Maximum view-space distance traced by each reflection ray.", 25.0, 2400.0, 25.0, 700.0),
-                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray.", 6.0, 32.0, 1.0, 18.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used when the reflected ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
-                   FloatParam("roughness", "Roughness", "Blur the reflected scene to imitate rough glossy materials.", 0.0, 1.0, 0.01, 0.18),
-                   FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.72)}),
-        EffectDef("material_mirror", "Mirror", "Turn the surface into a near-perfect live mirror using BO3 Geometry Effect resolvedPostSun + Float-Z screen-space ray tracing.", "Reflections & Surface",
-                  {Target::Material},
-                  {ColorParam("tint", "Mirror Tint", "Tint of the reflected scene. White produces a neutral mirror.", "#FFFFFF"),
-                   FloatParam("strength", "Reflectivity", "How completely the mirror replaces the base surface.", 0.0, 1.0, 0.01, 0.98),
-                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by each mirror ray.", 50.0, 3200.0, 25.0, 1400.0),
-                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflected ray.", 8.0, 32.0, 1.0, 28.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used to accept reflection intersections.", 0.1, 20.0, 0.1, 2.5),
-                   FloatParam("fresnel", "Edge Fresnel", "Extra reflection strength at grazing angles.", 0.0, 1.0, 0.01, 0.18)}),
-        EffectDef("material_wet_surface", "Wet Surface", "Darken a surface as it gets wet and add glossy screen-space reflections with controllable water-film roughness.", "Reflections & Surface",
+        EffectDef("material_wet_surface", "Wet Surface", "Darken a surface as it gets wet and add a smooth local water-film highlight.", "Reflections & Surface",
                   {Target::Material},
                   {FloatParam("wetness", "Wetness", "Overall amount of water film on the material.", 0.0, 1.0, 0.01, 0.82),
                    FloatParam("darkening", "Wet Darkening", "How much the underlying material darkens when wet.", 0.0, 0.8, 0.01, 0.28),
-                   FloatParam("roughness", "Roughness", "Blur amount of the wet reflection.", 0.0, 1.0, 0.01, 0.22),
-                   FloatParam("fresnel", "Fresnel", "Grazing-angle water-film reflection strength.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("max_distance", "Max Distance", "Maximum distance traced for wet reflections.", 25.0, 2400.0, 25.0, 800.0),
-                   FloatParam("steps", "Ray Steps", "Maximum depth samples per wet reflection ray.", 6.0, 32.0, 1.0, 18.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
-        EffectDef("material_clear_coat", "Clear Coat", "Add a glossy lacquer-like top coat over the existing material with a clean Fresnel reflection layer.", "Reflections & Surface",
+                   FloatParam("roughness", "Roughness", "Softness of the local wet highlight.", 0.0, 1.0, 0.01, 0.22),
+                   FloatParam("fresnel", "Fresnel", "Grazing-angle water-film highlight strength.", 0.0, 1.0, 0.01, 0.72)}),
+        EffectDef("material_clear_coat", "Clear Coat", "Add a glossy lacquer-like top coat using analytic Fresnel and specular highlights without sampling the rendered scene.", "Reflections & Surface",
                   {Target::Material},
                   {FloatParam("coat", "Coat Strength", "Amount of glossy clear coat over the base material.", 0.0, 1.0, 0.01, 0.68),
-                   FloatParam("roughness", "Coat Roughness", "Reflection blur in the clear coat.", 0.0, 1.0, 0.01, 0.10),
-                   FloatParam("fresnel", "Fresnel", "How strongly the coat builds toward grazing angles.", 0.0, 1.0, 0.01, 0.74),
-                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by the coat reflection.", 25.0, 2400.0, 25.0, 700.0),
-                   FloatParam("steps", "Ray Steps", "Maximum depth samples per coat reflection ray.", 6.0, 32.0, 1.0, 16.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for coat reflection hits.", 0.1, 24.0, 0.1, 3.0)}),
-        EffectDef("material_chrome", "Chrome", "Create a highly reflective metallic finish with a tinted base and slightly softened live scene reflections.", "Metals & Coatings",
+                   FloatParam("roughness", "Coat Roughness", "Softness of the clear-coat highlight.", 0.0, 1.0, 0.01, 0.10),
+                   FloatParam("fresnel", "Fresnel", "How strongly the coat builds toward grazing angles.", 0.0, 1.0, 0.01, 0.74)}),
+        EffectDef("material_chrome", "Chrome", "Create a highly reflective-looking metal with an analytic sky/ground environment response instead of screen-space raymarching.", "Metals & Coatings",
                   {Target::Material},
-                  {ColorParam("tint", "Metal Tint", "Tint of the chrome reflection.", "#E8EEF5"),
-                   FloatParam("reflectivity", "Reflectivity", "Strength of the live reflected scene.", 0.0, 1.0, 0.01, 0.92),
-                   FloatParam("roughness", "Roughness", "Blur of the chrome reflection.", 0.0, 1.0, 0.01, 0.08),
-                   FloatParam("fresnel", "Fresnel", "Extra reflectivity at grazing angles.", 0.0, 1.0, 0.01, 0.42),
-                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by chrome reflections.", 25.0, 2800.0, 25.0, 1200.0),
-                   FloatParam("steps", "Ray Steps", "Maximum depth samples per chrome reflection ray.", 6.0, 32.0, 1.0, 24.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 2.8)}),
+                  {ColorParam("tint", "Metal Tint", "Tint applied to the chrome environment response.", "#E8EEF5"),
+                   FloatParam("reflectivity", "Reflectivity", "Strength of the chrome environment response.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("roughness", "Roughness", "Broadens the analytic chrome highlight.", 0.0, 1.0, 0.01, 0.08),
+                   FloatParam("fresnel", "Fresnel", "Extra reflectivity at grazing angles.", 0.0, 1.0, 0.01, 0.42)}),
         EffectDef("material_metallic", "Metallic Surface", "Give the base color a dense metallic response with view-angle highlights and controlled reflectance.", "Metals & Coatings",
                   {Target::Material},
                   {ColorParam("metal_tint", "Metal Tint", "Color mixed into the metallic response.", "#B7C0C9"),
@@ -3262,13 +2905,13 @@ const QVector<EffectDefinition>& effectDefinitions()
                    ColorParam("color_c", "Tertiary Color", "Third thin-film color.", "#FFD45D"),
                    FloatParam("strength", "Strength", "How strongly the angle colors replace the base surface.", 0.0, 1.0, 0.01, 0.62),
                    FloatParam("bands", "Color Bands", "Frequency of view-angle color changes.", 0.5, 12.0, 0.05, 3.2)}),
-        EffectDef("material_frosted_glass", "Frosted Glass", "Approximate frosted/translucent glass by sampling and blurring the scene behind the material with tint and Fresnel edges.", "Glass & Water",
+        EffectDef("material_frosted_glass", "Frosted Glass", "Create a frosted translucent-looking surface from procedural scattering, tint and Fresnel edges without sampling the scene behind it.", "Glass & Water",
                   {Target::Material},
-                  {ColorParam("tint", "Glass Tint", "Tint applied to the blurred scene behind the glass.", "#D9F2FF"),
+                  {ColorParam("tint", "Glass Tint", "Main tint of the frosted surface.", "#D9F2FF"),
                    FloatParam("opacity", "Glass Strength", "Amount of frosted glass replacing the base surface.", 0.0, 1.0, 0.01, 0.78),
-                   FloatParam("blur", "Frost Blur", "Screen-space blur radius of the sampled background.", 0.0, 14.0, 0.1, 5.0),
-                   FloatParam("distortion", "Refraction", "Small normal-based offset of the scene behind the glass.", 0.0, 3.0, 0.01, 0.52),
-                   FloatParam("fresnel", "Edge Fresnel", "Brighten and reflect the glass toward grazing angles.", 0.0, 1.0, 0.01, 0.62)}),
+                   FloatParam("frost", "Frost Scale", "Scale of the procedural frosted scattering.", 0.5, 16.0, 0.1, 5.0),
+                   FloatParam("distortion", "Scatter Variation", "Amount of small brightness variation in the frost.", 0.0, 3.0, 0.01, 0.52),
+                   FloatParam("fresnel", "Edge Fresnel", "Brighten the glass toward grazing angles.", 0.0, 1.0, 0.01, 0.62)}),
         EffectDef("material_ice", "Ice", "Create a cold translucent-looking ice finish with procedural fractures, blue depth tint and reflective edges.", "Glass & Water",
                   {Target::Material},
                   {ColorParam("ice_color", "Ice Color", "Main body color of the ice.", "#9FE8FF"),
@@ -3277,28 +2920,22 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("cracks", "Cracks", "Visibility of fine procedural fractures.", 0.0, 1.5, 0.01, 0.72),
                    FloatParam("scale", "Crystal Scale", "Size of ice/crack structures.", 2.0, 120.0, 0.5, 28.0),
                    FloatParam("fresnel", "Edge Shine", "Strength of bright reflective ice edges.", 0.0, 2.0, 0.01, 0.92)}),
-        EffectDef("material_water_surface", "Water Surface", "Create animated rippled water with view-angle Fresnel and live screen-space scene reflections.", "Glass & Water",
+        EffectDef("material_water_surface", "Water Surface", "Create animated rippled water with Fresnel and an analytic environment sheen.", "Glass & Water",
                   {Target::Material},
                   {ColorParam("water_color", "Water Color", "Tint of the water body.", "#1A6E91"),
                    FloatParam("strength", "Water Strength", "How strongly the water treatment replaces the base material.", 0.0, 1.0, 0.01, 0.92),
                    FloatParam("ripples", "Ripple Strength", "Perturbation applied to the surface normal.", 0.0, 2.0, 0.01, 0.48),
                    FloatParam("scale", "Ripple Scale", "Spatial frequency of animated ripples.", 0.5, 40.0, 0.1, 8.5),
                    FloatParam("speed", "Ripple Speed", "Animation speed of the water waves.", -4.0, 4.0, 0.01, 0.55),
-                   FloatParam("roughness", "Reflection Roughness", "Blur of the reflected scene.", 0.0, 1.0, 0.01, 0.16),
-                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by water reflections.", 25.0, 2400.0, 25.0, 900.0),
-                   FloatParam("steps", "Ray Steps", "Maximum depth samples per water reflection ray.", 6.0, 32.0, 1.0, 20.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
-        EffectDef("material_wet_concrete", "Puddle / Wet Concrete", "Break a concrete-like surface into dry and wet patches, with darker puddles and live localized reflections.", "Glass & Water",
+                   FloatParam("roughness", "Surface Roughness", "Softness of the analytic water highlight.", 0.0, 1.0, 0.01, 0.16)}),
+        EffectDef("material_wet_concrete", "Puddle / Wet Concrete", "Break a concrete-like surface into dry and wet patches, with darker puddles and local glossy highlights instead of live scene reflections.", "Glass & Water",
                   {Target::Material},
                   {ColorParam("dry_color", "Dry Concrete", "Dry concrete tint.", "#777A78"),
                    ColorParam("wet_color", "Wet Concrete", "Dark tint used inside wet patches.", "#30383A"),
                    FloatParam("coverage", "Puddle Coverage", "Amount of the surface occupied by wet patches.", 0.0, 1.0, 0.01, 0.48),
                    FloatParam("scale", "Puddle Scale", "Size of procedural wet patches.", 1.0, 80.0, 0.5, 16.0),
-                   FloatParam("reflectivity", "Wet Reflectivity", "Strength of reflections in puddled regions.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("roughness", "Wet Roughness", "Blur of puddle reflections.", 0.0, 1.0, 0.01, 0.28),
-                   FloatParam("max_distance", "Max Distance", "Maximum distance traced in wet regions.", 25.0, 2400.0, 25.0, 800.0),
-                   FloatParam("steps", "Ray Steps", "Maximum depth samples per wet-region reflection ray.", 6.0, 32.0, 1.0, 16.0),
-                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for puddle reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
+                   FloatParam("reflectivity", "Wet Shine", "Strength of local puddle highlights.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("roughness", "Wet Roughness", "Softness of puddle highlights.", 0.0, 1.0, 0.01, 0.28)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color used in darker areas.", "#4F65B4"),
@@ -3696,7 +3333,7 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target)
     if(target == Target::PostFx)
         return {{"blank", "Blank / Original Scene"}, {"cinematic", "Cinematic"}, {"retro_crt", "Retro CRT"}};
     if(target == Target::Material)
-        return {{"blank", "Blank Surface"}, {"mirror", "Mirror"}, {"wet_surface", "Wet Surface"},
+        return {{"blank", "Blank Surface"}, {"wet_surface", "Wet Surface"},
                 {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
     return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"lake_sunset", "Still Water Sunset"},
                 {"mountain_dawn", "Mountain Dawn"}, {"cloudy_day", "Cloudy Day"}, {"starry_night", "Starry Night"},
@@ -3732,17 +3369,11 @@ Project makePreset(const QString& presetId, Target target)
         add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
         add("vignette", {{"strength", 0.28}, {"size", 0.68}, {"softness", 0.45}});
     }
-    else if(target == Target::Material && id == "mirror")
-    {
-        project.name = "Mirror";
-        project.settings["baseColor"] = "#101214";
-        add("material_mirror", {{"tint", "#FFFFFF"}, {"strength", 0.98}, {"max_distance", 1400.0}, {"steps", 28.0}, {"thickness", 2.5}, {"fresnel", 0.18}});
-    }
     else if(target == Target::Material && id == "wet_surface")
     {
         project.name = "Wet Surface";
         project.settings["baseColor"] = "#4C5256";
-        add("material_wet_surface", {{"wetness", 0.88}, {"darkening", 0.32}, {"roughness", 0.20}, {"fresnel", 0.74}, {"max_distance", 900.0}, {"steps", 20.0}, {"thickness", 3.5}});
+        add("material_wet_surface", {{"wetness", 0.88}, {"darkening", 0.32}, {"roughness", 0.20}, {"fresnel", 0.74}});
     }
     else if(target == Target::Material && id == "neon_surface")
     {

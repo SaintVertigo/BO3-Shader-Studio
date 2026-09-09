@@ -269,21 +269,12 @@ public:
         // by 32768 and is a confirmed cause of BO3-working shaders previewing
         // incorrectly/black. Make the preview context explicit.
         const bool postFxCompile = previewMode_ == PreviewMode::PostFX && !vertexOnlyRequest;
-        const bool beginnerMaterialSsrCompile =
-            userSource.find("BO3_BEGINNER_TARGET: MATERIAL") != std::string::npos &&
-            userSource.find("BO3_BEGINNER_MATERIAL_SSR: 1") != std::string::npos;
         const char* toolsgfxValue = postFxPreviewContext_ == PostFxPreviewContext::ToolsgfxMaterial ? "1" : "0";
         const D3D_SHADER_MACRO postFxMacros[] = {
             {"TOOLSGFX", toolsgfxValue},
             {nullptr, nullptr}
         };
-        const D3D_SHADER_MACRO beginnerMaterialSsrMacros[] = {
-            {"BO3_SHADER_STUDIO_MATERIAL_PREVIEW", "1"},
-            {nullptr, nullptr}
-        };
-        const D3D_SHADER_MACRO* compileMacros = postFxCompile
-            ? postFxMacros
-            : (beginnerMaterialSsrCompile ? beginnerMaterialSsrMacros : nullptr);
+        const D3D_SHADER_MACRO* compileMacros = postFxCompile ? postFxMacros : nullptr;
 
         auto compileSource = [&](const std::string& source, ComPtr<ID3DBlob>& bytecode, std::wstring& diagnostics) -> HRESULT
         {
@@ -548,7 +539,6 @@ public:
         skyShaderMode_ = newSkyMode;
         adaptedMaterialShader_ = adaptedMaterialSurface;
         deferredMaterialShader_ = newDeferredMaterialShader;
-        beginnerMaterialSsrPreview_ = beginnerMaterialSsrCompile;
         if (!vertexOnlyShader_ &&
             (previewMode_ == PreviewMode::ForwardMaterial || previewMode_ == PreviewMode::DeferredGBuffer))
             previewMode_ = deferredMaterialShader_ ? PreviewMode::DeferredGBuffer : PreviewMode::ForwardMaterial;
@@ -567,8 +557,6 @@ public:
         if (explicitMaterialSurface)
         {
             previewMessage += L"[Preview] Material / Surface marker detected: mesh UV vertex path forced (sky-direction detection disabled).\r\n";
-            if (beginnerMaterialSsrCompile)
-                previewMessage += L"[Preview] Beginner Material SSR lookdev: using the studio environment for a camera-matched reflective preview. BO3 runtime export uses Geometry Effect resolvedPostSun + Float-Z raymarching.\r\n";
             if (userSource.find("BO3_PREVIEWER_GLSL_PROJECTION: SEAMLESS_TRIPLANAR_V2") == std::string::npos &&
                 (userSource.find("BO3GLSL_EvaluateMaterialSeamSafe") != std::string::npos ||
                  userSource.find("BO3GLSL_StabilizeMaterialPoles") != std::string::npos ||
@@ -3525,15 +3513,10 @@ private:
             }
             if (resource.name == "frameBuffer" && resource.slot == 0 && Is2DLike(resource.dimension))
             {
-                // A captured gameplay scene/depth pair uses a completely different
-                // camera from the standalone material sphere/cube. Feeding that
-                // image to Material SSR makes it look pasted onto the mesh. The
-                // generated Beginner preview branch instead treats the studio
-                // equirect environment as the reflection source; runtime/export
-                // still binds real BO3 resolvedScene here.
-                srvs[0] = (beginnerMaterialSsrPreview_ && environmentSRV_)
-                    ? environmentSRV_.Get()
-                    : sourceSRV_.Get();
+                // Scene-sampling custom materials can reserve t0 for the live scene.
+                // Beginner materials no longer use this path, but keep the generic
+                // preview binding available for Advanced custom HLSL materials.
+                srvs[0] = sourceSRV_.Get();
                 reservesSceneSlot0 = true;
             }
             else if (resource.slot == 0 && Is2DLike(resource.dimension)) srvs[0] = sourceSRV_.Get();
@@ -3561,9 +3544,8 @@ private:
             ID3D11ShaderResourceView* srv = materialTextureSRVs_[static_cast<size_t>(i)].Get();
             if (!srv) continue;
             const UINT bindSlot = materialTextureBindings_[static_cast<size_t>(i)];
-            // Material SSR owns t0/t1 as live scene/depth inputs. Do not let an
-            // unrelated material-image assignment silently replace those preview
-            // resources while the reflection effect is active.
+            // A scene-sampling Advanced material may own t0/t1 as live scene/depth
+            // inputs. Do not let an unrelated image assignment replace them.
             if ((bindSlot == 0 && reservesSceneSlot0) ||
                 (bindSlot == 1 && reservesDepthSlot1))
                 continue;
@@ -5921,7 +5903,6 @@ float4 ps_main(VS_OUT i) : SV_Target0
     bool groundEnabled_ = true;
     float contactShadowStrength_ = 0.55f;
     bool wireframe_ = false;
-    bool beginnerMaterialSsrPreview_ = false;
 };
 
 PreviewRenderer::PreviewRenderer() : impl_(std::make_unique<Impl>()) {}
