@@ -1579,9 +1579,11 @@ public:
                !postHlsl.contains("Depth Contours") ||
                !postHlsl.contains("Depth Heatmap") ||
                !postHlsl.contains("Contact Shadows") ||
-               !postHlsl.contains("BO3_BEGINNER_ASCII_DEPTH") ||
+               !postHlsl.contains("BO3_BEGINNER_ASCII_CONTOUR") ||
                !postHlsl.contains("BO3BeginnerAsciiGlyph") ||
-               !postHlsl.contains("ASCII Depth") ||
+               !postHlsl.contains("BO3BeginnerAsciiAnalyzeCell") ||
+               !postHlsl.contains("ASCII Art / Contours") ||
+               !postHlsl.contains("_, |, / or") ||
                !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
                !postHlsl.contains("Rain Drops") ||
                !postHlsl.contains("Shadertoy fragCoord space (Y-up)") ||
