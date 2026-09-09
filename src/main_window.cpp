@@ -1592,6 +1592,11 @@ public:
                !postHlsl.contains("Rain Drops") ||
                !postHlsl.contains("Shadertoy fragCoord space (Y-up)") ||
                !postHlsl.contains("rainUv.y = -") ||
+               !postHlsl.contains("Oil Paint") ||
+               !postHlsl.contains("user-supplied GLSL") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL") ||
+               !postHlsl.contains("camera movement removed") ||
+               !postHlsl.contains("Pencil Sketch") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
