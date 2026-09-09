@@ -1683,8 +1683,26 @@ public:
             if(!compileGlslValidationHlsl(exportedMaterial, exportedMaterialDiagnostics, true))
                 return "Beginner Material exported runtime HLSL failed FXC validation: " + exportedMaterialDiagnostics;
 
+            QVector<ExportParamBinding> materialSsrBindings =
+                buildBeginnerExportParamBindings(material, exportedMaterial);
+            for(const ExportParamBinding& binding : materialSsrBindings)
+            {
+                if(binding.name == QStringLiteral("bb_material_screen_space_reflections_0_perspective"))
+                    return "Beginner Material SSR still exports the removed Perspective Match runtime parameter.";
+            }
+
+            // Simulate an older project/export caller handing the techset writer
+            // the pre-rework Perspective Match binding. The writer must discard
+            // it because the current material HLSL no longer declares that global.
+            ExportParamBinding staleMaterialSsrPerspective;
+            staleMaterialSsrPerspective.name =
+                QStringLiteral("bb_material_screen_space_reflections_0_perspective");
+            staleMaterialSsrPerspective.value = 1.30f;
+            staleMaterialSsrPerspective.storage = QStringLiteral("cg29_x");
+            materialSsrBindings.push_back(staleMaterialSsrPerspective);
+
             const QString materialSsrTechset = makeMaterialTechset(
-                exportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), {}, 1,
+                exportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 1,
                 bo3::PackageConfiguration::Runtime);
             bo3::TechsetParseOptions materialSsrParseOptions;
             materialSsrParseOptions.configuration = bo3::PackageConfiguration::Runtime;
@@ -1694,6 +1712,11 @@ public:
             if(materialSsrParsed.validation.hasErrors())
                 return "Beginner Material SSR runtime techset failed to parse after serialization: " +
                        materialSsrParsed.validation.toText();
+            for(const bo3::ParameterModel& parameter : materialSsrParsed.model.parameters)
+            {
+                if(parameter.name == QStringLiteral("bb_material_screen_space_reflections_0_perspective"))
+                    return "Beginner Material techset serialized a stale SSR Perspective Match parameter that is absent from HLSL.";
+            }
             const bo3::TechniqueResolutionResult materialSsrResolved =
                 bo3::resolveTechnique(materialSsrParsed.model, QStringLiteral("lit"));
             if(!materialSsrResolved.found)
@@ -4264,15 +4287,29 @@ finally {
         return QString();
     }
 
-    QVector<ExportParamBinding> buildBeginnerExportParamBindings(const QString& source) const
+    bool shaderDeclaresLooseScalarParameter(const QString& source, const QString& name) const
+    {
+        // Techset float/bool parameters must correspond to an actual loose HLSL
+        // scalar declaration. A mere identifier mention is not enough: stale
+        // comments or migrated Beginner parameter names can otherwise survive in
+        // a generated techset after the shader implementation stops declaring
+        // that global, which BO3 rejects at link/load time.
+        const QString escaped = QRegularExpression::escape(name);
+        const QRegularExpression declaration(
+            QStringLiteral(R"((?:^|\r?\n)\s*(?:(?:static|const)\s+)*(?:float|bool|int)\s+%1\s*(?:;|=))")
+                .arg(escaped),
+            QRegularExpression::MultilineOption);
+        return source.contains(declaration);
+    }
+
+    QVector<ExportParamBinding> buildBeginnerExportParamBindings(const beginner::Project& project,
+                                                                  const QString& source) const
     {
         QVector<ExportParamBinding> out;
         int floatIndex = 0;
-        for(const beginner::RuntimeParameter& runtime : beginner::runtimeFloatParameters(beginnerProject_))
+        for(const beginner::RuntimeParameter& runtime : beginner::runtimeFloatParameters(project))
         {
-            const QRegularExpression identifier(
-                QString("\\b%1\\b").arg(QRegularExpression::escape(runtime.name)));
-            if(!source.contains(identifier)) continue;
+            if(!shaderDeclaresLooseScalarParameter(source, runtime.name)) continue;
 
             ExportParamBinding binding;
             binding.name = runtime.name;
@@ -4285,6 +4322,11 @@ finally {
             out.push_back(binding);
         }
         return out;
+    }
+
+    QVector<ExportParamBinding> buildBeginnerExportParamBindings(const QString& source) const
+    {
+        return buildBeginnerExportParamBindings(beginnerProject_, source);
     }
 
     QVector<ExportParamBinding> buildExportParamBindings(const QString& source) const
@@ -5822,6 +5864,14 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         int sort = 10;
         for(const ExportParamBinding& binding : bindings)
         {
+            // Final material-techset guard: never serialize a constant parameter
+            // that the actual exported HLSL no longer declares. This catches
+            // stale/migrated Beginner fields (for example the removed material
+            // SSR Perspective Match control) even if an older caller hands us a
+            // binding list that still contains them.
+            if(!shaderDeclaresLooseScalarParameter(src, binding.name))
+                continue;
+
             bo3::ParameterModel parameter;
             parameter.kind = binding.isBool ? bo3::ParameterKind::Bool : bo3::ParameterKind::Float1;
             parameter.name = binding.name;
