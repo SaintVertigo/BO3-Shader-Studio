@@ -749,12 +749,17 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
 
-        // Resizing a D3D11 swapchain also rebuilds the GBuffer/depth targets, so
-        // never do that for every pixel of a splitter drag. Debounce native
-        // resize work and let the UI remain responsive.
+        // Resizing a D3D11 swapchain also rebuilds the GBuffer/depth targets.
+        // Throttle native resize work to roughly one update per display frame
+        // instead of waiting until a splitter drag ends. The old trailing
+        // debounce left newly exposed native-window pixels stale on Windows,
+        // producing repeated/ghosted strips of the Qt UI beside Preview.
         resizeTimer_.setSingleShot(true);
-        resizeTimer_.setInterval(45);
-        connect(&resizeTimer_, &QTimer::timeout, this, [this]{ syncNativeSize(); });
+        resizeTimer_.setInterval(16);
+        connect(&resizeTimer_, &QTimer::timeout, this, [this]{
+            syncNativeSize();
+            if(initialized_) renderer_.Render();
+        });
 
         frameTimer_.setInterval(16);
         frameTimer_.setTimerType(Qt::PreciseTimer);
@@ -773,8 +778,20 @@ public:
         HWND hwnd = reinterpret_cast<HWND>(winId());
         std::wstring nativeError;
         initialized_ = renderer_.Initialize(hwnd, nativeError);
-        if (!initialized_) error = ToQString(nativeError);
-        return initialized_;
+        if (!initialized_)
+        {
+            error = ToQString(nativeError);
+            return false;
+        }
+
+        // Screen/PostFX previews should start on a useful BO3 frame, not the
+        // synthetic rainbow checkerboard. Shadows of Evil ships with a
+        // same-frame ground-truth Float-Z capture, so it is also the safest
+        // default for depth-aware Beginner effects. Keep the generated texture
+        // only as an internal fallback if the bundled capture cannot load.
+        std::wstring defaultSceneError;
+        renderer_.UseBuiltInDepthScene(defaultSceneError, QStringLiteral("shadows_of_evil"));
+        return true;
     }
 
     PreviewRenderer& renderer() { return renderer_; }
@@ -859,7 +876,10 @@ protected:
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
-        if (initialized_) resizeTimer_.start();
+        // Start only when idle: this turns the single-shot timer into a
+        // 16 ms throttle during continuous dock/splitter drags. Restarting it
+        // on every resize event would recreate the old end-of-drag debounce.
+        if (initialized_ && !resizeTimer_.isActive()) resizeTimer_.start();
     }
     void paintEvent(QPaintEvent*) override { if (initialized_ && !resizeTimer_.isActive()) renderer_.Render(); }
 
@@ -1595,7 +1615,6 @@ public:
                !postHlsl.contains("Oil Paint") ||
                !postHlsl.contains("user-supplied GLSL") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_COLOR") ||
-               !postHlsl.contains("lightweight 9-tap graphite sketch") ||
                !postHlsl.contains("camera movement removed") ||
                !postHlsl.contains("Pencil Sketch") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
