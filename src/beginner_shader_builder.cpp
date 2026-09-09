@@ -1187,11 +1187,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QString strength = parameterExpr(project, effect, *definition, "strength");
             const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString colorRetention = parameterExpr(project, effect, *definition, "color_retention");
+            const QString lineStrength = parameterExpr(project, effect, *definition, "line_strength");
+            const QString smudge = parameterExpr(project, effect, *definition, "smudge");
             const QString grain = parameterExpr(project, effect, *definition, "grain");
             const QString paper = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
-            out += QString("    // %1 - BO3_BEGINNER_PENCIL_FAST: lightweight 9-tap graphite sketch; camera movement removed\n"
-                           "    // Replaces the old 3x16x2 nested sampling pass that could require hundreds of scene reads per pixel.\n"
+            out += QString("    // %1 - BO3_BEGINNER_PENCIL_COLOR: colored hand-drawn reconstruction; camera movement removed\n"
+                           "    // Keeps the original scene color like the supplied GLSL/reference instead of replacing the frame with white paper.\n"
                            "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%4, 0.25);\n"
                            "    float2 %2_px = uv * %2_rt;\n"
@@ -1211,24 +1214,37 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float %2_lbl = dot(%2_bl,%2_lumaW); float %2_lb = dot(%2_b,%2_lumaW); float %2_lbr = dot(%2_br,%2_lumaW);\n"
                            "    float %2_gx = (%2_ltr + 2.0*%2_lr + %2_lbr) - (%2_ltl + 2.0*%2_ll + %2_lbl);\n"
                            "    float %2_gy = (%2_lbl + 2.0*%2_lb + %2_lbr) - (%2_ltl + 2.0*%2_lt + %2_ltr);\n"
-                           "    float %2_blur = (4.0*%2_lc + 2.0*(%2_ll+%2_lr+%2_lt+%2_lb) + %2_ltl+%2_ltr+%2_lbl+%2_lbr) / 16.0;\n"
-                           "    float %2_dog = abs(%2_lc - %2_blur);\n"
-                           "    float %2_edgeRaw = length(float2(%2_gx,%2_gy)) + %2_dog * 3.0;\n"
-                           "    float %2_edge = smoothstep(0.08,0.55,%2_edgeRaw);\n"
-                           "    float %2_shadow = saturate(1.0-%2_lc);\n"
-                           "    float %2_tone = pow(%2_shadow,1.5) * 0.22;\n"
-                           "    float %2_grainN = BO3BeginnerHash21(floor(%2_px*0.55)+17.0) - 0.5;\n"
-                           "    float %2_graphite = saturate(%2_edge*0.78 + %2_tone*0.35);\n"
-                           "    %2_graphite *= 1.0 + %2_grainN * (0.12*clamp(%5,0.0,1.5));\n"
-                           "    float %2_fiber = sin(%2_px.x*0.041 + sin(%2_px.y*0.017)*1.7) * 0.5 + 0.5;\n"
-                           "    float %2_paperNoise = (%2_grainN*0.010 + (%2_fiber-0.5)*0.008) * clamp(%6,0.0,1.5);\n"
-                           "    float3 %2_paper = float3(0.985,0.980,0.965) + %2_paperNoise.xxx;\n"
-                           "    float3 %2_pencil = saturate(%2_paper - %2_graphite * float3(0.86,0.87,0.89));\n"
+                           "    float %2_gradMag = length(float2(%2_gx,%2_gy));\n"
+                           "    float3 %2_soft = (4.0*%2_c + 2.0*(%2_l+%2_r+%2_t+%2_b) + %2_tl+%2_tr+%2_bl+%2_br) / 16.0;\n"
+                           "    float %2_blurL = dot(%2_soft,%2_lumaW);\n"
+                           "    float %2_dog = abs(%2_lc-%2_blurL);\n"
+                           "    float %2_edge = smoothstep(0.045,0.32,%2_gradMag + %2_dog*2.25);\n"
+                           "    float %2_originalD = saturate(dot(%2_c,float3(-0.5,1.0,-0.5)));\n"
+                           "    float3 %2_referenceTone = min(lerp(%2_c,0.70.xxx,1.8*%2_originalD),0.70.xxx);\n"
+                           "    float3 %2_coloredBase = lerp(%2_referenceTone,%2_soft,saturate(%7*0.42));\n"
+                           "    float %2_shadow = pow(saturate(1.0-%2_lc),1.25);\n"
+                           "    float %2_angle = atan2(%2_gy,%2_gx);\n"
+                           "    float2 %2_dir = float2(cos(%2_angle),sin(%2_angle));\n"
+                           "    float2 %2_tan = float2(-%2_dir.y,%2_dir.x);\n"
+                           "    float %2_h1 = 0.5+0.5*sin(dot(%2_px,float2(0.72,0.28))*0.36);\n"
+                           "    float %2_h2 = 0.5+0.5*sin(dot(%2_px,float2(-0.34,0.94))*0.31 + 1.7);\n"
+                           "    float %2_h3 = 0.5+0.5*sin(dot(%2_px,%2_tan)*0.43 + 0.8);\n"
+                           "    float %2_hatch = (smoothstep(0.68,0.94,%2_h1)+smoothstep(0.72,0.96,%2_h2)+smoothstep(0.78,0.98,%2_h3))*0.333333;\n"
+                           "    %2_hatch *= smoothstep(0.18,0.86,%2_shadow) * (0.18+0.82*saturate(%7));\n"
+                           "    float %2_noise = BO3BeginnerHash21(floor(%2_px*0.65)+19.3)-0.5;\n"
+                           "    float %2_ink = saturate(%2_edge*(0.42+0.58*%6) + %2_hatch*0.36 + %2_dog*1.4);\n"
+                           "    %2_ink *= 1.0 + %2_noise*(0.10*clamp(%8,0.0,1.5));\n"
+                           "    float %2_fiber = (sin(%2_px.x*0.055 + sin(%2_px.y*0.019)*1.8)*0.5+0.5)-0.5;\n"
+                           "    float %2_paperMod = (%2_noise*0.018 + %2_fiber*0.010)*clamp(%9,0.0,1.5);\n"
+                           "    float3 %2_sketchColor = lerp(%2_coloredBase, %2_c, saturate(%5));\n"
+                           "    %2_sketchColor = saturate(%2_sketchColor + %2_paperMod.xxx);\n"
+                           "    %2_sketchColor *= 1.0 - %2_ink*(0.72+0.18*%6);\n"
+                           "    %2_sketchColor += %2_soft*0.10*saturate(%7)*(1.0-%2_edge);\n"
                            "    float2 %2_centered = (uv-0.5)*float2(%2_rt.x/max(%2_rt.y,1.0),1.0);\n"
-                           "    float %2_vign = saturate(1.0 - dot(%2_centered,%2_centered) * (0.16*clamp(%7,0.0,2.0)));\n"
-                           "    %2_pencil *= lerp(1.0,%2_vign,0.65);\n"
-                           "    color = lerp(color,%2_pencil,%3);\n")
-                .arg(definition->name, tag, strength, scale, grain, paper, vignette);
+                           "    float %2_vign = saturate(1.0-dot(%2_centered,%2_centered)*(0.10*clamp(%10,0.0,2.0)));\n"
+                           "    %2_sketchColor *= lerp(1.0,%2_vign,0.55);\n"
+                           "    color = lerp(color,%2_sketchColor,%3);\n")
+                .arg(definition->name, tag, strength, scale, colorRetention, lineStrength, smudge, grain, paper, vignette);
         }
         else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -3213,13 +3229,16 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
-        EffectDef("pencil_sketch", "Pencil Sketch", "Turn the BO3 frame into a clean graphite drawing using fast Sobel/detail lines, light tonal shading and subtle paper texture. The original GLSL camera movement is removed.", "Stylized Screen",
+        EffectDef("pencil_sketch", "Pencil Sketch", "Keep the BO3 scene colors while converting it into a hand-drawn pencil illustration with dark contour strokes, soft smudging, directional hatching and subtle paper grain. Based on the supplied GLSL/reference with camera movement removed.", "Stylized Screen",
                   {Target::PostFx},
-                  {FloatParam("strength", "Strength", "How strongly the clean pencil drawing replaces the original scene.", 0.0, 1.0, 0.01, 1.0),
-                   FloatParam("scale", "Line Detail", "Sampling radius for pencil outlines. Lower values preserve fine lines; higher values emphasize larger shapes.", 0.25, 3.0, 0.01, 0.8),
-                   FloatParam("grain", "Graphite Grain", "Subtle monochrome variation in the graphite itself, without covering the image in noise.", 0.0, 1.5, 0.01, 0.22),
-                   FloatParam("paper", "Paper Texture", "Very faint paper fibers behind the drawing.", 0.0, 1.5, 0.01, 0.12),
-                   FloatParam("vignette", "Vignette", "Gentle edge darkening for a sketchbook page. Keep low for a clean full-frame drawing.", 0.0, 2.0, 0.01, 0.18)}),
+                  {FloatParam("strength", "Strength", "Blend between the original scene and the colored pencil reconstruction.", 0.0, 1.0, 0.01, 0.94),
+                   FloatParam("scale", "Line Detail", "Sampling radius for pencil outlines. Lower values preserve finer detail.", 0.25, 3.0, 0.01, 0.75),
+                   FloatParam("color_retention", "Scene Color", "How much of the original BO3 scene color remains in the pencil drawing.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("line_strength", "Pencil Lines", "Strength of dark contour and graphite edge strokes.", 0.0, 2.0, 0.01, 1.0),
+                   FloatParam("smudge", "Smudge / Shading", "Blend softened scene color and directional pencil shading into larger forms.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("grain", "Graphite Grain", "Subtle monochrome breakup in the pencil strokes.", 0.0, 1.5, 0.01, 0.22),
+                   FloatParam("paper", "Paper Texture", "Subtle paper/fiber modulation without washing out the game image.", 0.0, 1.5, 0.01, 0.16),
+                   FloatParam("vignette", "Vignette", "Gentle edge darkening. The original camera movement remains removed.", 0.0, 2.0, 0.01, 0.16)}),
         // Keep the legacy id so existing projects that used Red Paint Splatter
         // transparently upgrade to the new Rain Drops implementation.
         EffectDef("red_paint_splatter", "Rain Drops", "Layer animated rain droplets, gravity streaks, glass refraction and soft wet blur over the scene. The cinematic zoom/lightning from the reference shader is intentionally omitted.", "Water & Weather",

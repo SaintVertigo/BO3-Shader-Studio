@@ -1594,7 +1594,7 @@ public:
                !postHlsl.contains("rainUv.y = -") ||
                !postHlsl.contains("Oil Paint") ||
                !postHlsl.contains("user-supplied GLSL") ||
-               !postHlsl.contains("BO3_BEGINNER_PENCIL_FAST") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_COLOR") ||
                !postHlsl.contains("lightweight 9-tap graphite sketch") ||
                !postHlsl.contains("camera movement removed") ||
                !postHlsl.contains("Pencil Sketch") ||
