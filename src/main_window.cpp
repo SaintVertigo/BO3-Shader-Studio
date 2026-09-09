@@ -1678,8 +1678,33 @@ public:
             const QString materialSsrTechset = makeMaterialTechset(
                 exportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), {}, 1,
                 bo3::PackageConfiguration::Runtime);
-            if(!materialSsrTechset.contains("frameBuffer = CodeTexture( \"resolvedScene\" )") ||
-               !materialSsrTechset.contains("DepthSampler = CodeTexture( \"floatZ\" )"))
+            bo3::TechsetParseOptions materialSsrParseOptions;
+            materialSsrParseOptions.configuration = bo3::PackageConfiguration::Runtime;
+            const bo3::TechsetParseResult materialSsrParsed = bo3::parseTechset(
+                materialSsrTechset, QStringLiteral("beginner_material_ssr.techsetdef"),
+                materialSsrParseOptions);
+            if(materialSsrParsed.validation.hasErrors())
+                return "Beginner Material SSR runtime techset failed to parse after serialization: " +
+                       materialSsrParsed.validation.toText();
+            const bo3::TechniqueResolutionResult materialSsrResolved =
+                bo3::resolveTechnique(materialSsrParsed.model, QStringLiteral("lit"));
+            if(!materialSsrResolved.found)
+                return "Beginner Material SSR runtime techset lost its lit technique: " +
+                       materialSsrResolved.validation.toText();
+            bool materialSsrSceneBound = false;
+            bool materialSsrDepthBound = false;
+            for(const bo3::StageResourceBindingModel& binding :
+                materialSsrResolved.technique.pixelShader.resourceBindings)
+            {
+                if(binding.valueKind != bo3::BindingValueKind::CodeTexture) continue;
+                if(binding.parameterName.compare(QStringLiteral("frameBuffer"), Qt::CaseInsensitive) == 0 &&
+                   binding.valueName.compare(QStringLiteral("resolvedScene"), Qt::CaseInsensitive) == 0)
+                    materialSsrSceneBound = true;
+                if(binding.parameterName.compare(QStringLiteral("DepthSampler"), Qt::CaseInsensitive) == 0 &&
+                   binding.valueName.compare(QStringLiteral("floatZ"), Qt::CaseInsensitive) == 0)
+                    materialSsrDepthBound = true;
+            }
+            if(!materialSsrSceneBound || !materialSsrDepthBound)
                 return "Beginner Material SSR runtime techset did not bind resolvedScene + floatZ CodeTextures.";
 
             const beginner::Project sky = projects[2].first;
