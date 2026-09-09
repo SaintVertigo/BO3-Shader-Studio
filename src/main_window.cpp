@@ -1580,9 +1580,11 @@ public:
                !postHlsl.contains("Depth Heatmap") ||
                !postHlsl.contains("Contact Shadows") ||
                !postHlsl.contains("BO3_BEGINNER_ASCII_CONTOUR") ||
-               !postHlsl.contains("BO3BeginnerAsciiGlyph") ||
+               !postHlsl.contains("BO3_BEGINNER_ASCII_PACKED_5X5") ||
+               !postHlsl.contains("BO3BeginnerAsciiPackedPattern") ||
+               !postHlsl.contains("BO3BeginnerAsciiPackedCharacter") ||
+               !postHlsl.contains("BO3BeginnerAsciiContourPattern") ||
                !postHlsl.contains("BO3BeginnerAsciiAnalyzeCell") ||
-               !postHlsl.contains("Base density ramp: [space] . ; c o P O ? @ #") ||
                !postHlsl.contains("useSceneColor") ||
                !postHlsl.contains("edgeText") ||
                !postHlsl.contains("ASCII Art / Contours") ||

@@ -754,6 +754,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QColor edgeColor = parameterColor(effect, *definition, "edge_color");
             const QColor backgroundColor = parameterColor(effect, *definition, "background_color");
             const QString charSize = parameterExpr(project, effect, *definition, "char_size");
+            const QString pixelSize = parameterExpr(project, effect, *definition, "pixel_size");
             const QString glyphScale = parameterExpr(project, effect, *definition, "glyph_scale");
             const QString levels = parameterExpr(project, effect, *definition, "levels");
             const QString luminanceCurve = parameterExpr(project, effect, *definition, "luminance_curve");
@@ -774,38 +775,44 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
             const QString backgroundOpacity = parameterExpr(project, effect, *definition, "background_opacity");
             const QString strength = parameterExpr(project, effect, *definition, "strength");
-            out += QString("    // %1 - luminance ASCII reconstruction + cell-coherent contour glyphs from image/Float-Z gradients\n"
+            out += QString("    // %1 - Shadertoy-style packed 5x5 colored ASCII base + BO3 contour/depth enhancement\n"
                            "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
-                           "    float %2_h = max(%3, 6.0);\n"
-                           "    float2 %2_cellPx = float2(max(%2_h*0.62,4.0), %2_h);\n"
-                           "    float2 %2_grid = uv * %2_rt / %2_cellPx;\n"
-                           "    float2 %2_cell = floor(%2_grid);\n"
-                           "    float2 %2_local = frac(%2_grid);\n"
+                           "    float2 %2_fragPx = uv * %2_rt;\n"
+                           "    float %2_detail = max(%3,4.0);\n"
+                           "    float2 %2_cellPx = float2(%2_detail,%2_detail);\n"
+                           "    float2 %2_cell = floor(%2_fragPx / %2_cellPx);\n"
                            "    float2 %2_cellUv = %2_cellPx / %2_rt;\n"
                            "    float2 %2_centerUv = saturate((%2_cell + 0.5) * %2_cellUv);\n"
-                           "    BO3BeginnerAsciiCellInfo %2_info = BO3BeginnerAsciiAnalyzeCell(%2_centerUv,%2_cellUv,%9,%10,%11,%12,%13,%14);\n"
-                           "    float %2_luma = pow(saturate(%2_info.luminance),max(%6,0.05));\n"
-                           "    %2_luma = lerp(%2_luma,1.0-%2_luma,step(0.5,%7));\n"
-                           "    float %2_levelCount = clamp(round(%5),2.0,10.0);\n"
-                           "    int %2_band = (int)round(%2_luma * (%2_levelCount-1.0));\n"
-                           "    int %2_baseGlyph = (int)round(float(%2_band) * 9.0 / max(%2_levelCount-1.0,1.0));\n"
-                           "    float %2_edgeVisible = %2_info.edge * saturate(%15) * (1.0-smoothstep(max(%19-0.08,0.0),max(%19,0.001),%2_info.depth01));\n"
-                           "    int %2_glyph = %2_edgeVisible > 0.08 ? %2_info.edgeGlyph : %2_baseGlyph;\n"
-                           "    float %2_ink = BO3BeginnerAsciiGlyph(%2_local,%2_glyph,%4);\n"
-                           "    float %2_depthFade = 1.0-smoothstep(min(%16,%17),max(%16+0.0001,%17),%2_info.depth01);\n"
-                           "    float %2_inkFade = lerp(1.0,%2_depthFade,saturate(%18));\n"
-                           "    %2_ink *= %2_inkFade;\n"
-                           "    float %2_useSceneColor = step(0.5,%8) * saturate(%26);\n"
-                           "    float3 %2_text = lerp(%21,%2_info.sceneColor,%2_useSceneColor);\n"
-                           "    float3 %2_edgeText = lerp(%20,%2_info.sceneColor,%2_useSceneColor);\n"
-                           "    float3 %2_inkColor = lerp(%2_text,%2_edgeText,saturate(%2_edgeVisible));\n"
-                           "    float3 %2_bg = lerp(color,%22,saturate(%24));\n"
-                           "    float3 %2_ascii = lerp(%2_bg,%2_inkColor,%2_ink);\n"
-                           "    float %2_target = BO3BeginnerTargetMask(BO3BeginnerSampleRawDepthPoint(%2_centerUv),%23);\n"
-                           "    color = lerp(color,%2_ascii,saturate(%25)*%2_target);\n")
+                           "    float3 %2_sceneColor = BO3BeginnerAsciiScene(%2_centerUv);\n"
+                           "    float %2_gray = saturate(dot(%2_sceneColor,float3(0.2126,0.7152,0.0722)));\n"
+                           "    float %2_levelCount = clamp(round(%6),2.0,10.0);\n"
+                           "    %2_gray = round(%2_gray*(%2_levelCount-1.0))/max(%2_levelCount-1.0,1.0);\n"
+                           "    %2_gray = pow(saturate(%2_gray),max(%7,0.05));\n"
+                           "    %2_gray = lerp(%2_gray,1.0-%2_gray,step(0.5,%8));\n"
+                           "    int %2_pattern = BO3BeginnerAsciiPackedPattern(%2_gray);\n"
+                           "    float %2_baseInk = BO3BeginnerAsciiPackedCharacter(%2_pattern,%2_fragPx,max(%4,0.5),%5);\n"
+                           "    BO3BeginnerAsciiCellInfo %2_info = BO3BeginnerAsciiAnalyzeCell(%2_centerUv,%2_cellUv,%10,%11,%12,%13,%14,%15);\n"
+                           "    float %2_edgeDepthGate = 1.0-smoothstep(max(%20-0.08,0.0),max(%20,0.001),%2_info.depth01);\n"
+                           "    float %2_edgeSignal = saturate(%2_info.edge * max(%16,0.0)) * %2_edgeDepthGate;\n"
+                           "    float %2_edgeMix = smoothstep(0.48,0.82,%2_edgeSignal);\n"
+                           "    int %2_edgePattern = BO3BeginnerAsciiContourPattern(%2_info.edgeGlyph);\n"
+                           "    float %2_edgeInk = BO3BeginnerAsciiPackedCharacter(%2_edgePattern,%2_fragPx,max(%4,0.5),%5);\n"
+                           "    float %2_depthFade = 1.0-smoothstep(min(%17,%18),max(%17+0.0001,%18),%2_info.depth01);\n"
+                           "    float %2_baseFade = lerp(1.0,%2_depthFade,saturate(%19));\n"
+                           "    %2_baseInk *= %2_baseFade;\n"
+                           "    float %2_ink = lerp(%2_baseInk,%2_edgeInk,%2_edgeMix);\n"
+                           "    float %2_useSceneColor = step(0.5,%9) * saturate(%27);\n"
+                           "    float3 %2_text = lerp(%22,%2_sceneColor,%2_useSceneColor);\n"
+                           "    float3 %2_edgeText = lerp(%21,%2_sceneColor,%2_useSceneColor);\n"
+                           "    float3 %2_inkColor = lerp(%2_text,%2_edgeText,%2_edgeMix);\n"
+                           "    float3 %2_bg = lerp(color,%23,saturate(%25));\n"
+                           "    float3 %2_ascii = lerp(%2_bg,%2_inkColor,saturate(%2_ink));\n"
+                           "    float %2_target = BO3BeginnerTargetMask(BO3BeginnerSampleRawDepthPoint(%2_centerUv),%24);\n"
+                           "    color = lerp(color,%2_ascii,saturate(%26)*%2_target);\n")
                 .arg(definition->name)
                 .arg(tag)
                 .arg(charSize)
+                .arg(pixelSize)
                 .arg(glyphScale)
                 .arg(levels)
                 .arg(luminanceCurve)
@@ -2138,41 +2145,41 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
     if(projectUsesEffect(project, "ascii_depth"))
     {
         out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_ASCII_CONTOUR: luminance ASCII plus contour-following _ | / \\ glyphs.
-// Base density ramp: [space] . ; c o P O ? @ #
-uint BO3BeginnerAsciiRowMask(int glyph, int row)
+// BO3_BEGINNER_ASCII_CONTOUR: Shadertoy-style packed 5x5 luminance glyphs plus contour-following _ | / \\ glyphs.
+// BO3_BEGINNER_ASCII_PACKED_5X5
+int BO3BeginnerAsciiPackedPattern(float gray)
 {
-    if(glyph <= 0) return 0u;
-    if(glyph == 1) { if(row == 5 || row == 6) return 4u; return 0u; }                    // .
-    if(glyph == 2) { if(row == 1 || row == 3 || row == 4) return 4u; if(row == 5) return 8u; return 0u; } // ;
-    if(glyph == 3) { if(row == 2) return 14u; if(row == 3 || row == 4) return 16u; if(row == 5) return 14u; return 0u; } // c
-    if(glyph == 4) { if(row == 2 || row == 5) return 14u; if(row == 3 || row == 4) return 17u; return 0u; } // o
-    if(glyph == 5) { if(row == 0 || row == 3) return 30u; if(row == 1 || row == 2) return 17u; if(row >= 4 && row <= 6) return 16u; return 0u; } // P
-    if(glyph == 6) { if(row == 0 || row == 6) return 14u; if(row >= 1 && row <= 5) return 17u; return 0u; } // O
-    if(glyph == 7) { if(row == 0) return 14u; if(row == 1) return 17u; if(row == 2) return 2u; if(row == 3) return 4u; if(row == 5) return 4u; return 0u; } // ?
-    if(glyph == 8) { if(row == 0) return 14u; if(row == 1) return 17u; if(row == 2) return 23u; if(row == 3) return 21u; if(row == 4) return 23u; if(row == 5) return 16u; return 15u; } // @
-    if(glyph == 9) { if(row == 1 || row == 4) return 31u; if(row <= 5) return 10u; return 0u; } // #
-    if(glyph == 10) return 4u;                                                         // |
-    if(glyph == 11) { if(row <= 0) return 1u; if(row <= 2) return 2u; if(row == 3) return 4u; if(row <= 5) return 8u; return 16u; } // /
-    if(glyph == 12) { if(row <= 0) return 16u; if(row <= 2) return 8u; if(row == 3) return 4u; if(row <= 5) return 2u; return 1u; } // \\
-    if(glyph == 13) return row == 6 ? 31u : 0u;                                        // _
-    return 0u;
+    gray = saturate(gray);
+    int n = 65536;
+    n += gray >= 0.2 ? 64 : 0;
+    n += gray >= 0.3 ? 267172 : 0;
+    n += gray >= 0.4 ? 14922314 : 0;
+    n += gray >= 0.5 ? 8130078 : 0;
+    n -= gray >= 0.6 ? 8133150 : 0;
+    n -= gray >= 0.7 ? 2052562 : 0;
+    n -= gray >= 0.8 ? 1686642 : 0;
+    return max(n,0);
 }
 
-float BO3BeginnerAsciiGlyph(float2 localUv, int glyph, float glyphScale)
+int BO3BeginnerAsciiContourPattern(int glyph)
 {
-    float scale = max(glyphScale, 0.10);
-    float2 p = (localUv - 0.5) / scale + 0.5;
-    if(any(p < 0.0) || any(p >= 1.0)) return 0.0;
-    float2 raster = p * float2(5.0, 7.0);
-    int x = min((int)floor(raster.x), 4);
-    int y = min((int)floor(raster.y), 6);
-    uint mask = BO3BeginnerAsciiRowMask(min(max(glyph,0),13), y);
-    uint bit = 1u << (4 - x);
-    float on = (mask & bit) != 0u ? 1.0 : 0.0;
-    float2 q = frac(raster);
-    float edge = min(min(q.x,1.0-q.x), min(q.y,1.0-q.y));
-    return on * smoothstep(0.025, 0.14, edge);
+    if(glyph == 10) return 4329604;   // | : center column
+    if(glyph == 11) return 1118480;   // /
+    if(glyph == 12) return 17043521;  // \\
+    if(glyph == 13) return 32505856;  // _ : bottom row
+    return 0;
+}
+
+float BO3BeginnerAsciiPackedCharacter(int pattern, float2 fragPx, float pixelSize, float glyphScale)
+{
+    float px = max(pixelSize,0.5);
+    float2 p = fmod(fragPx / px, float2(2.0,2.0)) - 1.0;
+    p /= max(glyphScale,0.10);
+    p = floor(p * float2(4.0,-4.0) + 2.5);
+    if(p.x < 0.0 || p.x > 4.0 || p.y < 0.0 || p.y > 4.0)
+        return 0.0;
+    int bitIndex = (int)p.x + 5 * (int)p.y;
+    return ((pattern >> bitIndex) & 1) != 0 ? 1.0 : 0.0;
 }
 
 float3 BO3BeginnerAsciiScene(float2 uv)
@@ -2215,13 +2222,11 @@ BO3BeginnerAsciiCellInfo BO3BeginnerAsciiAnalyzeCell(
     float lML=dot(cML,w), lCC=dot(cCC,w), lMR=dot(cMR,w);
     float lBL=dot(cBL,w), lBC=dot(cBC,w), lBR=dot(cBR,w);
 
-    // A box-filtered cell luminance preserves the video's downscale -> glyph mapping.
     o.luminance = saturate((lTL+lTR+lBL+lBR + 2.0*(lTC+lML+lCC+lMR+lBC)) / 14.0);
     o.sceneColor = max((cTL+cTR+cBL+cBR + 2.0*(cTC+cML+cCC+cMR+cBC)) / 14.0,0.0.xxx);
 
-    // Sobel gives both image-edge magnitude and the direction needed to choose
-    // _, |, / or \\.  A cheap two-scale high-pass term plays the role of the
-    // video's Difference-of-Gaussians pre-pass without requiring another buffer.
+    // Sobel supplies contour direction.  The two-scale high-pass term approximates
+    // the reference video's DoG pre-pass without requiring an extra render target.
     float2 imageGrad = float2(
         (lTR + 2.0*lMR + lBR) - (lTL + 2.0*lML + lBL),
         (lBL + 2.0*lBC + lBR) - (lTL + 2.0*lTC + lTR));
@@ -2238,7 +2243,6 @@ BO3BeginnerAsciiCellInfo BO3BeginnerAsciiAnalyzeCell(
     float rawD = BO3BeginnerSampleRawDepthPoint(centerUv+float2(0.0,d.y));
     float vmC=BO3BeginnerViewmodelMask(rawC), vmL=BO3BeginnerViewmodelMask(rawL), vmR=BO3BeginnerViewmodelMask(rawR);
     float vmU=BO3BeginnerViewmodelMask(rawU), vmD=BO3BeginnerViewmodelMask(rawD);
-    float zC=log2(max(BO3BeginnerLinearDepth(rawC),1.0));
     float zL=log2(max(BO3BeginnerLinearDepth(rawL),1.0));
     float zR=log2(max(BO3BeginnerLinearDepth(rawR),1.0));
     float zU=log2(max(BO3BeginnerLinearDepth(rawU),1.0));
@@ -2255,9 +2259,9 @@ BO3BeginnerAsciiCellInfo BO3BeginnerAsciiAnalyzeCell(
     float2 tangent = gradientLength > 0.00001 ? float2(-gradient.y,gradient.x)/gradientLength : float2(1.0,0.0);
 
     float ax=abs(tangent.x), ay=abs(tangent.y);
-    if(ax > ay*2.20) o.edgeGlyph=13;            // _
-    else if(ay > ax*2.20) o.edgeGlyph=10;       // |
-    else o.edgeGlyph = tangent.x*tangent.y < 0.0 ? 11 : 12; // / or \\
+    if(ax > ay*2.20) o.edgeGlyph=13;
+    else if(ay > ax*2.20) o.edgeGlyph=10;
+    else o.edgeGlyph = tangent.x*tangent.y < 0.0 ? 11 : 12;
 
     o.edge=saturate(max(imageEdge,depthEdge));
     o.depth01=BO3BeginnerNormalizedDepth(rawC);
@@ -2965,25 +2969,26 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("start", "Near Distance", "Start of the heatmap range.", 0.0, 1.0, 0.01, 0.05),
                    FloatParam("end", "Far Distance", "End of the heatmap range.", 0.0, 1.0, 0.01, 0.95),
                    FloatParam("strength", "Strength", "Blend amount of the heatmap colors.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("ascii_depth", "ASCII Art / Contours", "Rebuild the scene as colored luminance-driven ASCII using the game's own downscaled RGB, then replace strong edge cells with _, |, / or \\ while BO3 Float-Z reinforces 3D boundaries.", "Depth & Scene",
+        EffectDef("ascii_depth", "ASCII Art / Contours", "Rebuild the BO3 frame with Shadertoy-style packed 5x5 luminance glyphs colored by the game, then blend contour-aware _, |, / or \\ glyphs only on confident image/depth boundaries.", "Depth & Scene",
                   {Target::PostFx},
                   {ColorParam("text_color", "Text Color", "Monochrome color used by ordinary ASCII characters.", "#D8F7FF"),
                    ColorParam("edge_color", "Contour Color", "Color of the contour-following _, |, / and \\ characters.", "#FFFFFF"),
                    ColorParam("background_color", "Background Color", "Color behind the ASCII characters.", "#05080B"),
                    ChoiceParam("color_mode", "Text Coloring", "Use the downscaled game color for every ASCII and contour glyph, or force a custom monochrome tint. Scene Color matches the colored ASCII look from the reference video.", {"Monochrome", "Scene Color"}, 1),
                    FloatParam("game_color_blend", "Game Color Amount", "How strongly the ASCII glyphs inherit the averaged RGB color of the underlying BO3 scene. 1.0 keeps the game's colors; 0.0 falls back to the custom Text / Contour colors.", 0.0, 1.0, 0.01, 1.0),
-                   FloatParam("char_size", "Character Size", "Height of each ASCII character cell in screen pixels. Around 8 px is the classic small-but-legible target.", 6.0, 48.0, 1.0, 8.0),
-                   FloatParam("glyph_scale", "Glyph Scale", "Scale of each 5x7 glyph inside its character cell.", 0.45, 1.25, 0.01, 0.92),
-                   FloatParam("levels", "Character Levels", "Number of luminance glyphs used from the [space] . ; c o P O ? @ # density ramp.", 2.0, 10.0, 1.0, 10.0),
+                   FloatParam("char_size", "ASCII Details", "Screen-pixel size of the downsample block used to choose each character. 8 matches the Shadertoy reference default.", 4.0, 48.0, 1.0, 8.0),
+                   FloatParam("pixel_size", "Glyph Pixel Size", "Pixel scale used by the packed 5x5 character raster. 3.5 matches the Shadertoy reference default; smaller values draw denser text.", 1.0, 8.0, 0.1, 3.5),
+                   FloatParam("glyph_scale", "Glyph Scale", "Scale the packed 5x5 glyph inside its repeating character raster.", 0.45, 1.35, 0.01, 1.0),
+                   FloatParam("levels", "Character Levels", "Quantizes scene luminance before the packed 5x5 character thresholds are evaluated. Higher values preserve more tonal detail.", 2.0, 10.0, 1.0, 10.0),
                    FloatParam("luminance_curve", "Luminance Curve", "Shapes how brightness selects sparse or dense characters.", 0.25, 4.0, 0.05, 1.0),
                    ChoiceParam("invert_luminance", "Luminance Direction", "Normal uses denser glyphs for brighter cells; Inverted reverses the ramp.", {"Bright = Dense", "Dark = Dense"}, 0),
-                   FloatParam("image_edges", "Image Contours", "Strength of Sobel + local high-frequency image contours.", 0.0, 2.0, 0.01, 1.0),
-                   FloatParam("depth_edges", "Depth Contours", "Strength of Float-Z discontinuities and viewmodel/world boundaries.", 0.0, 2.0, 0.01, 0.85),
-                   FloatParam("dog_detail", "High-Frequency Detail", "Difference-of-Gaussians-style local detail boost before contour direction is chosen.", 0.0, 2.0, 0.01, 1.0),
+                   FloatParam("image_edges", "Image Contours", "Strength of Sobel + local high-frequency image contours. Kept conservative so the colored density glyphs remain the main image.", 0.0, 2.0, 0.01, 0.45),
+                   FloatParam("depth_edges", "Depth Contours", "Strength of Float-Z discontinuities and viewmodel/world boundaries.", 0.0, 2.0, 0.01, 0.55),
+                   FloatParam("dog_detail", "High-Frequency Detail", "Difference-of-Gaussians-style local detail boost before contour direction is chosen.", 0.0, 2.0, 0.01, 0.65),
                    FloatParam("depth_edge_threshold", "Depth Edge Threshold", "Minimum Float-Z change required before depth reinforces a contour cell.", 0.005, 0.35, 0.005, 0.055),
                    FloatParam("edge_threshold", "Image Edge Threshold", "Ignore weak image gradients so contour characters stay clean and cohesive.", 0.005, 0.40, 0.005, 0.075),
                    FloatParam("edge_span", "Contour Span", "How much of each character tile is examined when deciding its dominant edge direction.", 0.15, 0.75, 0.01, 0.48),
-                   FloatParam("edge_strength", "Contour Strength", "How strongly contour cells replace the normal luminance glyph.", 0.0, 2.0, 0.01, 1.0),
+                   FloatParam("edge_strength", "Contour Strength", "How strongly confident edge cells blend toward _, |, / or \\ instead of replacing the density pass at the first weak edge.", 0.0, 2.0, 0.01, 0.55),
                    FloatParam("edge_max_depth", "Contour Draw Distance", "Stop drawing contour characters past this normalized Float-Z distance. The default keeps contours across the full scene.", 0.05, 1.0, 0.01, 1.0),
                    FloatParam("depth_fade_start", "Text Fade Start", "Distance where ordinary ASCII characters begin fading out.", 0.0, 1.0, 0.01, 0.58),
                    FloatParam("depth_fade_end", "Text Fade End", "Distance where the depth fade reaches its maximum.", 0.0, 1.0, 0.01, 0.96),
