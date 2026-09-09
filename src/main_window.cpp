@@ -1585,6 +1585,8 @@ public:
                !postHlsl.contains("BO3BeginnerSSRTrace") ||
                !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
                !postHlsl.contains("Rain Drops") ||
+               !postHlsl.contains("Shadertoy fragCoord space (Y-up)") ||
+               !postHlsl.contains("rainUv.y = -") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
@@ -1653,11 +1655,17 @@ public:
                !materialHlsl.contains("surfaceViewDir") ||
                !materialHlsl.contains("clip("))
                 return "Beginner Material glow/dissolve modules are missing their BO3 runtime inputs.";
-            if(!materialHlsl.contains("material pixels sample BO3 resolvedScene + Float-Z in screen space") ||
+            if(!materialHlsl.contains("BO3_BEGINNER_MATERIAL_SSR: 1") ||
+               !materialHlsl.contains("material SSR uses the authored surface normal") ||
                !materialHlsl.contains("Texture2D<float4> frameBuffer : register(t0);") ||
                !materialHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
-               !materialHlsl.contains("BO3_BEGINNER_SSR"))
-                return "Beginner Material screen-space reflection module is missing its resolvedScene/Float-Z contract.";
+               !materialHlsl.contains("BO3_BEGINNER_SSR") ||
+               !materialHlsl.contains("BO3BeginnerMaterialSSRTrace") ||
+               !materialHlsl.contains("Transform_OffsetToCamera") ||
+               !materialHlsl.contains("Transform_OffsetToClip") ||
+               !materialHlsl.contains("BO3_SHADER_STUDIO_MATERIAL_PREVIEW") ||
+               !materialHlsl.contains("BO3BeginnerMaterialPreviewEnvironmentUv"))
+                return "Beginner Material screen-space reflection module is missing its surface-normal runtime trace or camera-matched preview contract.";
 
             // The package adapter validates the authored Material contract above,
             // but Beginner export ultimately passes through the Custom Material
