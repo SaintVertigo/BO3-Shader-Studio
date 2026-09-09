@@ -1582,6 +1582,9 @@ public:
                !postHlsl.contains("BO3_BEGINNER_ASCII_CONTOUR") ||
                !postHlsl.contains("BO3BeginnerAsciiGlyph") ||
                !postHlsl.contains("BO3BeginnerAsciiAnalyzeCell") ||
+               !postHlsl.contains("Base density ramp: [space] . ; c o P O ? @ #") ||
+               !postHlsl.contains("useSceneColor") ||
+               !postHlsl.contains("edgeText") ||
                !postHlsl.contains("ASCII Art / Contours") ||
                !postHlsl.contains("_, |, / or") ||
                !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
