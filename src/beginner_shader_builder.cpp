@@ -711,6 +711,65 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color *= 1.0 - saturate(%2_occ * %7);\n")
                 .arg(definition->name, tag, lengthPx, bias, softness, angle, strength);
         }
+        else if(effect.typeId == "screen_space_reflections" && project.target == Target::PostFx && hasUv)
+        {
+            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString perspective = parameterExpr(project, effect, *definition, "perspective");
+            const QString distanceFade = parameterExpr(project, effect, *definition, "distance_fade");
+            out += QString("    // %1 - BO3 Float-Z screen-space reflection raymarch\n"
+                           "    float %2_ssrRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_ssrTarget = BO3BeginnerTargetMask(%2_ssrRaw, %3);\n"
+                           "    float3 %2_ssrNormal = BO3BeginnerSSRNormal(uv, %2_ssrRaw, %10);\n"
+                           "    float3 %2_ssrPos = BO3BeginnerSSRViewPosition(uv, BO3BeginnerLinearDepth(%2_ssrRaw), %10);\n"
+                           "    float3 %2_ssrView = normalize(-%2_ssrPos);\n"
+                           "    float %2_ssrFresnel = pow(1.0 - saturate(dot(%2_ssrNormal, %2_ssrView)), lerp(5.0, 1.0, saturate(%9)));\n"
+                           "    float4 %2_ssrTrace = BO3BeginnerSSRTrace(uv, %2_ssrRaw, %5, %7, %6, %10, %8, 0.0, 1.0, t);\n"
+                           "    float %2_ssrDepth01 = BO3BeginnerNormalizedDepth(%2_ssrRaw);\n"
+                           "    float %2_ssrDistanceMask = 1.0 - smoothstep(max(0.0,%11), 1.0, %2_ssrDepth01);\n"
+                           "    float %2_ssrBlend = saturate(%2_ssrTrace.a * %4 * %2_ssrTarget * %2_ssrDistanceMask * lerp(1.0, %2_ssrFresnel, saturate(%9)));\n"
+                           "    color = lerp(color, %2_ssrTrace.rgb, %2_ssrBlend);\n")
+                .arg(definition->name, tag, targetScope, strength, maxDistance, steps, thickness, roughness, fresnel, perspective, distanceFade);
+        }
+        else if(effect.typeId == "wet_ground_reflections" && project.target == Target::PostFx && hasUv)
+        {
+            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString wetness = parameterExpr(project, effect, *definition, "wetness");
+            const QString groundSelect = parameterExpr(project, effect, *definition, "ground_selectivity");
+            const QString coverage = parameterExpr(project, effect, *definition, "coverage");
+            const QString ripple = parameterExpr(project, effect, *definition, "ripple");
+            const QString rippleScale = parameterExpr(project, effect, *definition, "ripple_scale");
+            const QString perspective = parameterExpr(project, effect, *definition, "perspective");
+            out += QString("    // %1 - Float-Z wet-ground SSR with ground-normal gating and ripples\n"
+                           "    float %2_wetRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_wetTarget = BO3BeginnerTargetMask(%2_wetRaw, %3);\n"
+                           "    float %2_wetDepth = BO3BeginnerLinearDepth(%2_wetRaw);\n"
+                           "    float3 %2_wetPos = BO3BeginnerSSRViewPosition(uv, %2_wetDepth, %15);\n"
+                           "    float3 %2_wetNormal = BO3BeginnerSSRNormal(uv, %2_wetRaw, %15);\n"
+                           "    float3 %2_wetView = normalize(-%2_wetPos);\n"
+                           "    float %2_ground = smoothstep(lerp(0.20,0.78,saturate(%10)), lerp(0.56,0.94,saturate(%10)), abs(%2_wetNormal.y));\n"
+                           "    float %2_puddleNoise = 0.5 + 0.25*sin(%2_wetPos.x*0.018) + 0.25*cos(%2_wetPos.z*0.013 + %2_wetPos.x*0.006);\n"
+                           "    float %2_puddle = smoothstep(1.0-saturate(%11), 1.12-saturate(%11), %2_puddleNoise);\n"
+                           "    float %2_wetFresnel = pow(1.0 - saturate(dot(%2_wetNormal, %2_wetView)), lerp(5.5,1.2,saturate(%14)));\n"
+                           "    float4 %2_wetTrace = BO3BeginnerSSRTrace(uv, %2_wetRaw, %5, %7, %6, %15, %8, %12, %13, t);\n"
+                           "    float %2_wetMask = saturate(%2_wetTarget * %2_ground * lerp(1.0,%2_puddle,saturate(1.0-%11)) * %4 * %9);\n"
+                           "    float %2_wetBlend = saturate(%2_wetTrace.a * %2_wetMask * lerp(0.65, %2_wetFresnel, saturate(%14)));\n"
+                           "    float3 %2_wetColor = lerp(%2_wetTrace.rgb, %2_wetTrace.rgb * float3(0.88,0.94,1.03), 0.35);\n"
+                           "    color = lerp(color, %2_wetColor, %2_wetBlend);\n")
+                .arg(definition->name, tag, targetScope, strength, maxDistance, steps, thickness, roughness,
+                     wetness, groundSelect, coverage, ripple, rippleScale, fresnel, perspective);
+        }
         else if(effect.typeId == "luminance_tint")
         {
             const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
@@ -1424,7 +1483,9 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
            typeId == QStringLiteral("depth_contours") ||
            typeId == QStringLiteral("depth_heatmap") ||
            typeId == QStringLiteral("depth_isolation") ||
-           typeId == QStringLiteral("contact_shadows");
+           typeId == QStringLiteral("contact_shadows") ||
+           typeId == QStringLiteral("screen_space_reflections") ||
+           typeId == QStringLiteral("wet_ground_reflections");
 }
 
 bool projectRequiresSceneDepth(const Project& project)
@@ -1654,6 +1715,129 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
     float meanDepth = (sampleA + sampleB) * 0.5;
     float curvature = saturate((centerDepth - meanDepth - depthBias) / max(depthRange * 0.72, 0.0001)) * validA * validB;
     return saturate(paired * 0.72 + strongest * pairBalance * 0.18 + curvature * 0.46);
+}
+)HLSL");
+    }
+
+    if(projectUsesEffect(project, "screen_space_reflections") || projectUsesEffect(project, "wet_ground_reflections"))
+    {
+        out += QStringLiteral(R"HLSL(
+// BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX.
+// Uses resolvedScene + Float-Z only; the view-space reconstruction is an
+// intentionally portable approximation so it remains valid in runtime and
+// TOOLSGFX package validation without relying on an unavailable G-buffer.
+float3 BO3BeginnerSSRViewPosition(float2 uv, float depth, float perspectiveScale)
+{
+    float2 ndc = uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    float aspect = PostFx_GetRenderTargetSize().x / max(PostFx_GetRenderTargetSize().y, 1.0);
+    float focal = max(perspectiveScale, 0.35);
+    return float3(ndc.x * aspect / focal, ndc.y / focal, 1.0) * max(depth, 0.001);
+}
+
+float2 BO3BeginnerSSRProjectUv(float3 viewPos, float perspectiveScale)
+{
+    float aspect = PostFx_GetRenderTargetSize().x / max(PostFx_GetRenderTargetSize().y, 1.0);
+    float focal = max(perspectiveScale, 0.35);
+    float invZ = 1.0 / max(viewPos.z, 0.001);
+    float2 ndc = float2(viewPos.x * invZ * focal / aspect,
+                        -viewPos.y * invZ * focal);
+    return ndc * 0.5 + 0.5;
+}
+
+float3 BO3BeginnerSSRNormal(float2 uv, float rawCenter, float perspectiveScale)
+{
+    float centerVM = BO3BeginnerViewmodelMask(rawCenter);
+    float centerDepth = BO3BeginnerLinearDepth(rawCenter);
+    float2 texel = PostFx_GetRenderTargetSize().zw;
+    float depthR = BO3BeginnerSampleMatchingDepth(uv + float2(texel.x, 0.0), centerVM);
+    float depthD = BO3BeginnerSampleMatchingDepth(uv + float2(0.0, texel.y), centerVM);
+    if(depthR <= 0.0) depthR = centerDepth;
+    if(depthD <= 0.0) depthD = centerDepth;
+
+    float3 pC = BO3BeginnerSSRViewPosition(uv, centerDepth, perspectiveScale);
+    float3 pR = BO3BeginnerSSRViewPosition(uv + float2(texel.x, 0.0), depthR, perspectiveScale);
+    float3 pD = BO3BeginnerSSRViewPosition(uv + float2(0.0, texel.y), depthD, perspectiveScale);
+    float3 n = normalize(cross(pD - pC, pR - pC));
+    if(dot(n, pC) > 0.0) n = -n;
+    return n;
+}
+
+float BO3BeginnerSSREdgeFade(float2 uv)
+{
+    float2 e = min(uv, 1.0 - uv);
+    return saturate(min(e.x, e.y) * 10.0);
+}
+
+float4 BO3BeginnerSSRTrace(float2 uv, float rawCenter,
+                           float maxDistance, float thickness, float stepCount,
+                           float perspectiveScale, float roughness,
+                           float rippleAmount, float rippleScale, float timeValue)
+{
+    float centerVM = BO3BeginnerViewmodelMask(rawCenter);
+    float centerDepth = BO3BeginnerLinearDepth(rawCenter);
+    float3 origin = BO3BeginnerSSRViewPosition(uv, centerDepth, perspectiveScale);
+    float3 normal = BO3BeginnerSSRNormal(uv, rawCenter, perspectiveScale);
+    float3 incident = normalize(origin);
+    float3 reflectionDir = normalize(reflect(incident, normal));
+
+    // Rays headed immediately behind the camera cannot produce an on-screen hit.
+    float forwardMask = smoothstep(-0.10, 0.08, reflectionDir.z);
+    float count = clamp(round(stepCount), 6.0, 32.0);
+    float traceDistance = min(max(maxDistance, 1.0), max(centerDepth * 0.85, 48.0));
+    float baseStep = traceDistance / count;
+    float travel = baseStep * 0.30;
+    float prevDelta = -max(thickness, 0.05) * 2.0;
+    float hitMask = 0.0;
+    float2 hitUv = uv;
+    float hitProgress = 1.0;
+
+    [loop] for(int i = 0; i < 32; ++i)
+    {
+        if(float(i) >= count || hitMask > 0.5) break;
+        float progress = (float(i) + 1.0) / count;
+        travel += baseStep * lerp(0.62, 1.45, progress);
+        float3 rayPos = origin + reflectionDir * travel;
+        if(rayPos.z <= BO3BeginnerNearClip() * 1.05) break;
+
+        float2 sampleUv = BO3BeginnerSSRProjectUv(rayPos, perspectiveScale);
+        if(any(sampleUv <= 0.001) || any(sampleUv >= 0.999)) break;
+
+        float sceneDepth = BO3BeginnerSampleMatchingDepth(sampleUv, centerVM);
+        if(sceneDepth > 0.0)
+        {
+            float delta = rayPos.z - sceneDepth;
+            float adaptiveThickness = max(thickness, rayPos.z * 0.0015);
+            float crossed = step(prevDelta, 0.0) * step(0.0, delta);
+            float nearHit = 1.0 - step(adaptiveThickness, abs(delta));
+            float accept = saturate(max(crossed, nearHit));
+            if(accept > 0.5 && progress > 0.035)
+            {
+                hitMask = 1.0;
+                hitUv = sampleUv;
+                hitProgress = progress;
+            }
+            prevDelta = delta;
+        }
+    }
+
+    float2 texel = PostFx_GetRenderTargetSize().zw;
+    float2 ripple = float2(
+        sin((hitUv.y * max(rippleScale, 0.1) + timeValue * 0.37) * 6.2831853),
+        cos((hitUv.x * max(rippleScale, 0.1) - timeValue * 0.29) * 6.2831853));
+    hitUv = saturate(hitUv + ripple * texel * rippleAmount);
+
+    float blurPixels = roughness * roughness * 8.0;
+    float2 blurX = float2(texel.x * blurPixels, 0.0);
+    float2 blurY = float2(0.0, texel.y * blurPixels);
+    float3 reflected = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, hitUv).rgb) * 0.44;
+    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurX)).rgb) * 0.14;
+    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurX)).rgb) * 0.14;
+    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv + blurY)).rgb) * 0.14;
+    reflected += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(hitUv - blurY)).rgb) * 0.14;
+
+    float confidence = hitMask * forwardMask * BO3BeginnerSSREdgeFade(hitUv) * (1.0 - hitProgress * 0.55);
+    return float4(reflected, confidence);
 }
 )HLSL");
     }
@@ -2373,6 +2557,30 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("bias", "Depth Bias", "Reject tiny depth differences that would self-shadow.", 0.0, 8.0, 0.05, 0.45),
                    FloatParam("angle", "Screen Light Angle", "Direction the light arrives from in screen space, in degrees.", 0.0, 360.0, 1.0, 135.0),
                    FloatParam("softness", "Softness", "Depth softness used to blend shadow hits.", 0.01, 6.0, 0.05, 1.25)}),
+        EffectDef("screen_space_reflections", "Screen-Space Reflections", "Raymarch the resolved scene against real BO3 Float-Z to create depth-derived screen-space reflections on visible geometry.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "Overall reflection blend amount.", 0.0, 1.5, 0.01, 0.65),
+                   FloatParam("max_distance", "Max Distance", "Maximum view-space distance traced by each reflection ray.", 25.0, 2400.0, 25.0, 700.0),
+                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray. Higher values improve coverage but cost more GPU time.", 6.0, 32.0, 1.0, 18.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used when a ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
+                   FloatParam("roughness", "Surface Roughness", "Blur the reflected scene to imitate rougher surfaces.", 0.0, 1.0, 0.01, 0.20),
+                   FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.65),
+                   FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30),
+                   FloatParam("distance_fade", "Far Fade Start", "Normalized depth where distant SSR begins fading out.", 0.0, 0.95, 0.01, 0.70)}),
+        EffectDef("wet_ground_reflections", "Wet Ground Reflections", "Use Float-Z normals and screen-space raymarching to add wet pavement, puddle and water-like reflections to ground-facing surfaces.", "Depth & Scene",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "Overall wet reflection blend amount.", 0.0, 1.5, 0.01, 0.85),
+                   FloatParam("max_distance", "Max Distance", "Maximum distance traced across the reflected scene.", 25.0, 2400.0, 25.0, 900.0),
+                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray.", 6.0, 32.0, 1.0, 20.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection intersections.", 0.1, 24.0, 0.1, 4.5),
+                   FloatParam("roughness", "Roughness", "Blur reflections to imitate wet asphalt or rough water.", 0.0, 1.0, 0.01, 0.36),
+                   FloatParam("fresnel", "Fresnel", "Strength of grazing-angle wet reflections.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("wetness", "Wetness", "How strongly eligible ground surfaces behave as reflective wet material.", 0.0, 1.0, 0.01, 0.90),
+                   FloatParam("ground_selectivity", "Ground Selectivity", "Higher values restrict the reflection to flatter ground-facing surfaces.", 0.0, 1.0, 0.01, 0.55),
+                   FloatParam("coverage", "Puddle Coverage", "Amount of eligible ground covered by wet reflective patches. 1 makes the whole ground wet.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("ripple", "Ripple Distortion", "Screen-space distortion applied to reflected color.", 0.0, 10.0, 0.1, 1.2),
+                   FloatParam("ripple_scale", "Ripple Scale", "Spatial frequency of the water ripple distortion.", 0.5, 20.0, 0.1, 5.0),
+                   FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color used in darker areas.", "#4F65B4"),

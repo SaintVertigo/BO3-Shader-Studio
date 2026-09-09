@@ -1579,6 +1579,10 @@ public:
                !postHlsl.contains("Depth Contours") ||
                !postHlsl.contains("Depth Heatmap") ||
                !postHlsl.contains("Contact Shadows") ||
+               !postHlsl.contains("BO3_BEGINNER_SSR") ||
+               !postHlsl.contains("Screen-Space Reflections") ||
+               !postHlsl.contains("Wet Ground Reflections") ||
+               !postHlsl.contains("BO3BeginnerSSRTrace") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
@@ -13947,7 +13951,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                id == "depth_of_field" || id == "depth_edge_glow" || id == "distance_tint" ||
                id == "depth_desaturation" || id == "distance_darkening" || id == "depth_pixelation" ||
                id == "depth_chromatic_aberration" || id == "depth_contours" || id == "depth_heatmap" ||
-               id == "depth_isolation" || id == "contact_shadows";
+               id == "depth_isolation" || id == "contact_shadows" ||
+               id == "screen_space_reflections" || id == "wet_ground_reflections";
     }
 
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
@@ -14218,6 +14223,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             painter.drawEllipse(QRectF(inner.center().x()-22, inner.center().y()-15, 44, 30));
             painter.setBrush(QColor(20,24,28,155));
             painter.drawEllipse(QRectF(inner.center().x()-5, inner.center().y()+7, 78, 15));
+        }
+        else if(id == "screen_space_reflections")
+        {
+            painter.fillRect(inner, QColor("#111820"));
+            QLinearGradient g(inner.topLeft(), inner.bottomLeft());
+            g.setColorAt(0.0, QColor("#2B4050"));
+            g.setColorAt(0.52, QColor("#16232D"));
+            g.setColorAt(0.53, QColor("#477A8E"));
+            g.setColorAt(1.0, QColor("#0B1820"));
+            painter.fillRect(inner, g);
+            painter.setPen(QPen(QColor(150,220,255,170), 1.5));
+            painter.drawLine(QPointF(inner.left()+12, inner.center().y()), QPointF(inner.right()-12, inner.center().y()));
+            painter.drawLine(QPointF(inner.center().x()-22, inner.top()+9), QPointF(inner.center().x()+18, inner.center().y()-3));
+            painter.drawLine(QPointF(inner.center().x()+18, inner.center().y()+3), QPointF(inner.center().x()-26, inner.bottom()-8));
+        }
+        else if(id == "wet_ground_reflections")
+        {
+            QLinearGradient g(inner.topLeft(), inner.bottomLeft());
+            g.setColorAt(0.0, QColor("#24313A"));
+            g.setColorAt(0.50, QColor("#1A2025"));
+            g.setColorAt(0.51, QColor("#365C69"));
+            g.setColorAt(1.0, QColor("#0A151A"));
+            painter.fillRect(inner, g);
+            painter.setPen(QPen(QColor(120,205,230,150), 1.3));
+            for(int i=0; i<4; ++i)
+                painter.drawEllipse(QRectF(inner.center().x()-42+i*12, inner.center().y()+5+i*3, 44, 9));
         }
         else if(id == "luminance_tint")
         {
