@@ -1085,7 +1085,7 @@ public:
         buildUi();
         applyDarkTheme();
         const bool restoredWorkspace = restoreWorkspace(false);
-        if (!restoredWorkspace) applyWorkspacePreset("Default");
+        if (!restoredWorkspace) applyWorkspacePreset("Balanced");
         // A restored dock state can contain visibility flags, so re-apply the
         // persisted Beginner/Advanced mode after workspace restoration.
         {
@@ -15768,6 +15768,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return false;
         }
         beginnerProjectPath_ = QFileInfo(target).absoluteFilePath();
+        rememberRecentDocument(beginnerProjectPath_);
         beginnerProjectModified_ = false;
         updateTitle();
         statusBar()->showMessage("Saved beginner project " + QFileInfo(target).fileName(), 2500);
@@ -15814,6 +15815,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         beginnerProject_ = project;
         beginnerProjectPath_ = QFileInfo(path).absoluteFilePath();
+        rememberRecentDocument(beginnerProjectPath_);
         beginnerProjectActive_ = true;
         beginnerProjectModified_ = false;
         // openShaderDialog() already resolved any old document save/discard
@@ -16198,6 +16200,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* fileMenu = menuBar()->addMenu("&File");
         auto* newBeginnerAction = fileMenu->addAction("New Beginner Shader...");
         auto* openAction = fileMenu->addAction("Open...");
+        auto* recentFilesMenu = fileMenu->addMenu("Recent Files");
+        recentFilesMenu->setToolTip("Reopen recently saved or opened BO3 Shader Studio projects and HLSL files.");
+        connect(recentFilesMenu, &QMenu::aboutToShow, this, [this, recentFilesMenu]{ populateRecentFilesMenu(recentFilesMenu); });
         auto* newExampleMenu = fileMenu->addMenu("New Example");
         auto* examplePostFxAction = newExampleMenu->addAction("BO3 PostFX Shader");
         auto* exampleMaterialAction = newExampleMenu->addAction("BO3 Material Shader");
@@ -17041,29 +17046,51 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             refreshShadertoyChannelUi();
         });
 
-        auto* defaultLayout = layoutMenu->addAction("Default Workspace");
-        auto* materialLayout = layoutMenu->addAction("Material Preview Workspace");
-        auto* authoringLayout = layoutMenu->addAction("Shader Authoring Workspace");
+        auto* balancedLayout = layoutMenu->addAction("Balanced Workspace");
+        balancedLayout->setToolTip("Give the Builder/Editor and Preview roughly equal room.");
+        auto* builderFocusLayout = layoutMenu->addAction("Builder Focus");
+        builderFocusLayout->setToolTip("Give more horizontal room to the Beginner Builder or HLSL editor.");
+        auto* previewFocusLayout = layoutMenu->addAction("Preview Focus");
+        previewFocusLayout->setToolTip("Give most of the window to the live shader preview while keeping the Builder visible.");
+        auto* fullPreviewLayout = layoutMenu->addAction("Full Preview");
+        fullPreviewLayout->setCheckable(true);
+        fullPreviewLayout->setToolTip("Temporarily hide utility panels and maximize the Preview. Use again to restore them.");
+        layoutMenu->addSeparator();
+        auto* materialLayout = layoutMenu->addAction("Material Workspace");
+        auto* authoringLayout = layoutMenu->addAction("Coding Workspace");
         auto* minimalLayout = layoutMenu->addAction("Minimal Workspace");
         layoutMenu->addSeparator();
         auto* saveLayout = layoutMenu->addAction("Save Current Workspace");
         auto* restoreLayout = layoutMenu->addAction("Restore Saved Workspace");
         auto* resetLayout = layoutMenu->addAction("Reset Workspace");
-        connect(defaultLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Default"); });
+        connect(balancedLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Balanced"); });
+        connect(builderFocusLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("BuilderFocus"); });
+        connect(previewFocusLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("PreviewFocus"); });
+        connect(fullPreviewLayout, &QAction::toggled, this, [this](bool enabled){
+            if(previewMaxButton_ && previewMaxButton_->isChecked() != enabled)
+                previewMaxButton_->setChecked(enabled);
+            else
+                setPreviewMaximized(enabled);
+        });
         connect(materialLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Material"); });
         connect(authoringLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Authoring"); });
         connect(minimalLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Minimal"); });
         connect(saveLayout, &QAction::triggered, this, [this]{ saveWorkspace(); });
         connect(restoreLayout, &QAction::triggered, this, [this]{ restoreWorkspace(true); });
-        connect(resetLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Default"); });
+        connect(resetLayout, &QAction::triggered, this, [this]{ applyWorkspacePreset("Balanced"); });
+        connect(layoutMenu, &QMenu::aboutToShow, this, [this, fullPreviewLayout]{
+            QSignalBlocker blocker(fullPreviewLayout);
+            fullPreviewLayout->setChecked(previewMaxButton_ && previewMaxButton_->isChecked());
+        });
 
         const QStringList darkThemes{
             "BO3 Dark", "Graphite", "Midnight Blue", "AMOLED", "Deep Purple",
             "Forest", "Warm Ember", "Nord", "Tokyo Night", "Dracula",
-            "Catppuccin Mocha", "Rose Pine", "Solarized Dark", "Crimson", "Oceanic"
+            "Catppuccin Mocha", "Rose Pine", "Solarized Dark", "Crimson", "Oceanic",
+            "Strawberry Night", "Mint Night", "Cyberpunk"
         };
         const QStringList lightThemes{
-            "Light", "Solarized Light", "Warm Paper"
+            "Light", "Solarized Light", "Warm Paper", "Strawberry", "Sakura", "Mint Cream"
         };
         auto* darkThemeMenu = themeMenu->addMenu("Dark Themes");
         auto* lightThemeMenu = themeMenu->addMenu("Light Themes");
@@ -18064,7 +18091,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto fn = reinterpret_cast<DwmSetWindowAttributeFn>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
         if (fn)
         {
-            const BOOL dark = !(currentTheme_ == "Light" || currentTheme_ == "Solarized Light" || currentTheme_ == "Warm Paper");
+            const BOOL dark = !(currentTheme_ == "Light" || currentTheme_ == "Solarized Light" || currentTheme_ == "Warm Paper" ||
+                                currentTheme_ == "Strawberry" || currentTheme_ == "Sakura" || currentTheme_ == "Mint Cream");
             const DWORD immersiveDarkMode = 20;
             fn(hwnd, immersiveDarkMode, &dark, sizeof(dark));
             COLORREF caption = dark ? RGB(22,24,29) : RGB(242,243,245);
@@ -18150,6 +18178,30 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             window="#08161F"; panel="#0D202B"; base="#061018"; button="#15313D"; hover="#1C4350"; border="#285866"; textColor="#E0F1F3"; muted="#94AFB5"; accent="#35B8C4"; editorBase="#061018";
         }
+        else if (name == "Strawberry Night")
+        {
+            window="#1B1015"; panel="#26151C"; base="#10090D"; button="#35202A"; hover="#4A2A38"; border="#61374A"; textColor="#FFE9F0"; muted="#C39AA8"; accent="#F05A7E"; editorBase="#10090D";
+        }
+        else if (name == "Mint Night")
+        {
+            window="#0D1816"; panel="#13231F"; base="#08110F"; button="#1C332D"; hover="#29483F"; border="#3A5F55"; textColor="#E7FFF7"; muted="#9CBDB2"; accent="#58D6AE"; editorBase="#08110F";
+        }
+        else if (name == "Cyberpunk")
+        {
+            window="#11101B"; panel="#18162A"; base="#090812"; button="#26213C"; hover="#382F57"; border="#51466F"; textColor="#F6F2FF"; muted="#AFA4CC"; accent="#FF4FCB"; editorBase="#090812";
+        }
+        else if (name == "Strawberry")
+        {
+            window="#FFF1F4"; panel="#FFF8FA"; base="#FFFCFD"; button="#FADCE4"; hover="#F3C6D2"; border="#D9A9B6"; textColor="#4B2631"; muted="#8B6670"; accent="#E84E72"; editorBase="#FFFDFE";
+        }
+        else if (name == "Sakura")
+        {
+            window="#F9F0F5"; panel="#FFF8FC"; base="#FFFDFF"; button="#EFDDE8"; hover="#E5CADB"; border="#C9A7BA"; textColor="#3D2A35"; muted="#7F6573"; accent="#CF6E9E"; editorBase="#FFFDFF";
+        }
+        else if (name == "Mint Cream")
+        {
+            window="#EEF8F4"; panel="#F8FCFA"; base="#FFFFFF"; button="#DCEFE7"; hover="#C9E5DA"; border="#9FC8B8"; textColor="#234238"; muted="#607D73"; accent="#3AA982"; editorBase="#FFFFFF";
+        }
         else if (name == "Light")
         {
             window="#EDF1F5"; panel="#F7F9FB"; base="#FFFFFF"; button="#E4E9EF"; hover="#D5DDE6"; border="#AEB9C6"; textColor="#1C252E"; muted="#5D6975"; accent="#2F78B9"; editorBase="#FFFFFF";
@@ -18167,7 +18219,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             window="#000000"; panel="#070707"; base="#000000"; button="#111111"; hover="#222222"; border="#F0F0F0"; textColor="#FFFFFF"; muted="#D5D5D5"; accent="#00B9F2"; editorBase="#000000";
         }
 
-        const bool lightTheme = name == "Light" || name == "Solarized Light" || name == "Warm Paper";
+        const bool lightTheme = name == "Light" || name == "Solarized Light" || name == "Warm Paper" ||
+                                name == "Strawberry" || name == "Sakura" || name == "Mint Cream";
         const QString successText = lightTheme ? "#176B39" : "#84D4A0";
         const QString successBg = lightTheme ? "#E7F5EC" : "#10251A";
         const QString successBorder = lightTheme ? "#7FB894" : "#285B39";
@@ -18543,6 +18596,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!previewDock_ || !sceneDock_ || !sourceValuesDock_ || !shaderParamsDock_ ||
             !materialDock_ || !scriptDock_ || !performanceDock_ || !outputDock_) return;
 
+        // Any named workspace leaves temporary Full Preview mode first. Without
+        // this, resizeDocks() can appear to do nothing because the utility docks
+        // remain hidden by the preview maximizer.
+        if(previewMaxButton_ && previewMaxButton_->isChecked())
+        {
+            QSignalBlocker blocker(previewMaxButton_);
+            previewMaxButton_->setChecked(false);
+            setPreviewMaximized(false);
+        }
+
         for (QDockWidget* d : {previewDock_, outputDock_, sourceValuesDock_, shaderParamsDock_,
                                materialDock_, performanceDock_, sceneDock_, scriptDock_})
         {
@@ -18566,37 +18629,75 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         tabifyDockWidget(performanceDock_, sceneDock_);
         tabifyDockWidget(sceneDock_, scriptDock_);
 
-        if (preset == "Material")
+        // Make Layout visibly useful in Beginner mode too. The old presets mostly
+        // differed only by which hidden Advanced dock was raised, so they looked
+        // identical while using the visual Builder. These ratios deliberately
+        // change the Builder/Editor versus Preview split.
+        double previewFraction = 0.52;
+        int bottomHeight = 150;
+        if (preset == "BuilderFocus")
         {
+            previewFraction = 0.36;
+            bottomHeight = 140;
+            outputDock_->raise();
+        }
+        else if (preset == "PreviewFocus")
+        {
+            previewFraction = 0.70;
+            bottomHeight = 125;
+            outputDock_->raise();
+        }
+        else if (preset == "Material")
+        {
+            previewFraction = 0.64;
+            bottomHeight = 210;
             materialDock_->raise();
-            resizeDocks({previewDock_}, {1080}, Qt::Horizontal);
-            resizeDocks({materialDock_}, {210}, Qt::Vertical);
         }
         else if (preset == "Authoring")
         {
+            previewFraction = 0.40;
+            bottomHeight = 190;
             outputDock_->raise();
-            resizeDocks({previewDock_}, {950}, Qt::Horizontal);
-            resizeDocks({outputDock_}, {190}, Qt::Vertical);
         }
         else if (preset == "Minimal")
         {
+            previewFraction = 0.62;
             for(QDockWidget* d : {outputDock_, sourceValuesDock_, shaderParamsDock_, materialDock_,
                                   performanceDock_, sceneDock_, scriptDock_})
                 d->hide();
             previewDock_->show();
-            resizeDocks({previewDock_}, {1100}, Qt::Horizontal);
         }
         else
         {
+            // Balanced is also the compatibility fallback for old "Default"
+            // workspace callers/settings.
+            previewFraction = 0.52;
             outputDock_->raise();
-            resizeDocks({previewDock_}, {1020}, Qt::Horizontal);
-            resizeDocks({outputDock_}, {145}, Qt::Vertical);
         }
 
-        // Interface mode owns specialist visibility even when a workspace preset
-        // is selected, so switching layouts never reintroduces beginner clutter.
         setUiExperienceMode(beginnerUiMode_, false);
-        statusBar()->showMessage(preset + " workspace applied", 2200);
+
+        // Apply widths after mode-specific dock visibility settles. A queued resize
+        // avoids QMainWindow immediately overriding the requested ratio while it is
+        // still retabbing/hiding docks.
+        QTimer::singleShot(0, this, [this, previewFraction, bottomHeight, preset]
+        {
+            if(!previewDock_) return;
+            const int windowWidth = qMax(900, width());
+            const int desiredPreview = qBound(360,
+                static_cast<int>(windowWidth * previewFraction),
+                qMax(360, windowWidth - 320));
+            resizeDocks({previewDock_}, {desiredPreview}, Qt::Horizontal);
+            if(!beginnerUiMode_ && outputDock_ && outputDock_->isVisible())
+                resizeDocks({outputDock_}, {bottomHeight}, Qt::Vertical);
+            if(preview_) preview_->renderNow();
+            statusBar()->showMessage(QString("%1 workspace applied — Preview %2%").arg(
+                preset == "BuilderFocus" ? "Builder Focus" :
+                preset == "PreviewFocus" ? "Preview Focus" :
+                preset == "Authoring" ? "Coding" :
+                preset.isEmpty() || preset == "Default" ? "Balanced" : preset)
+                .arg(qRound(previewFraction * 100.0)), 2600);
+        });
     }
 
     void setPreviewMaximized(bool enabled)
@@ -19017,6 +19118,83 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return true;
     }
 
+    QStringList recentDocumentPaths() const
+    {
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        QStringList paths = settings.value("files/recentDocuments").toStringList();
+        QStringList cleaned;
+        for(const QString& raw : paths)
+        {
+            if(raw.trimmed().isEmpty()) continue;
+            const QString absolute = QFileInfo(raw).absoluteFilePath();
+            if(!cleaned.contains(absolute, Qt::CaseInsensitive)) cleaned << absolute;
+        }
+        return cleaned.mid(0, 12);
+    }
+
+    void rememberRecentDocument(const QString& path)
+    {
+        if(path.trimmed().isEmpty()) return;
+        const QString absolute = QFileInfo(path).absoluteFilePath();
+        QStringList paths = recentDocumentPaths();
+        for(int i = paths.size() - 1; i >= 0; --i)
+        {
+            if(QString::compare(paths[i], absolute, Qt::CaseInsensitive) == 0)
+                paths.removeAt(i);
+        }
+        paths.prepend(absolute);
+        while(paths.size() > 12) paths.removeLast();
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        settings.setValue("files/recentDocuments", paths);
+    }
+
+    void populateRecentFilesMenu(QMenu* menu)
+    {
+        if(!menu) return;
+        menu->clear();
+        QStringList paths = recentDocumentPaths();
+        if(paths.isEmpty())
+        {
+            QAction* empty = menu->addAction("No recent files yet");
+            empty->setEnabled(false);
+            return;
+        }
+
+        int number = 1;
+        for(const QString& path : paths)
+        {
+            const QFileInfo info(path);
+            QString label = QString("&%1  %2").arg(number++).arg(info.fileName());
+            const QString parentName = info.dir().dirName();
+            if(!parentName.isEmpty()) label += QString("   —   %1").arg(parentName);
+            QAction* action = menu->addAction(label);
+            action->setToolTip(info.absoluteFilePath());
+            action->setStatusTip(info.absoluteFilePath());
+            if(!info.exists())
+            {
+                action->setText(action->text() + "  (missing)");
+                action->setEnabled(false);
+                continue;
+            }
+            connect(action, &QAction::triggered, this, [this, path]
+            {
+                if(!maybeSave()) return;
+                if(QFileInfo(path).suffix().compare("bo3shader", Qt::CaseInsensitive) == 0)
+                    openBeginnerProject(path);
+                else
+                    openShader(path);
+            });
+        }
+        menu->addSeparator();
+        QAction* clear = menu->addAction("Clear Recent Files");
+        connect(clear, &QAction::triggered, this, [this]
+        {
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.remove("files/recentDocuments");
+            statusBar()->showMessage("Recent files cleared", 1800);
+        });
+    }
+
     void openShaderDialog()
     {
         if(!maybeSave()) return;
@@ -19049,6 +19227,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         editor_->document()->setModified(false);
         loadingText_ = false;
         shaderPath_ = QFileInfo(path).absoluteFilePath();
+        rememberRecentDocument(shaderPath_);
         // Temporary Preview As state belongs only to the shader that produced
         // it. Never let its mappings, stages, or generated techset cross a load.
         previewPackageSession_.clear();
@@ -19107,6 +19286,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         file.write(editor_->toPlainText().toUtf8());
         shaderPath_ = QFileInfo(target).absoluteFilePath();
+        rememberRecentDocument(shaderPath_);
         loadCompanionTechset(shaderPath_);
         modified_ = false;
         editor_->document()->setModified(false);
