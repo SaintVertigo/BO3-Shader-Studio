@@ -1190,7 +1190,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString grain = parameterExpr(project, effect, *definition, "grain");
             const QString paper = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
-            out += QString("    // BO3_BEGINNER_PENCIL_FAST - lightweight 9-tap graphite sketch; camera movement removed\n"
+            out += QString("    // %1 - BO3_BEGINNER_PENCIL_FAST: lightweight 9-tap graphite sketch; camera movement removed\n"
                            "    // Replaces the old 3x16x2 nested sampling pass that could require hundreds of scene reads per pixel.\n"
                            "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%4, 0.25);\n"
