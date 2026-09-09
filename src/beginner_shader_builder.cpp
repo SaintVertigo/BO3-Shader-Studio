@@ -1498,9 +1498,20 @@ float BO3BeginnerSampleRawDepthPoint(float2 sampleUv)
     return DepthSampler.Load(int3(depthPixel, 0)).r;
 }
 
+float BO3BeginnerNearClip()
+{
+#if TOOLSGFX
+    // APE/TOOLSGFX does not expose the runtime PerSceneConsts zNear symbol.
+    // The same value lives in CodeSceneConstBuffer as gScene.nearClip.
+    return max(gScene.nearClip, 0.001);
+#else
+    return max(zNear.x, 0.001);
+#endif
+}
+
 float BO3BeginnerLinearDepth(float rawDepth)
 {
-    return max(zNear.x, 0.001) / FloatZ_Process(rawDepth);
+    return BO3BeginnerNearClip() / FloatZ_Process(rawDepth);
 }
 
 float BO3BeginnerSampleWorldDepth(float2 sampleUv)

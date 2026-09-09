@@ -1563,6 +1563,8 @@ public:
                !postHlsl.contains("BO3BeginnerGrainLayer") ||
                !postHlsl.contains("BO3BeginnerPsxDither") ||
                !postHlsl.contains("BO3BeginnerSampleRawDepthPoint") ||
+               !postHlsl.contains("BO3BeginnerNearClip") ||
+               !postHlsl.contains("gScene.nearClip") ||
                !postHlsl.contains("BO3BeginnerSampleWorldDepth") ||
                !postHlsl.contains("BO3BeginnerViewmodelMask") ||
                !postHlsl.contains("BO3BeginnerDepthGeometryEdge") ||
@@ -1580,6 +1582,10 @@ public:
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
+            if(!postHlsl.contains("#if TOOLSGFX") ||
+               !postHlsl.contains("return max(gScene.nearClip, 0.001);") ||
+               !postHlsl.contains("return max(zNear.x, 0.001);"))
+                return "Beginner PostFX Float-Z near-clip helper is not runtime/TOOLSGFX compatible.";
             const QString postDepthDebugHlsl = beginner::generatePreviewHlsl(post, 7);
             if(!postDepthDebugHlsl.contains("#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG 7") ||
                !postDepthDebugHlsl.contains("BO3BeginnerTargetMask"))
