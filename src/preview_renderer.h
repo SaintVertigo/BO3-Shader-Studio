@@ -160,7 +160,6 @@ public:
     void SetLiveSplitFraction(float value);
     float LiveSplitFraction() const;
     bool LoadTexture(const std::filesystem::path& path, bool depth, std::wstring& error);
-    bool ImportBO3DepthCaptureSheet(const std::filesystem::path& path, std::wstring& error);
     bool UseBuiltInDepthScene(std::wstring& error, const QString& sceneId = QStringLiteral("shadows_of_evil"));
     bool HasUserDepthTexture() const;
     bool HasPreviewDepthTexture() const;

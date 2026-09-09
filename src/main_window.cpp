@@ -1587,46 +1587,12 @@ public:
                !tintDepthDebugHlsl.contains("BO3BeginnerSampleRawDepthPoint"))
                 return "Beginner depth diagnostics did not force the preview-only Float-Z helpers.";
 
-            QString depthCaptureSource;
-            const QStringList depthCaptureCandidates = {
-                QDir(QCoreApplication::applicationDirPath()).filePath("shaders/bo3_floatz_capture.hlsl"),
-                QDir::current().filePath("shaders/bo3_floatz_capture.hlsl")
-            };
-            for(const QString& candidate : depthCaptureCandidates)
-            {
-                QFile captureFile(candidate);
-                if(captureFile.open(QIODevice::ReadOnly | QIODevice::Text))
-                {
-                    depthCaptureSource = QString::fromUtf8(captureFile.readAll());
-                    break;
-                }
-            }
-            if(depthCaptureSource.isEmpty() ||
-               !depthCaptureSource.contains("BO3CaptureEncodeDepth") ||
-               !depthCaptureSource.contains("BO3CaptureCalibration") ||
-               !depthCaptureSource.contains("Texture2D<float4> DepthSampler : register(t1);") ||
-               !depthCaptureSource.contains("PostFx_DenormalizeColor"))
-                return "Bundled BO3 ground-truth Float-Z capture shader is missing or incomplete.";
-            QString depthCaptureCompileDiagnostics;
-            if(!compileGlslValidationHlsl(depthCaptureSource, depthCaptureCompileDiagnostics, true))
-                return "Bundled BO3 Float-Z capture HLSL failed runtime FXC validation: " + depthCaptureCompileDiagnostics;
-            QString depthCaptureToolsgfxDiagnostics;
-            if(!compileGlslValidationHlsl(QStringLiteral("#define TOOLSGFX 1\n") + depthCaptureSource,
-                                          depthCaptureToolsgfxDiagnostics, true))
-                return "Bundled BO3 Float-Z capture HLSL failed TOOLSGFX FXC validation: " + depthCaptureToolsgfxDiagnostics;
-            bo3::PackageAdapterRequest depthCaptureRequest;
-            depthCaptureRequest.target = bo3::PackageTarget::PostFx;
-            depthCaptureRequest.configuration = bo3::PackageConfiguration::Runtime;
-            depthCaptureRequest.source = depthCaptureSource;
-            depthCaptureRequest.sourceFileName = "bo3_floatz_capture.hlsl";
-            const bo3::PackageAdapterResult depthCaptureAdapted = bo3::adaptShaderPackage(depthCaptureRequest);
-            if(depthCaptureAdapted.confidence == bo3::AutomationConfidence::Unsupported ||
-               depthCaptureAdapted.diagnostics.hasErrors())
-                return "Bundled BO3 Float-Z capture shader could not be adapted as runtime PostFX: " +
-                       depthCaptureAdapted.diagnostics.toText();
+            const QImage shadowsGroundTruthCapture(QStringLiteral(":/preview/bo3_depth_shadows_of_evil_capture.png"));
+            if(shadowsGroundTruthCapture.isNull() || shadowsGroundTruthCapture.size() != QSize(1920,1080))
+                return "Bundled Shadows of Evil ground-truth Float-Z capture is missing or has the wrong dimensions.";
 
             const QStringList depthSceneIds = {
-                "shadows_of_evil", "der_eisendrache", "gorod_krovi", "the_giant", "zetsubou"};
+                "der_eisendrache", "gorod_krovi", "the_giant", "zetsubou"};
             for(const QString& sceneId : depthSceneIds)
             {
                 const QImage depth(QString(":/preview/bo3_depth_%1_depth.png").arg(sceneId));
@@ -14503,119 +14469,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return "Shadows of Evil";
     }
 
-    bool importBO3DepthCaptureSheet(const QString& requestedPath = QString(), bool showMessage = true)
-    {
-        if(!preview_) return false;
-        QString path = requestedPath;
-        if(path.trimmed().isEmpty())
-        {
-            path = QFileDialog::getOpenFileName(
-                this,
-                "Import BO3 Float-Z Capture",
-                currentDirectory(),
-                "Lossless capture images (*.png *.bmp *.tif *.tiff);;All images (*.png *.bmp *.tif *.tiff *.jpg *.jpeg);;All files (*.*)");
-        }
-        if(path.isEmpty()) return false;
-
-        const QString suffix = QFileInfo(path).suffix().toLower();
-        if((suffix == "jpg" || suffix == "jpeg") && showMessage)
-        {
-            QMessageBox::warning(
-                this,
-                "BO3 Float-Z Capture",
-                "JPEG is lossy and can corrupt the encoded depth cells. A native-resolution PNG is strongly recommended.\n\n"
-                "The importer will reject the image if calibration or too many depth cells were altered.");
-        }
-
-        QString initError;
-        if(!preview_->ensureInitialized(initError))
-        {
-            if(showMessage && !initError.isEmpty())
-                QMessageBox::critical(this, "DirectX initialization failed", initError);
-            return false;
-        }
-
-        std::wstring error;
-        if(!preview_->renderer().ImportBO3DepthCaptureSheet(fs::path(path.toStdWString()), error))
-        {
-            if(showMessage)
-                QMessageBox::warning(this, "BO3 Float-Z Capture Import", ToQString(error));
-            return false;
-        }
-
-        sourceImagePath_.clear();
-        preview_->update();
-        rebuildBeginnerEffectParameters();
-        updateBeginnerBuilderSummary();
-        if(showMessage)
-        {
-            statusBar()->showMessage(
-                QString("Ground-truth BO3 Float-Z capture loaded — paired same-frame color/depth, zNear=%1. BO3 does not need to stay open.")
-                    .arg(preview_->renderer().PreviewZNear(), 0, 'g', 6),
-                6500);
-        }
-        return true;
-    }
-
-    void showBO3DepthCaptureDialog()
-    {
-        QDialog dialog(this);
-        dialog.setWindowTitle("BO3 Ground-Truth Float-Z Capture");
-        dialog.resize(640, 430);
-        auto* root = new QVBoxLayout(&dialog);
-
-        auto* title = new QLabel("Capture BO3's real Float-Z once, then preview depth effects offline");
-        title->setObjectName("InspectorTitle");
-        title->setWordWrap(true);
-        root->addWidget(title);
-
-        auto* intro = new QLabel(
-            "The old built-in depth maps are only approximations. This workflow captures resolvedScene + BO3 floatZ from the exact same in-game frame, including BO3's 63/64 viewmodel depth-hack classification and the frame's zNear value. After the PNG is imported, BO3 can be closed.");
-        intro->setWordWrap(true);
-        root->addWidget(intro);
-
-        auto* steps = new QLabel(
-            "1. Open the bundled capture shader below.\n"
-            "2. Export/install it as PostFX with frameBuffer = resolvedScene and DepthSampler = floatZ.\n"
-            "3. Activate that PostFX in BO3 and frame the scene you want. The screen should become a 2x2 capture sheet.\n"
-            "4. Hide HUD/overlays if they draw over the sheet, then save a LOSSLESS native-resolution PNG. Do not crop or resize it.\n"
-            "5. Import that PNG here. Shader Studio decodes the real depth and uses it for Cartoon Outlines, AO, fog, DoF and target masks.");
-        steps->setWordWrap(true);
-        steps->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        root->addWidget(steps);
-
-        auto* note = new QLabel(
-            "Capture sheet: top-left = color, top-right = encoded Float-Z, bottom-left = readable depth diagnostic, bottom-right = calibration/zNear. The importer validates the calibration before accepting the depth data.");
-        note->setWordWrap(true);
-        note->setObjectName("CompactHelp");
-        root->addWidget(note);
-        root->addStretch(1);
-
-        auto* actions = new QHBoxLayout();
-        auto* openShader = new QPushButton("Open Capture Shader");
-        openShader->setObjectName("PrimaryAction");
-        auto* importCapture = new QPushButton("Import Capture PNG...");
-        auto* close = new QPushButton("Close");
-        actions->addWidget(openShader);
-        actions->addWidget(importCapture);
-        actions->addStretch(1);
-        actions->addWidget(close);
-        root->addLayout(actions);
-
-        connect(openShader, &QPushButton::clicked, &dialog, [this, &dialog]
-        {
-            dialog.accept();
-            openBundledExample("bo3_floatz_capture.hlsl");
-        });
-        connect(importCapture, &QPushButton::clicked, &dialog, [this]
-        {
-            importBO3DepthCaptureSheet();
-        });
-        connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
-        dialog.exec();
-    }
-
-
     void activateBuiltInDepthPreview(bool showMessage = true, const QString& requestedSceneId = QString())
     {
         if(!preview_) return;
@@ -14641,10 +14494,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         rebuildBeginnerEffectParameters();
         updateBeginnerBuilderSummary();
         if(showMessage)
+        {
+            const bool groundTruth = preview_->renderer().CapturedBO3DepthSceneActive();
             statusBar()->showMessage(
-                QString("Using LEGACY approximate Game Depth Preview — %1. For trustworthy depth, use Tools > BO3 Ground-Truth Float-Z Capture. BO3 export itself still uses live floatZ.")
-                    .arg(beginnerDepthPreviewSceneName(sceneId)),
+                groundTruth
+                    ? QString("Using built-in ground-truth BO3 Float-Z preview — %1. World/viewmodel separation and captured zNear are active offline.")
+                        .arg(beginnerDepthPreviewSceneName(sceneId))
+                    : QString("Using approximate Game Depth Preview — %1. This scene will be upgraded when a real BO3 Float-Z capture is bundled.")
+                        .arg(beginnerDepthPreviewSceneName(sceneId)),
                 4600);
+        }
     }
 
     void updateBeginnerBuilderSummary()
@@ -14899,15 +14758,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const bool capturedDepth = preview_ && preview_->renderer().CapturedBO3DepthSceneActive();
             auto* depthNotice = new QLabel();
             if(capturedDepth)
-                depthNotice->setText(QString("Ground-truth BO3 Float-Z capture active. Color and depth came from the same BO3 frame; the 63/64 viewmodel category and captured zNear (%1) are being used directly in the preview.")
+                depthNotice->setText(QString("Built-in ground-truth BO3 Float-Z preview active: %1. Color and depth come from the same BO3 frame; the 63/64 viewmodel category and captured zNear (%2) are used directly offline.")
+                    .arg(beginnerDepthPreviewSceneName(beginnerDepthPreviewSceneId_))
                     .arg(preview_->renderer().PreviewZNear(), 0, 'g', 6));
             else if(builtInDepth)
-                depthNotice->setText(QString("LEGACY approximate Game Depth Preview active: %1. This depth was inferred/authored from the screenshot and is not ground truth. Use Import Real BO3 Capture below for trustworthy outlines/AO/fog.")
+                depthNotice->setText(QString("Approximate Game Depth Preview active: %1. This older bundled scene still uses authored/inferred depth and will be replaced by ground-truth data later.")
                     .arg(beginnerDepthPreviewSceneName(beginnerDepthPreviewSceneId_)));
             else if(hasDepth)
-                depthNotice->setText("A custom depth texture is loaded. It can be useful, but only a BO3 Float-Z capture reproduces the game's actual Float-Z/viewmodel classification.");
+                depthNotice->setText("A custom depth texture is loaded. Ground-truth bundled scenes are preferred when available because they reproduce BO3 Float-Z and viewmodel classification.");
             else
-                depthNotice->setText("This effect needs scene depth. Import a real BO3 Float-Z capture for ground-truth previewing, or use one of the legacy approximate scenes below as a temporary fallback.");
+                depthNotice->setText("This effect needs scene depth. Use Game Depth Preview. Shadows of Evil now ships with real BO3 Float-Z; the remaining bundled scenes are approximate until they receive real captures.");
             depthNotice->setWordWrap(true);
             depthNotice->setObjectName((capturedDepth || (hasDepth && !builtInDepth)) ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
@@ -14919,11 +14779,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             auto* depthSceneLabel = new QLabel("Preview Scene");
             auto* depthScenePicker = new QComboBox();
             const QVector<QPair<QString, QString>> depthScenes = {
-                {"shadows_of_evil", "Shadows of Evil"},
-                {"der_eisendrache", "Der Eisendrache"},
-                {"gorod_krovi", "Gorod Krovi"},
-                {"the_giant", "The Giant"},
-                {"zetsubou", "Zetsubou No Shima"}
+                {"shadows_of_evil", "Shadows of Evil — Real Float-Z"},
+                {"der_eisendrache", "Der Eisendrache — Approx."},
+                {"gorod_krovi", "Gorod Krovi — Approx."},
+                {"the_giant", "The Giant — Approx."},
+                {"zetsubou", "Zetsubou No Shima — Approx."}
             };
             for(const auto& scene : depthScenes)
                 depthScenePicker->addItem(scene.second, scene.first);
@@ -14962,20 +14822,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 liveCompileTimer_.start();
             });
 
-            auto* realDepthCapture = new QPushButton(capturedDepth ? "Import Another Real BO3 Capture..." : "Set Up / Import Real BO3 Float-Z Capture...");
-            realDepthCapture->setObjectName("PrimaryAction");
-            realDepthCapture->setToolTip("Create or import the 2x2 lossless capture sheet produced by the bundled BO3 Float-Z capture shader. This uses ground-truth BO3 depth instead of guessed screenshot depth.");
-            beginnerEffectParamsLayout_->addWidget(realDepthCapture);
-            connect(realDepthCapture, &QPushButton::clicked, this, [this, capturedDepth]
-            {
-                if(capturedDepth) importBO3DepthCaptureSheet();
-                else showBO3DepthCaptureDialog();
-            });
-
-            auto* depthScene = new QPushButton(builtInDepth ? "Refresh Legacy Approximate Scene" : "Use Legacy Approximate Scene");
-            depthScene->setToolTip("Temporary fallback only: these bundled screenshot depth maps are authored/inferred approximations, not real BO3 Float-Z captures.");
-            beginnerEffectParamsLayout_->addWidget(depthScene);
-            connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
 
         }
 
@@ -16257,9 +16103,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         savePreviewPackageAction_->setToolTip("Save the exact live temporary package after BO3 validation reaches PASS or WARNING. FAIL/UNKNOWN packages cannot be saved as validated output.");
         packageAsMenu->setToolTip("Analyze the current HLSL, adapt a protected copy when needed, generate a structured techset, and validate the resulting BO3 package.");
 
-        auto* depthCaptureAction = toolsMenu->addAction("BO3 Ground-Truth Float-Z Capture...");
-        depthCaptureAction->setToolTip("Capture BO3 resolvedScene + real floatZ from one frame, then import it as an offline depth-preview scene. This replaces guessed screenshot depth with ground-truth BO3 data.");
-
         auto* glslConverterAction = toolsMenu->addAction("GLSL → BO3 HLSL Converter...");
         glslConverterAction->setToolTip("Convert common GLSL/Shadertoy fragment shaders into BO3 PostFX, procedural sky, Material / Surface, or HLSL syntax.");
         auto* shaderInputsAction = toolsMenu->addAction("Shader Inputs / Textures...");
@@ -16303,7 +16146,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         sourceButton->setMinimumWidth(104);
         sourceButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide real 3D depth; use a ground-truth BO3 Float-Z capture for depth effects.");
+        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide real 3D depth; use Game Depth Preview for depth-aware effects. Shadows of Evil includes real BO3 Float-Z.");
         beginnerPreviewImageToolbarAction_ = toolbar->addWidget(sourceButton);
 
         beginnerLiveGameToolbarAction_ = toolbar->addAction("Live Game");
@@ -16324,7 +16167,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Legacy approximate fallback scenes. For accurate depth use Tools > BO3 Ground-Truth Float-Z Capture; export always uses BO3 live floatZ.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Preview depth-aware effects with bundled BO3 scenes. Shadows of Evil uses a real same-frame Float-Z capture; older scenes remain approximate until upgraded.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -16513,7 +16356,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(packageSkyAction, &QAction::triggered, this, [this]{ packageShaderAs(bo3::PackageTarget::Skybox); });
         connect(reviewPreviewMappingsAction_, &QAction::triggered, this, [this]{ reviewTemporaryPreviewMappings(); });
         connect(savePreviewPackageAction_, &QAction::triggered, this, [this]{ saveCurrentPreviewPackageAs(); });
-        connect(depthCaptureAction, &QAction::triggered, this, [this]{ showBO3DepthCaptureDialog(); });
         connect(glslConverterAction, &QAction::triggered, this, [this]{ showGlslConverter(); });
         connect(glslRegressionAction, &QAction::triggered, this, [this]{ runGlslConverterRegressionSuite(); });
         connect(glslBatchValidateAction, &QAction::triggered, this, [this]{ batchValidateGlslFolder(); });

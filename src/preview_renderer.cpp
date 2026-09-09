@@ -1556,14 +1556,12 @@ public:
         return true;
     }
 
-    bool ImportBO3DepthCaptureSheet(const fs::path& path, std::wstring& error)
+    bool DecodeBO3DepthCaptureSheet(QImage sheet, std::wstring& error, bool builtInScene)
     {
         if(liveCaptureSource_) StopLiveCapture();
-
-        QImage sheet(QString::fromStdWString(path.wstring()));
         if(sheet.isNull())
         {
-            error = L"Could not decode the BO3 Float-Z capture image: " + path.wstring();
+            error = L"Could not decode the bundled BO3 ground-truth Float-Z scene.";
             return false;
         }
         sheet = sheet.convertToFormat(QImage::Format_RGBA8888);
@@ -1690,7 +1688,7 @@ public:
         const auto magicB = decodeTripletAt(0.75f, 0.74f);
         if(magicA != std::array<int,3>{3,27,11} || magicB != std::array<int,3>{29,5,23})
         {
-            error = L"This image is not a valid BO3 Shader Studio Float-Z capture sheet (calibration/magic marker mismatch). Export and use the bundled bo3_floatz_capture.hlsl shader.";
+            error = L"The bundled BO3 ground-truth Float-Z scene failed its calibration/magic-marker validation.";
             return false;
         }
 
@@ -1782,7 +1780,7 @@ public:
         sourceHdrPeakLuminance_ = 1.0f;
         sourceHdrMeanLuminance_ = 0.20f;
         depthUserLoaded_ = false;
-        builtInDepthScene_ = false;
+        builtInDepthScene_ = builtInScene;
         capturedBO3DepthScene_ = true;
         previewZNear_ = capturedZNear;
         ResetTemporalExposureState();
@@ -1804,7 +1802,6 @@ public:
         };
 
         static const DepthPreviewScene scenes[] = {
-            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", ":/preview/bo3_depth_shadows_of_evil_depth.png", ":/preview/bo3_depth_shadows_of_evil_viewmodel.png", 4200.0f},
             {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", ":/preview/bo3_depth_der_eisendrache_depth.png", ":/preview/bo3_depth_der_eisendrache_viewmodel.png", 5200.0f},
             {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", ":/preview/bo3_depth_gorod_krovi_depth.png", ":/preview/bo3_depth_gorod_krovi_viewmodel.png", 4800.0f},
             {"the_giant", ":/preview/bo3_depth_the_giant.jpg", ":/preview/bo3_depth_the_giant_depth.png", ":/preview/bo3_depth_the_giant_viewmodel.png", 2400.0f},
@@ -1812,7 +1809,15 @@ public:
         };
 
         const QString sceneId = requestedSceneId.trimmed().toLower();
-        const DepthPreviewScene* scene = &scenes[0];
+        if(sceneId.isEmpty() || sceneId == QStringLiteral("shadows_of_evil"))
+        {
+            QImage captureSheet(QStringLiteral(":/preview/bo3_depth_shadows_of_evil_capture.png"));
+            if(!DecodeBO3DepthCaptureSheet(captureSheet, error, true))
+                return false;
+            return true;
+        }
+
+        const DepthPreviewScene* scene = nullptr;
         for(const DepthPreviewScene& candidate : scenes)
         {
             if(sceneId == QString::fromLatin1(candidate.id))
@@ -1821,13 +1826,15 @@ public:
                 break;
             }
         }
+        if(!scene)
+        {
+            QImage captureSheet(QStringLiteral(":/preview/bo3_depth_shadows_of_evil_capture.png"));
+            return DecodeBO3DepthCaptureSheet(captureSheet, error, true);
+        }
 
-        // LEGACY FALLBACK ONLY: these built-in Game Depth Preview scenes use
-        // paired image-aligned authored/inferred assets, not ground-truth BO3
-        // Float-Z. The 16-bit PNG stores a logarithmic world-distance proxy and
-        // the 8-bit mask identifies the first-person weapon/arms. New accurate
-        // depth work should use ImportBO3DepthCaptureSheet(), which decodes the
-        // real same-frame BO3 Float-Z capture instead of inventing geometry.
+        // Remaining legacy scenes use paired image-aligned authored/inferred
+        // assets until each map receives its own real BO3 Float-Z capture.
+        // Shadows of Evil is handled above by the bundled ground-truth capture.
         QImage sourceImage(QString::fromLatin1(scene->colorResource));
         QImage depthImage(QString::fromLatin1(scene->depthResource));
         QImage viewmodelImage(QString::fromLatin1(scene->viewmodelResource));
@@ -6110,11 +6117,6 @@ float PreviewRenderer::LiveSplitFraction() const
 bool PreviewRenderer::LoadTexture(const std::filesystem::path& path, bool depth, std::wstring& error)
 {
     return impl_->LoadTexture(path, depth, error);
-}
-
-bool PreviewRenderer::ImportBO3DepthCaptureSheet(const std::filesystem::path& path, std::wstring& error)
-{
-    return impl_->ImportBO3DepthCaptureSheet(path, error);
 }
 
 bool PreviewRenderer::UseBuiltInDepthScene(std::wstring& error, const QString& sceneId)
