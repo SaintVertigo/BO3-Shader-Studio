@@ -2179,9 +2179,9 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
     {
         out += QStringLiteral(R"HLSL(
 // BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX and custom materials.
-// Uses resolvedScene + Float-Z only; the view-space reconstruction is an
-// intentionally portable approximation so it remains valid in runtime and
-// TOOLSGFX package validation without relying on an unavailable G-buffer.
+// Screen PostFX samples resolvedScene; Geometry Effect materials sample
+// resolvedPostSun. Runtime depth comes from Float-Z. The view-space
+// reconstruction stays independent of an unavailable material G-buffer.
 float3 BO3BeginnerSSRViewPosition(float2 uv, float depth, float perspectiveScale)
 {
     float2 ndc = uv * 2.0 - 1.0;
@@ -2396,6 +2396,25 @@ float4 BO3BeginnerMaterialReflectionSample(float3 worldPosition, float3 worldNor
     reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0, blur*0.5)).rgb * 0.12;
     reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0,-blur*0.5)).rgb * 0.12;
     return float4(reflected, 1.0);
+#elif TOOLSGFX
+    // APE does not expose the runtime Float-Z contract used by the SSR trace.
+    // Geometry Effect shaders do expose the editor viewport scene at t49, so
+    // use a screen-space reflection approximation there. This keeps APE useful
+    // without pretending its preview is the depth-accurate in-game result.
+    float3 reflectionDir = normalize(reflect(-surfaceViewDir, normalize(worldNormal)));
+    float2 sceneUv = BO3BeginnerMaterialSSRProjectUv(worldPosition);
+    float2 reflectionOffset = reflectionDir.xy * lerp(0.035, 0.008, saturate(roughness));
+    sceneUv = saturate(sceneUv + reflectionOffset);
+    float2 texel = PostFx_GetRenderTargetSize().zw;
+    float blurPixels = roughness * roughness * 6.0;
+    float2 blurX = float2(texel.x * blurPixels, 0.0);
+    float2 blurY = float2(0.0, texel.y * blurPixels);
+    float3 reflected = frameBuffer.Sample(bilinearClampler, sceneUv).rgb * 0.52;
+    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv + blurX)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv - blurX)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv + blurY)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, saturate(sceneUv - blurY)).rgb * 0.12;
+    return float4(reflected, BO3BeginnerSSREdgeFade(sceneUv));
 #else
     return BO3BeginnerMaterialSSRTrace(worldPosition, worldNormal, surfaceViewDir,
                                        maxDistance, thickness, stepCount, roughness);
@@ -2755,8 +2774,10 @@ QString generateMaterial(const Project& project)
 Texture2D<float4> DepthSampler : register(t1);
 SamplerState bilinearClampler : register(s1);
 
-// Material SSR needs the PostFX color-domain and render-target helpers, but
-// does not need the fullscreen-vertex baggage from postfx_common.h.
+// Geometry Effect materials sample BO3's resolvedPostSun scene color rather
+// than the PostFX resolvedScene buffer. resolvedPostSun is already in the
+// material/geometry color domain, so the PostFX 32768 normalization bridge
+// must NOT be applied here.
 float4 PostFx_GetRenderTargetSize()
 {
     return GetRenderTargetSize();
@@ -2764,19 +2785,18 @@ float4 PostFx_GetRenderTargetSize()
 
 float3 PostFx_NormalizeColor(float3 value)
 {
-#if TOOLSGFX
     return value;
-#else
-    return value / 32768.0;
-#endif
 }
 )HLSL")
         : QString();
+    const QString surfaceMarker = usesSceneReflections
+        ? QStringLiteral("SCENE_EFFECT")
+        : QStringLiteral("OPAQUE");
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
 // BO3_BEGINNER_TARGET: MATERIAL
 // BO3_BEGINNER_EFFECT_STACK: %1
-// BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE
+// BO3_PREVIEWER_MATERIAL_SURFACE: %7
 
 #include "lib/globals.hlsl"
 #include "lib/transform.hlsl"
@@ -2826,11 +2846,12 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
     float t = GetTime();
     float3 color = %3;
 %4
-    // Keep HDR/emissive values above 1.0. BO3's forward custom-material path
-    // accepts them and the preview tone mapper can show the resulting glow.
+    // Keep authored values above 1.0 in the editor source. Export decides
+    // whether this becomes deferred albedo or a forward Geometry Effect.
     return float4(max(color, 0.0), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects, screenIncludes, screenResources);
+)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects,
+             screenIncludes, screenResources, surfaceMarker);
 }
 
 QString generateSky(const Project& project)
@@ -3170,7 +3191,7 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("ripple", "Ripple Distortion", "Screen-space distortion applied to reflected color.", 0.0, 10.0, 0.1, 1.2),
                    FloatParam("ripple_scale", "Ripple Scale", "Spatial frequency of the water ripple distortion.", 0.5, 20.0, 0.1, 5.0),
                    FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30)}),
-        EffectDef("material_screen_space_reflections", "Screen-Space Reflections", "Give a custom material a live screen-space reflection finish by sampling BO3 resolvedScene and Float-Z at the material's screen position.", "Reflections & Surface",
+        EffectDef("material_screen_space_reflections", "Screen-Space Reflections", "Give a custom material a live screen-space reflection finish using BO3 Geometry Effect resolvedPostSun and Float-Z at runtime.", "Reflections & Surface",
                   {Target::Material},
                   {ColorParam("tint", "Reflection Tint", "Tint applied to the reflected scene. White keeps the original reflected colors.", "#FFFFFF"),
                    FloatParam("strength", "Strength", "Overall reflection blend on the material.", 0.0, 1.5, 0.01, 0.72),
@@ -3179,7 +3200,7 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("thickness", "Hit Thickness", "Depth tolerance used when the reflected ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
                    FloatParam("roughness", "Roughness", "Blur the reflected scene to imitate rough glossy materials.", 0.0, 1.0, 0.01, 0.18),
                    FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.72)}),
-        EffectDef("material_mirror", "Mirror", "Turn the surface into a near-perfect live mirror using BO3 resolvedScene + Float-Z screen-space ray tracing.", "Reflections & Surface",
+        EffectDef("material_mirror", "Mirror", "Turn the surface into a near-perfect live mirror using BO3 Geometry Effect resolvedPostSun + Float-Z screen-space ray tracing.", "Reflections & Surface",
                   {Target::Material},
                   {ColorParam("tint", "Mirror Tint", "Tint of the reflected scene. White produces a neutral mirror.", "#FFFFFF"),
                    FloatParam("strength", "Reflectivity", "How completely the mirror replaces the base surface.", 0.0, 1.0, 0.01, 0.98),

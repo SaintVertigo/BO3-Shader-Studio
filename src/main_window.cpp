@@ -1645,8 +1645,10 @@ public:
 
             const beginner::Project material = projects[1].first;
             const QString materialHlsl = beginner::generateHlsl(material);
-            if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE"))
-                return "Beginner Material is missing its BO3 emissive/unlit surface contract.";
+            if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT"))
+                return "Beginner Material coverage with scene reflections is missing its Geometry Effect surface contract.";
+            if(materialHlsl.contains("value / 32768.0"))
+                return "Beginner Material scene sampling still applies the PostFX resolvedScene 32768 color bridge.";
             if(!materialHlsl.contains("localPosition : TEXCOORD5") ||
                !materialHlsl.contains("BO3BeginnerHash31") ||
                !materialHlsl.contains("surfacePosition"))
@@ -1688,7 +1690,7 @@ public:
             QString materialAdapterDescription;
             QString materialAdapterError;
             const QString exportedMaterial = makeBo3CustomMaterialShader(
-                materialHlsl, materialAdapterDescription, materialAdapterError, 1);
+                materialHlsl, materialAdapterDescription, materialAdapterError, 8);
             if(exportedMaterial.isEmpty() || !materialAdapterError.isEmpty())
                 return "Beginner Material failed the real BO3 Custom Material export bridge: " + materialAdapterError;
             if(!exportedMaterial.contains("pixel.objectPosition"))
@@ -1696,6 +1698,28 @@ public:
             QString exportedMaterialDiagnostics;
             if(!compileGlslValidationHlsl(exportedMaterial, exportedMaterialDiagnostics, true))
                 return "Beginner Material exported runtime HLSL failed FXC validation: " + exportedMaterialDiagnostics;
+
+            // A material without live-scene effects must no longer silently become
+            // emissive. It defaults to the real deferred Geometry Custom path.
+            beginner::Project plainMaterial = beginner::makeDefaultProject(beginner::Target::Material);
+            plainMaterial.effects.push_back(beginner::makeDefaultEffect(QStringLiteral("material_metallic")));
+            const QString plainMaterialHlsl = beginner::generateHlsl(plainMaterial);
+            if(!plainMaterialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: OPAQUE") ||
+               plainMaterialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE"))
+                return "Ordinary Beginner Material still defaults to an emissive surface instead of opaque deferred.";
+            QString plainMaterialDescription;
+            QString plainMaterialError;
+            const QString plainExportedMaterial = makeBo3CustomMaterialShader(
+                plainMaterialHlsl, plainMaterialDescription, plainMaterialError, 0);
+            if(plainExportedMaterial.isEmpty() || !plainMaterialError.isEmpty())
+                return "Ordinary Beginner Material failed the deferred BO3 Custom Material bridge: " + plainMaterialError;
+            const QString plainMaterialTechset = makeMaterialTechset(
+                plainExportedMaterial, QStringLiteral("shaders\\beginner_material_plain.hlsl"), {}, 0,
+                bo3::PackageConfiguration::Runtime);
+            if(!plainMaterialTechset.contains("category = \"Geometry Custom\"") ||
+               !plainMaterialTechset.contains("renderFlags = \"lit deferred opaque\"") ||
+               !plainMaterialTechset.contains("Technique( \"gbuffer\" )"))
+                return "Ordinary Beginner Material did not serialize the deferred Geometry Custom contract.";
 
             // Keep this techset-binding regression focused on SSR itself. The
             // coverage material above intentionally stacks every Material effect,
@@ -1707,7 +1731,7 @@ public:
             QString focusedMaterialDescription;
             QString focusedMaterialError;
             const QString focusedExportedMaterial = makeBo3CustomMaterialShader(
-                focusedMaterialSsrHlsl, focusedMaterialDescription, focusedMaterialError, 1);
+                focusedMaterialSsrHlsl, focusedMaterialDescription, focusedMaterialError, 8);
             if(focusedExportedMaterial.isEmpty() || !focusedMaterialError.isEmpty())
                 return "Focused Beginner Material SSR failed the BO3 Custom Material bridge: " + focusedMaterialError;
 
@@ -1730,8 +1754,11 @@ public:
             materialSsrBindings.push_back(staleMaterialSsrPerspective);
 
             const QString materialSsrTechset = makeMaterialTechset(
-                focusedExportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 1,
+                focusedExportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 8,
                 bo3::PackageConfiguration::Runtime);
+            if(!materialSsrTechset.contains("category = \"Geometry Effect\"") ||
+               !materialSsrTechset.contains("renderFlags = \"distortion fx\""))
+                return "Beginner Material SSR did not serialize the BO3 Geometry Effect / distortion-fx contract.";
             bo3::TechsetParseOptions materialSsrParseOptions;
             materialSsrParseOptions.configuration = bo3::PackageConfiguration::Runtime;
             const bo3::TechsetParseResult materialSsrParsed = bo3::parseTechset(
@@ -1757,14 +1784,14 @@ public:
             {
                 if(binding.valueKind != bo3::BindingValueKind::CodeTexture) continue;
                 if(binding.parameterName.compare(QStringLiteral("frameBuffer"), Qt::CaseInsensitive) == 0 &&
-                   binding.valueName.compare(QStringLiteral("resolvedScene"), Qt::CaseInsensitive) == 0)
+                   binding.valueName.compare(QStringLiteral("resolvedPostSun"), Qt::CaseInsensitive) == 0)
                     materialSsrSceneBound = true;
                 if(binding.parameterName.compare(QStringLiteral("DepthSampler"), Qt::CaseInsensitive) == 0 &&
                    binding.valueName.compare(QStringLiteral("floatZ"), Qt::CaseInsensitive) == 0)
                     materialSsrDepthBound = true;
             }
             if(!materialSsrSceneBound || !materialSsrDepthBound)
-                return "Beginner Material SSR runtime techset did not bind resolvedScene + floatZ CodeTextures.";
+                return "Beginner Material SSR runtime techset did not bind resolvedPostSun + floatZ CodeTextures.";
 
             const beginner::Project sky = projects[2].first;
             const QString skyHlsl = beginner::generateHlsl(sky);
@@ -5688,6 +5715,16 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
 
         bo3::PackageValidationOptions validationOptions = bo3::defaultPackageValidationOptions();
         validationOptions.unreflectedStageBindingIsError = true;
+        if(configuration == bo3::PackageConfiguration::Toolsgfx &&
+           shaderSource.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT",
+                                 Qt::CaseInsensitive))
+        {
+            // BO3 Geometry Effect TOOLSGFX exposes the live APE viewport scene
+            // implicitly at t49 (the same contract used by the proven
+            // chromatic_aberration_effect shader). It is intentionally not a
+            // material Texture() parameter.
+            validationOptions.externallyBoundResources.insert("frameBuffer");
+        }
         result.append(bo3::validatePackage(package, validationOptions));
         return result;
     }
@@ -5744,10 +5781,12 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         //   5 decal blend      -> lit_decal_base + blend/depth/decal
         //   6 decal additive   -> lit_decal_base + add/depth/decal
         //   7 glass-like       -> alpha blend, with glass GDT surface metadata
+        //   8 scene effect      -> Geometry Effect + resolvedPostSun/Float-Z
+        const bool sceneEffect = (surfaceMode == 8);
         const bool deferred = (surfaceMode == 0 || surfaceMode == 4);
         const bool decal = (surfaceMode == 5 || surfaceMode == 6);
         const bool emissiveOpaque = (surfaceMode == 1);
-        const bool alphaBlend = (surfaceMode == 2 || surfaceMode == 5 || surfaceMode == 7);
+        const bool alphaBlend = (surfaceMode == 2 || surfaceMode == 5 || surfaceMode == 7 || sceneEffect);
         const bool additive = (surfaceMode == 3 || surfaceMode == 6);
 
         const QString& src = shaderSource;
@@ -5764,9 +5803,14 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         if(deferred || emissiveOpaque) model.includes << "shadowmap_technique_base";
         if(decal) model.includes << "lit_decal_base.inc";
 
-        model.globals.category = decal ? "Decal" : "Geometry Custom";
-        model.globals.availablePrefixes = decal ? "mc/ mcs/ wc/ / vd/" : "mc/ mcs/ wc/";
-        if(deferred)
+        model.globals.category = sceneEffect ? "Geometry Effect" : (decal ? "Decal" : "Geometry Custom");
+        model.globals.availablePrefixes = sceneEffect ? "mc/ mcs/ wc/ ei/ el/"
+                                        : (decal ? "mc/ mcs/ wc/ / vd/" : "mc/ mcs/ wc/");
+        if(sceneEffect)
+            // Match BO3's proven object-scene sampling family. "distortion fx"
+            // schedules a current scene resolve before the geometry effect pass.
+            model.globals.renderFlagsText = "distortion fx";
+        else if(deferred)
             model.globals.renderFlagsText = surfaceMode == 4 ? "lit deferred semi opaque" : "lit deferred opaque";
         else if(decal)
             model.globals.renderFlags = {{"isEmissive", "true"}, {"isDecal", "true"}, {"noBspCollision", "true"}};
@@ -5785,8 +5829,18 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             bo3::ParameterModel parameter;
             parameter.kind = bo3::ParameterKind::Sampler;
             parameter.name = samplerName;
-            parameter.properties["tile"] = "tile both";
-            parameter.properties["filter"] = "linear (mip linear)";
+            if(sceneEffect && samplerName.compare("bilinearClampler", Qt::CaseInsensitive) == 0)
+            {
+                // Geometry Effect scene sampling follows the known-good BO3
+                // chromatic_aberration_effect sampler contract.
+                parameter.properties["tile"] = "no tile";
+                parameter.properties["filter"] = "linear (mip none)";
+            }
+            else
+            {
+                parameter.properties["tile"] = "tile both";
+                parameter.properties["filter"] = "linear (mip linear)";
+            }
             model.parameters << parameter;
         }
 
@@ -5814,6 +5868,15 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             QString fallback = "$white_diffuse";
             QString semantic = "2d";
             const QString lower = texture.name.toLower();
+            if(sceneEffect &&
+               (lower == "framebuffer" || lower == "resolvedscene" || lower == "scenetexture" ||
+                lower == "depthsampler" || lower == "floatz" || lower == "scenedepth" || lower == "depthtexture"))
+            {
+                // Geometry Effect scene/depth resources are stage-local runtime
+                // CodeTextures. Do not also expose them as material image slots;
+                // BO3's proven object-scene effects do the same.
+                continue;
+            }
             if(lower.contains("normal")) { placeholder = "normalMap"; fallback = "$identitynormalmap"; semantic = "normalMap"; }
             else if(lower.contains("height") || lower.contains("reveal")) { placeholder = "alphaRevealMap"; fallback = "$white_reveal"; semantic = "revealMap"; }
             else if(lower.contains("spec")) { placeholder = "specColorMap"; fallback = "$specular"; semantic = "specularMap"; }
@@ -5885,7 +5948,9 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             parameter.tweak.properties["range"] = range;
             model.parameters << parameter;
         };
-        addFloatParameter("bo3MaterialOutputScale", "x", "<cg31_w>", "Output / Emissive Scale", "5", "\"1.0\"", "\"0.0\", \"32.0\", \"0.05\"");
+        addFloatParameter("bo3MaterialOutputScale", "x", "<cg31_w>",
+                          (emissiveOpaque || additive) ? "Output / Emissive Scale" : "Output Scale",
+                          "5", "\"1.0\"", "\"0.0\", \"32.0\", \"0.05\"");
         addFloatParameter("bo3MaterialOpacity", "x", "<cg31_z>", "Opacity", "6", "\"1.0\"", "\"0.0\", \"1.0\", \"0.01\"");
         addFloatParameter("bo3MaterialAlphaCutoff", "x", "<cg31_y>", "Alpha Cutoff", "7", "\"0.5\"", "\"0.0\", \"1.0\", \"0.01\"");
 
@@ -5982,10 +6047,10 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return technique;
         };
 
-        // A custom material can opt into the same engine CodeTextures used by
-        // PostFX. This is intentionally explicit and only activates when the
-        // authored Beginner material declares frameBuffer/DepthSampler. TOOLSGFX
-        // keeps the normal image fallbacks, while Runtime binds the live scene.
+        // Scene-sampling custom materials bind the engine-owned scene/depth
+        // resources explicitly. Geometry Effect uses resolvedPostSun for color
+        // (not PostFX resolvedScene) and Float-Z for depth. TOOLSGFX uses the
+        // editor viewport scene contract instead; Runtime receives CodeTextures.
         auto bindRuntimeSceneCodeTextures = [&](bo3::TechniqueModel& technique)
         {
             if(configuration != bo3::PackageConfiguration::Runtime) return;
@@ -5995,7 +6060,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 const QString lower = texture.name.toLower();
                 QString codeTexture;
                 if(lower == "framebuffer" || lower == "resolvedscene" || lower == "scenetexture")
-                    codeTexture = "resolvedScene";
+                    codeTexture = sceneEffect ? "resolvedPostSun" : "resolvedScene";
                 else if(lower == "depthsampler" || lower == "floatz" || lower == "scenedepth" || lower == "depthtexture")
                     codeTexture = "floatZ";
                 if(codeTexture.isEmpty()) continue;
@@ -6004,14 +6069,17 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 resource.parameterName = texture.name;
                 resource.valueKind = bo3::BindingValueKind::CodeTexture;
                 resource.valueName = codeTexture;
+                // Keep APE on its ordinary image fallbacks. Runtime receives
+                // the live CodeTextures, matching BO3 Geometry Effect practice.
+                resource.preprocessorCondition = "TOOLSGFX != \"1\"";
                 technique.pixelShader.resourceBindings << resource;
                 boundSceneResource = true;
             }
 
             // Stage-local bindings are serialized only for PixelShader() blocks.
             // A plain ps = "ps_generic" assignment intentionally has no body, so
-            // attaching resolvedScene/floatZ bindings to that model silently drops
-            // them from the generated techset. Material SSR owns a real ps_main in
+            // attaching scene/Float-Z bindings to that model silently drops them
+            // from the generated techset. Material SSR owns a real ps_main in
             // shaderRel, therefore switch only the affected runtime techniques to
             // an inline custom pixel stage and keep the stock generic VS unchanged.
             if(boundSceneResource &&
@@ -6070,7 +6138,8 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         }
         else
         {
-            QString state = additive ? "add + depth" : (alphaBlend ? "blend + depth" : "replace + depth");
+            QString state = sceneEffect ? "blend + depth"
+                                          : (additive ? "add + depth" : (alphaBlend ? "blend + depth" : "replace + depth"));
             if(decal) state += " + decal";
             if(emissiveOpaque)
             {
@@ -6147,9 +6216,10 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
     {
         adapterDescription.clear();
         error.clear();
+        const bool sceneEffect = (surfaceMode == 8);
         const bool deferred = (surfaceMode == 0 || surfaceMode == 4);
         const bool cutout = (surfaceMode == 4);
-        const bool alphaBlend = (surfaceMode == 2 || surfaceMode == 5 || surfaceMode == 7);
+        const bool alphaBlend = (surfaceMode == 2 || surfaceMode == 5 || surfaceMode == 7 || sceneEffect);
         const bool additive = (surfaceMode == 3 || surfaceMode == 6);
 
         // A custom geometry material uses BO3's real geometry transform. Opaque-lit
@@ -6389,6 +6459,27 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         return prefix+source+"\n"+suffix;
     }
 
+    QString makeBo3MaterialSceneEffectToolsgfxShader(QString source) const
+    {
+        if(!source.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT",
+                            Qt::CaseInsensitive))
+            return source;
+
+        // BO3's proven Geometry Effect APE shaders read the editor viewport
+        // scene directly from t49 and use bilinearClampler at s0. Runtime does
+        // NOT use these explicit registers; its techset supplies resolvedPostSun
+        // and Float-Z through stage-local CodeTextures.
+        source.replace(
+            QRegularExpression(
+                R"(Texture2D\s*<\s*float4\s*>\s+frameBuffer\s*;)"),
+            "Texture2D<float4> frameBuffer : register(t49);");
+        source.replace(
+            QRegularExpression(
+                R"(SamplerState\s+bilinearClampler\s*;)"),
+            "SamplerState bilinearClampler : register(s0);");
+        return source;
+    }
+
     QString createCustomMaterialGdtAsset(const QString& assetName, const QString& materialType,
                                          const QVector<ExportParamBinding>& bindings,
                                          const QMap<QString,QString>& images,
@@ -6400,12 +6491,16 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         b=renameGdtAsset(b,assetName);
         b=patchGdtField(b,"materialType",materialType);
         const bool decal = (surfaceMode == 5 || surfaceMode == 6);
+        const bool sceneEffect = surfaceMode == 8;
+        // Geometry Effect's framebuffer blend behavior comes from its material
+        // type/techset (blend + depth). The proven BO3 Geometry Effect template
+        // keeps the material-level transparent flag at 0, so do not repurpose it.
         const bool transparent = (surfaceMode == 2 || surfaceMode == 3 || surfaceMode == 5 || surfaceMode == 6 || surfaceMode == 7);
         const bool emissiveLike = (surfaceMode == 1 || surfaceMode == 2 || surfaceMode == 3 || surfaceMode == 5 || surfaceMode == 6 || surfaceMode == 7);
         const bool cutout = surfaceMode == 4;
         const bool glassLike = surfaceMode == 7;
 
-        b=patchGdtField(b,"materialCategory",decal?"Decal":"Geometry Custom");
+        b=patchGdtField(b,"materialCategory",sceneEffect?"Geometry Effect":(decal?"Decal":"Geometry Custom"));
         const QStringList textureFields{
             "colorMap","normalMap","alphaRevealMap","specColorMap","cosinePowerMap","occMap",
             "alphaMap","colorDetailMap","camoDetailMap","camoMaskMap","causticMap",
@@ -12163,6 +12258,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             {"APE PostFX techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/postfx")},
             {"Runtime Material techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable/geometry_custom")},
             {"APE Material techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/geometry_custom")},
+            {"Runtime Geometry Effect techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable/geometry_effect")},
+            {"APE Geometry Effect techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/geometry_effect")},
             {"Runtime Decal techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable/decal")},
             {"APE Decal techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/decal")},
             {"Runtime Sky techsets", QDir(rootPath).filePath("share/raw/techsetdefs_stable/geometry")},
@@ -12638,7 +12735,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         materialSurfaceMode->addItem("Decal / Alpha Blend",5);
         materialSurfaceMode->addItem("Decal / Additive",6);
         materialSurfaceMode->addItem("Glass-like / Transparent (no refraction)",7);
-        materialSurfaceMode->setToolTip("Controls BO3 render/blend behavior for Custom HLSL Materials. Glass-like is transparent surface behavior only; it does not synthesize BO3 refraction.");
+        materialSurfaceMode->addItem("Scene-Sampling Geometry Effect (SSR / Mirror)",8);
+        materialSurfaceMode->setToolTip("Controls BO3 render/blend behavior for Custom HLSL Materials. Scene-Sampling Geometry Effect uses BO3's Geometry Effect / resolvedPostSun path for SSR, mirrors and other live-scene material effects.");
 
         // Material / Surface shaders created by the GLSL converter carry a small
         // recommendation marker. Use it only as the dialog default; the user can
@@ -12659,6 +12757,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             type->setCurrentIndex(1);
             materialSurfaceMode->setCurrentIndex(0);
         }
+        else if(currentShaderText.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT"))
+        {
+            type->setCurrentIndex(1);
+            materialSurfaceMode->setCurrentIndex(8);
+        }
         else if(currentShaderText.contains("BO3_PREVIEWER_MATERIAL_SURFACE: EMISSIVE"))
         {
             type->setCurrentIndex(1);
@@ -12670,7 +12773,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             type->setCurrentIndex(beginnerProject_.target == beginner::Target::Material ? 1 :
                                   (beginnerProject_.target == beginner::Target::Sky ? 2 : 0));
             if(beginnerProject_.target == beginner::Target::Material)
-                materialSurfaceMode->setCurrentIndex(1); // Beginner materials are intentionally emissive/unlit v1 modules.
+            {
+                // Physical Beginner materials default to BO3's deferred opaque
+                // geometry path. Effects that need the live rendered scene
+                // (SSR, Mirror, wet/clear-coat reflection finishes, etc.) use a
+                // dedicated Geometry Effect contract instead of masquerading as
+                // an emissive Geometry Custom material.
+                materialSurfaceMode->setCurrentIndex(
+                    currentShaderText.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT",
+                                               Qt::CaseInsensitive) ? 8 : 0);
+            }
             if(beginnerProject_.target == beginner::Target::PostFx)
                 includePostFxFilterSupport->setChecked(true);
         }
@@ -12715,7 +12827,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         form->addRow("PostFX scene source", sceneSource);
         form->addRow("Material mode", materialExportMode);
         form->addRow("Custom surface", materialSurfaceMode);
-        form->addRow("Output / emissive scale", materialOutputScale);
+        form->addRow("Output scale", materialOutputScale);
         form->addRow("Opacity", materialOpacity);
         form->addRow("Alpha cutoff", materialAlphaCutoff);
         form->addRow("Texture/POM profile", materialProfile);
@@ -12839,12 +12951,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     QString adapterDescription, adapterError;
                     makeBo3CustomMaterialShader(editor_->toPlainText(),adapterDescription,adapterError,customSurface);
                     const QString surfaceLabel = materialSurfaceMode->currentText();
-                    const QString materialTechsetFolder = (customSurface == 5 || customSurface == 6) ? "decal" : "geometry_custom";
+                    const QString materialTechsetFolder = customSurface == 8 ? "geometry_effect"
+                        : ((customSurface == 5 || customSurface == 6) ? "decal" : "geometry_custom");
                     text += QString("Custom HLSL Material\nSurface: %6\nRuntime shader: share/raw/shaders_stable/%1/%2.hlsl\nAPE shader: share/raw/shaders_stable_toolsgfx/%1/%2.hlsl\nTechset: share/raw/techsetdefs_stable/%7/%3.techsetdef + TOOLSGFX editor variant\nAPE Material Type: %3\nGDT: source_data/%1/%2.gdt\nInput adapter: %4\nLoaded material textures: %5")
                         .arg(ns,bn,tn,adapterError.isEmpty()?adapterDescription:adapterError,loaded.isEmpty()?"None (procedural-only is allowed)":loaded.join(", "),surfaceLabel,materialTechsetFolder);
-                    text += customSurface == 0 || customSurface == 4
-                        ? "\nDeferred presets write the shader color into BO3's GBuffer and keep real mesh lighting."
-                        : "\nForward-style presets use the shader RGB as final surface color; shader alpha drives blend/cutout behavior where applicable.";
+                    if(customSurface == 8)
+                        text += "\nScene-sampling materials export as BO3 Geometry Effect, use resolvedPostSun for live scene color, and bind Float-Z only at runtime.";
+                    else
+                        text += customSurface == 0 || customSurface == 4
+                            ? "\nDeferred presets write the shader color into BO3's GBuffer and keep real mesh lighting."
+                            : "\nForward-style presets use the shader RGB as final surface color; shader alpha drives blend/cutout behavior where applicable.";
                     if(customSurface == 7) text += "\nGlass-like means transparent/glass surface metadata only; it does not add a refraction shader.";
                 }
                 else
@@ -13149,6 +13265,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     QMessageBox::critical(this,"BO3 Custom Material Export",err);
                     return;
                 }
+                if(customMaterialSurface == 8)
+                    exportedToolsgfxShaderSourceForPackage =
+                        makeBo3MaterialSceneEffectToolsgfxShader(exportedShaderSource);
             }
 
             if(exportType != 0 && exportType != 2)
@@ -13172,8 +13291,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             bool shaderWriteOk = writeTextFileQt(shaderOut,exportedShaderSource,err);
             if(exportType != 2)
             {
-                const QString toolsSource = (exportType == 0 && !exportedToolsgfxShaderSourceForPackage.isEmpty())
-                    ? exportedToolsgfxShaderSourceForPackage : exportedShaderSource;
+                const QString toolsSource =
+                    ((exportType == 0 || (exportType == 1 && customHlslMaterial && customMaterialSurface == 8)) &&
+                     !exportedToolsgfxShaderSourceForPackage.isEmpty())
+                        ? exportedToolsgfxShaderSourceForPackage : exportedShaderSource;
                 shaderWriteOk = shaderWriteOk && writeTextFileQt(shaderOutTools,toolsSource,err);
             }
             if(!shaderWriteOk)
@@ -13188,8 +13309,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             bool dependenciesOk = copyExportDependencies(exportedShaderSource, originalShaderDir, stable, shaderDir, err, &generated);
             if(exportType != 2)
             {
-                const QString toolsSource = (exportType == 0 && !exportedToolsgfxShaderSourceForPackage.isEmpty())
-                    ? exportedToolsgfxShaderSourceForPackage : exportedShaderSource;
+                const QString toolsSource =
+                    ((exportType == 0 || (exportType == 1 && customHlslMaterial && customMaterialSurface == 8)) &&
+                     !exportedToolsgfxShaderSourceForPackage.isEmpty())
+                        ? exportedToolsgfxShaderSourceForPackage : exportedShaderSource;
                 dependenciesOk = dependenciesOk && copyExportDependencies(toolsSource, originalShaderDir, stableTools, shaderDirTools, err, &generated);
             }
             if(!dependenciesOk)
@@ -13434,7 +13557,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 // Runtime and TOOLSGFX techsets are generated separately. Runtime
                 // uses the custom shader contract; TOOLSGFX additionally carries the
                 // editor-only base-color binding APE expects for custom materials.
-                const QString customTechsetFolder = (customMaterialSurface == 5 || customMaterialSurface == 6) ? "decal" : "geometry_custom";
+                const QString customTechsetFolder = customMaterialSurface == 8 ? "geometry_effect"
+                    : ((customMaterialSurface == 5 || customMaterialSurface == 6) ? "decal" : "geometry_custom");
                 const QString techDir=QDir(rootPath).filePath("share/raw/techsetdefs_stable/" + customTechsetFolder);
                 const QString techDirTools=QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/" + customTechsetFolder);
                 lastTechsetDir=techDir;
@@ -13466,8 +13590,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 bo3::ValidationResult packageValidation = validateGeneratedPackageForBo3(
                     exportedShaderSourceForPackage, techText, shaderRel, selectedTechnique,
                     bo3::PackageConfiguration::Runtime, fs::path(stable.toStdWString()));
+                const QString materialToolsgfxSource =
+                    (customMaterialSurface == 8 && !exportedToolsgfxShaderSourceForPackage.isEmpty())
+                        ? exportedToolsgfxShaderSourceForPackage : exportedShaderSourceForPackage;
                 packageValidation.append(validateGeneratedPackageForBo3(
-                    exportedShaderSourceForPackage, techTextTools, shaderRel, selectedTechnique,
+                    materialToolsgfxSource, techTextTools, shaderRel, selectedTechnique,
                     bo3::PackageConfiguration::Toolsgfx, fs::path(stableTools.toStdWString())));
                 exportedPackageStatus = packageValidation.status();
                 packageExportNotes.append(packageDiagnosticMessages(packageValidation));
@@ -13957,15 +14084,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             // If the same techset name was previously installed under a different
             // surface category, remove the stale alternate copy so APE cannot pick it up.
-            if(customMaterialSurface == 5 || customMaterialSurface == 6)
+            const QStringList materialTechsetCategories = {"geometry_custom", "geometry_effect", "decal"};
+            const QString activeMaterialTechsetCategory = customMaterialSurface == 8 ? "geometry_effect"
+                : ((customMaterialSurface == 5 || customMaterialSurface == 6) ? "decal" : "geometry_custom");
+            for(const QString& category : materialTechsetCategories)
             {
-                QFile::remove(QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/geometry_custom/"+tech+".techsetdef"));
-                QFile::remove(QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable_toolsgfx/geometry_custom/"+tech+".techsetdef"));
-            }
-            else
-            {
-                QFile::remove(QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/decal/"+tech+".techsetdef"));
-                QFile::remove(QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable_toolsgfx/decal/"+tech+".techsetdef"));
+                if(category == activeMaterialTechsetCategory) continue;
+                QFile::remove(QDir(requestedInstallRoot).filePath(
+                    "share/raw/techsetdefs_stable/" + category + "/" + tech + ".techsetdef"));
+                QFile::remove(QDir(requestedInstallRoot).filePath(
+                    "share/raw/techsetdefs_stable_toolsgfx/" + category + "/" + tech + ".techsetdef"));
             }
         }
         else if(exportType == 1 && !customHlslMaterial)
@@ -14037,6 +14165,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                           ? QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/postfx")
                           : exportType == 2
                             ? QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/geometry")
+                            : (customHlslMaterial && customMaterialSurface == 8)
+                              ? QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/geometry_effect")
                             : (customHlslMaterial && (customMaterialSurface == 5 || customMaterialSurface == 6))
                               ? QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/decal")
                               : QDir(requestedInstallRoot).filePath("share/raw/techsetdefs_stable/geometry_custom"));

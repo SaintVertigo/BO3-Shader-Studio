@@ -568,7 +568,7 @@ public:
         {
             previewMessage += L"[Preview] Material / Surface marker detected: mesh UV vertex path forced (sky-direction detection disabled).\r\n";
             if (beginnerMaterialSsrCompile)
-                previewMessage += L"[Preview] Beginner Material SSR lookdev: using the studio environment for a camera-matched reflective preview. BO3 export still uses resolvedScene + Float-Z raymarching.\r\n";
+                previewMessage += L"[Preview] Beginner Material SSR lookdev: using the studio environment for a camera-matched reflective preview. BO3 runtime export uses Geometry Effect resolvedPostSun + Float-Z raymarching.\r\n";
             if (userSource.find("BO3_PREVIEWER_GLSL_PROJECTION: SEAMLESS_TRIPLANAR_V2") == std::string::npos &&
                 (userSource.find("BO3GLSL_EvaluateMaterialSeamSafe") != std::string::npos ||
                  userSource.find("BO3GLSL_StabilizeMaterialPoles") != std::string::npos ||
