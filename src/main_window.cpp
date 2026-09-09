@@ -1602,7 +1602,11 @@ public:
                 return "Bundled BO3 ground-truth Float-Z capture shader is missing or incomplete.";
             QString depthCaptureCompileDiagnostics;
             if(!compileGlslValidationHlsl(depthCaptureSource, depthCaptureCompileDiagnostics, true))
-                return "Bundled BO3 Float-Z capture HLSL failed FXC validation: " + depthCaptureCompileDiagnostics;
+                return "Bundled BO3 Float-Z capture HLSL failed runtime FXC validation: " + depthCaptureCompileDiagnostics;
+            QString depthCaptureToolsgfxDiagnostics;
+            if(!compileGlslValidationHlsl(QStringLiteral("#define TOOLSGFX 1\n") + depthCaptureSource,
+                                          depthCaptureToolsgfxDiagnostics, true))
+                return "Bundled BO3 Float-Z capture HLSL failed TOOLSGFX FXC validation: " + depthCaptureToolsgfxDiagnostics;
             bo3::PackageAdapterRequest depthCaptureRequest;
             depthCaptureRequest.target = bo3::PackageTarget::PostFx;
             depthCaptureRequest.configuration = bo3::PackageConfiguration::Runtime;

@@ -44,6 +44,19 @@ static const float BO3_CAPTURE_DEPTH_LOG_MAX = 17.0;   // 131072
 static const float BO3_CAPTURE_ZNEAR_LOG_MIN = -12.0;
 static const float BO3_CAPTURE_ZNEAR_LOG_MAX = 0.0;
 
+// BO3 exposes the near clip through different symbols in the two shader
+// compilation environments. Runtime HLSL uses PerSceneConsts.zNear, while
+// TOOLSGFX uses CodeSceneConsts.gScene.nearClip. Keep one helper so this
+// capture shader compiles in both the game and the APE/tools validation path.
+float BO3CaptureGetZNear()
+{
+#if TOOLSGFX
+    return max(gScene.nearClip, 0.000001);
+#else
+    return max(zNear.x, 0.000001);
+#endif
+}
+
 uint BO3CaptureQuantize14(float normalizedValue)
 {
     return (uint)round(saturate(normalizedValue) * 16383.0);
@@ -61,7 +74,7 @@ float3 BO3CaptureEncodeDepth(float rawDepth)
 {
     const bool viewmodel = rawDepth >= BO3_CAPTURE_DEPTHHACK_SPLIT;
     const float processed = FloatZ_Process(rawDepth);
-    const float worldDistance = max(zNear.x, 0.000001) / max(processed, 0.00000001);
+    const float worldDistance = BO3CaptureGetZNear() / max(processed, 0.00000001);
     const float encoded = (log2(max(worldDistance, exp2(BO3_CAPTURE_DEPTH_LOG_MIN))) - BO3_CAPTURE_DEPTH_LOG_MIN) /
                           (BO3_CAPTURE_DEPTH_LOG_MAX - BO3_CAPTURE_DEPTH_LOG_MIN);
     return BO3CaptureEncode14(BO3CaptureQuantize14(encoded), viewmodel);
@@ -69,7 +82,7 @@ float3 BO3CaptureEncodeDepth(float rawDepth)
 
 float3 BO3CaptureEncodeZNear()
 {
-    const float encoded = (log2(max(zNear.x, exp2(BO3_CAPTURE_ZNEAR_LOG_MIN))) - BO3_CAPTURE_ZNEAR_LOG_MIN) /
+    const float encoded = (log2(max(BO3CaptureGetZNear(), exp2(BO3_CAPTURE_ZNEAR_LOG_MIN))) - BO3_CAPTURE_ZNEAR_LOG_MIN) /
                           (BO3_CAPTURE_ZNEAR_LOG_MAX - BO3_CAPTURE_ZNEAR_LOG_MIN);
     return BO3CaptureEncode14(BO3CaptureQuantize14(encoded), false);
 }
@@ -89,7 +102,7 @@ float3 BO3CaptureDiagnostic(float rawDepth)
 {
     const bool viewmodel = rawDepth >= BO3_CAPTURE_DEPTHHACK_SPLIT;
     const float processed = FloatZ_Process(rawDepth);
-    const float worldDistance = max(zNear.x, 0.000001) / max(processed, 0.00000001);
+    const float worldDistance = BO3CaptureGetZNear() / max(processed, 0.00000001);
     const float d = saturate((log2(max(worldDistance, exp2(BO3_CAPTURE_DEPTH_LOG_MIN))) - BO3_CAPTURE_DEPTH_LOG_MIN) /
                              (BO3_CAPTURE_DEPTH_LOG_MAX - BO3_CAPTURE_DEPTH_LOG_MIN));
     float3 color = lerp(float3(0.015, 0.020, 0.030), float3(1.0, 1.0, 1.0), d);
