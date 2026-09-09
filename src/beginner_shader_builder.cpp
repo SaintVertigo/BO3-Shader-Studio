@@ -1568,7 +1568,7 @@ QString generatePostFx(const Project& project, bool forceSceneDepth = false)
             break;
         }
     }
-    const QString depthDebug = hasPostFxEffect ? QString(R"HLSL(
+    const QString depthDebug = (needsSceneDepth && hasPostFxEffect) ? QString(R"HLSL(
 #if BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 1
     return float4(PostFx_DenormalizeColor(color), 1.0);
 #elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 2
