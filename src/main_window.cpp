@@ -1594,12 +1594,16 @@ public:
                !postHlsl.contains("rainUv.y = -") ||
                !postHlsl.contains("Oil Paint") ||
                !postHlsl.contains("user-supplied GLSL") ||
-               !postHlsl.contains("BO3_BEGINNER_PENCIL") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_FAST") ||
+               !postHlsl.contains("lightweight 9-tap graphite sketch") ||
                !postHlsl.contains("camera movement removed") ||
                !postHlsl.contains("Pencil Sketch") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
+            if(postHlsl.contains("BO3BeginnerPencilGrad") ||
+               postHlsl.contains("BO3BeginnerPencilColHT"))
+                return "Beginner Pencil Sketch regressed to the heavyweight multi-loop implementation.";
             if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
                beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
                beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||

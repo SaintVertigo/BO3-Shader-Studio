@@ -1190,53 +1190,44 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString grain = parameterExpr(project, effect, *definition, "grain");
             const QString paper = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
-            out += QString("    // %1 - hand-drawn pencil shading adapted from the user-supplied GLSL; camera movement removed\n"
+            out += QString("    // BO3_BEGINNER_PENCIL_FAST - lightweight 9-tap graphite sketch; camera movement removed\n"
+                           "    // Replaces the old 3x16x2 nested sampling pass that could require hundreds of scene reads per pixel.\n"
                            "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
-                           "    float2 %2_pos = uv * %2_rt;\n"
-                           "    float3 %2_col = 0.0.xxx;\n"
-                           "    float3 %2_col2 = 0.0.xxx;\n"
-                           "    float %2_sum = 0.0;\n"
-                           "    float %2_baseScale = max(%4, 0.1) * %2_rt.y / 400.0;\n"
-                           "    [unroll] for(int %2_i = 0; %2_i < 3; ++%2_i)\n"
-                           "    {\n"
-                           "        float %2_ang = 6.28318530718 / 3.0 * (float(%2_i) + 0.8);\n"
-                           "        float2 %2_v = float2(cos(%2_ang), sin(%2_ang));\n"
-                           "        [unroll] for(int %2_j = 0; %2_j < 16; ++%2_j)\n"
-                           "        {\n"
-                           "            float %2_jf = float(%2_j);\n"
-                           "            float2 %2_dpos = %2_v.yx * float2(1.0,-1.0) * %2_jf * %2_baseScale;\n"
-                           "            float2 %2_dpos2 = %2_v.xy * (%2_jf * %2_jf / 16.0) * 0.5 * %2_baseScale;\n"
-                           "            [unroll] for(int %2_sIndex = 0; %2_sIndex < 2; ++%2_sIndex)\n"
-                           "            {\n"
-                           "                float %2_s = (%2_sIndex == 0) ? -1.0 : 1.0;\n"
-                           "                float2 %2_pos2 = %2_pos + %2_s * %2_dpos + %2_dpos2;\n"
-                           "                float2 %2_pos3 = %2_pos + (%2_s * %2_dpos + %2_dpos2).yx * float2(1.0,-1.0) * 2.0;\n"
-                           "                float2 %2_g = BO3BeginnerPencilGrad(%2_pos2, max(0.4 * %2_baseScale, 0.05));\n"
-                           "                float %2_fact = dot(%2_g, %2_v) - 0.5 * abs(dot(%2_g, %2_v.yx * float2(1.0,-1.0)));\n"
-                           "                float %2_fact2 = dot(normalize(%2_g + float2(0.0001,0.0)), %2_v.yx * float2(1.0,-1.0));\n"
-                           "                %2_fact = clamp(%2_fact, 0.0, 0.05);\n"
-                           "                %2_fact2 = abs(%2_fact2);\n"
-                           "                %2_fact *= 1.0 - %2_jf / 16.0;\n"
-                           "                %2_col += %2_fact.xxx;\n"
-                           "                %2_col2 += %2_fact2 * BO3BeginnerPencilColHT(%2_pos3, %5);\n"
-                           "                %2_sum += %2_fact2;\n"
-                           "            }\n"
-                           "        }\n"
-                           "    }\n"
-                           "    %2_col /= (16.0 * 3.0) * 0.75 / max(sqrt(%2_rt.y), 1.0);\n"
-                           "    %2_col2 /= max(%2_sum, 1e-4);\n"
-                           "    float %2_graphiteNoise = (BO3BeginnerPencilRand(%2_pos * 0.7).x - 0.5) * (0.22 * saturate(%5));\n"
-                           "    %2_col.x *= 0.86 + %2_graphiteNoise;\n"
-                           "    %2_col.x = 1.0 - %2_col.x;\n"
-                           "    %2_col.x *= %2_col.x * %2_col.x;\n"
-                           "    float2 %2_s = sin(%2_pos * 0.1 / max(sqrt(%2_rt.y / 400.0), 0.01));\n"
-                           "    float3 %2_karo = 1.0.xxx;\n"
-                           "    float %2_paperLines = dot(exp(-%2_s * %2_s * 80.0), float2(1.0,1.0));\n"
-                           "    %2_karo -= (0.035 * saturate(%6) * %2_paperLines).xxx;\n"
-                           "    float %2_r = length(%2_pos - %2_rt * 0.5) / max(%2_rt.x, 1.0);\n"
-                           "    float %2_vign = saturate(1.0 - %2_r * %2_r * %2_r * %7);\n"
-                           "    float3 %2_pencil = saturate(%2_col.x * %2_col2 * %2_karo * %2_vign);\n"
-                           "    color = lerp(color, %2_pencil, %3);\n")
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%4, 0.25);\n"
+                           "    float2 %2_px = uv * %2_rt;\n"
+                           "    float3 %2_c = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, uv).rgb);\n"
+                           "    float3 %2_tl = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_texel.x,-%2_texel.y))).rgb);\n"
+                           "    float3 %2_t  = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,-%2_texel.y))).rgb);\n"
+                           "    float3 %2_tr = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,-%2_texel.y))).rgb);\n"
+                           "    float3 %2_l  = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_texel.x,0.0))).rgb);\n"
+                           "    float3 %2_r  = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
+                           "    float3 %2_bl = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_texel.x,%2_texel.y))).rgb);\n"
+                           "    float3 %2_b  = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,%2_texel.y))).rgb);\n"
+                           "    float3 %2_br = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,%2_texel.y))).rgb);\n"
+                           "    const float3 %2_lumaW = float3(0.2126,0.7152,0.0722);\n"
+                           "    float %2_lc  = dot(%2_c,%2_lumaW);\n"
+                           "    float %2_ltl = dot(%2_tl,%2_lumaW); float %2_lt = dot(%2_t,%2_lumaW); float %2_ltr = dot(%2_tr,%2_lumaW);\n"
+                           "    float %2_ll  = dot(%2_l,%2_lumaW);  float %2_lr = dot(%2_r,%2_lumaW);\n"
+                           "    float %2_lbl = dot(%2_bl,%2_lumaW); float %2_lb = dot(%2_b,%2_lumaW); float %2_lbr = dot(%2_br,%2_lumaW);\n"
+                           "    float %2_gx = (%2_ltr + 2.0*%2_lr + %2_lbr) - (%2_ltl + 2.0*%2_ll + %2_lbl);\n"
+                           "    float %2_gy = (%2_lbl + 2.0*%2_lb + %2_lbr) - (%2_ltl + 2.0*%2_lt + %2_ltr);\n"
+                           "    float %2_blur = (4.0*%2_lc + 2.0*(%2_ll+%2_lr+%2_lt+%2_lb) + %2_ltl+%2_ltr+%2_lbl+%2_lbr) / 16.0;\n"
+                           "    float %2_dog = abs(%2_lc - %2_blur);\n"
+                           "    float %2_edgeRaw = length(float2(%2_gx,%2_gy)) + %2_dog * 3.0;\n"
+                           "    float %2_edge = smoothstep(0.08,0.55,%2_edgeRaw);\n"
+                           "    float %2_shadow = saturate(1.0-%2_lc);\n"
+                           "    float %2_tone = pow(%2_shadow,1.5) * 0.22;\n"
+                           "    float %2_grainN = BO3BeginnerHash21(floor(%2_px*0.55)+17.0) - 0.5;\n"
+                           "    float %2_graphite = saturate(%2_edge*0.78 + %2_tone*0.35);\n"
+                           "    %2_graphite *= 1.0 + %2_grainN * (0.12*clamp(%5,0.0,1.5));\n"
+                           "    float %2_fiber = sin(%2_px.x*0.041 + sin(%2_px.y*0.017)*1.7) * 0.5 + 0.5;\n"
+                           "    float %2_paperNoise = (%2_grainN*0.010 + (%2_fiber-0.5)*0.008) * clamp(%6,0.0,1.5);\n"
+                           "    float3 %2_paper = float3(0.985,0.980,0.965) + %2_paperNoise.xxx;\n"
+                           "    float3 %2_pencil = saturate(%2_paper - %2_graphite * float3(0.86,0.87,0.89));\n"
+                           "    float2 %2_centered = (uv-0.5)*float2(%2_rt.x/max(%2_rt.y,1.0),1.0);\n"
+                           "    float %2_vign = saturate(1.0 - dot(%2_centered,%2_centered) * (0.16*clamp(%7,0.0,2.0)));\n"
+                           "    %2_pencil *= lerp(1.0,%2_vign,0.65);\n"
+                           "    color = lerp(color,%2_pencil,%3);\n")
                 .arg(definition->name, tag, strength, scale, grain, paper, vignette);
         }
         else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv && hasTime)
@@ -2192,58 +2183,6 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
 )HLSL");
     }
 
-    if(projectUsesEffect(project, "pencil_sketch"))
-    {
-        out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_PENCIL: hand-drawn pencil sketch adapted from the
-// user-supplied GLSL. The original camera movement is intentionally removed
-// so the BO3 effect stays stable on screen.
-float3 BO3BeginnerPencilRand(float2 pos)
-{
-    // The Shadertoy reference uses a random texture. A literal RGB hash here
-    // looks like colored TV static in BO3, so use one graphite-noise value for
-    // all channels. It preserves the paper breakup without tinting the sketch.
-    float n = BO3BeginnerHash21(pos * 0.013 + 1.37);
-    return n.xxx;
-}
-
-float3 BO3BeginnerPencilCol(float2 pos)
-{
-    float2 rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));
-    float2 uv = saturate(pos / rt);
-    float3 c1 = PostFx_NormalizeColor(frameBuffer.SampleLevel(bilinearClampler, uv, 0.0).rgb);
-    float d = saturate(dot(c1, float3(-0.5, 1.0, -0.5)));
-    float3 c2 = 0.7.xxx;
-    return min(lerp(c1, c2, 1.8 * d), 0.7.xxx);
-}
-
-float3 BO3BeginnerPencilColHT(float2 pos, float grainAmount)
-{
-    // Keep the random texture contribution subtle and centered around zero.
-    // This makes it read as graphite/paper grain instead of a layer of noise
-    // that hides the scene underneath the drawing.
-    float n = BO3BeginnerPencilRand(pos * 0.7).x - 0.5;
-    float3 base = BO3BeginnerPencilCol(pos) * 0.88 + 0.12.xxx;
-    float3 value = base + n.xxx * (0.18 * saturate(grainAmount));
-    return smoothstep(0.44.xxx, 0.78.xxx, value);
-}
-
-float BO3BeginnerPencilVal(float2 pos)
-{
-    float3 c = BO3BeginnerPencilCol(pos);
-    return pow(saturate(dot(c, 0.3333333.xxx)), 1.0);
-}
-
-float2 BO3BeginnerPencilGrad(float2 pos, float eps)
-{
-    float2 d = float2(eps, 0.0);
-    return float2(
-        BO3BeginnerPencilVal(pos + d.xy) - BO3BeginnerPencilVal(pos - d.xy),
-        BO3BeginnerPencilVal(pos + d.yx) - BO3BeginnerPencilVal(pos - d.yx)
-    ) / max(eps * 2.0, 1e-5);
-}
-)HLSL");
-    }
 
     if(projectUsesEffect(project, "ascii_depth"))
     {
@@ -3274,13 +3213,13 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
-        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like a hand-drawn pencil illustration with layered directional strokes, paper grain and vignette. Adapted from the user-supplied GLSL with its camera movement removed.", "Stylized Screen",
+        EffectDef("pencil_sketch", "Pencil Sketch", "Turn the BO3 frame into a clean graphite drawing using fast Sobel/detail lines, light tonal shading and subtle paper texture. The original GLSL camera movement is removed.", "Stylized Screen",
                   {Target::PostFx},
-                  {FloatParam("strength", "Strength", "How strongly the pencil drawing replaces the original scene.", 0.0, 1.0, 0.01, 0.94),
-                   FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes.", 0.25, 3.0, 0.01, 1.0),
-                   FloatParam("grain", "Graphite Grain", "Subtle monochrome graphite breakup. Higher values add texture without colored pixel noise.", 0.0, 1.5, 0.01, 0.32),
-                   FloatParam("paper", "Paper Texture", "Strength of the faint paper/crosshatch texture. This no longer obscures the drawing.", 0.0, 1.5, 0.01, 0.18),
-                   FloatParam("vignette", "Vignette", "Darken toward the edges for a framed sketchbook look.", 0.0, 2.0, 0.01, 0.45)}),
+                  {FloatParam("strength", "Strength", "How strongly the clean pencil drawing replaces the original scene.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("scale", "Line Detail", "Sampling radius for pencil outlines. Lower values preserve fine lines; higher values emphasize larger shapes.", 0.25, 3.0, 0.01, 0.8),
+                   FloatParam("grain", "Graphite Grain", "Subtle monochrome variation in the graphite itself, without covering the image in noise.", 0.0, 1.5, 0.01, 0.22),
+                   FloatParam("paper", "Paper Texture", "Very faint paper fibers behind the drawing.", 0.0, 1.5, 0.01, 0.12),
+                   FloatParam("vignette", "Vignette", "Gentle edge darkening for a sketchbook page. Keep low for a clean full-frame drawing.", 0.0, 2.0, 0.01, 0.18)}),
         // Keep the legacy id so existing projects that used Red Paint Splatter
         // transparently upgrade to the new Rain Drops implementation.
         EffectDef("red_paint_splatter", "Rain Drops", "Layer animated rain droplets, gravity streaks, glass refraction and soft wet blur over the scene. The cinematic zoom/lightning from the reference shader is intentionally omitted.", "Water & Weather",
