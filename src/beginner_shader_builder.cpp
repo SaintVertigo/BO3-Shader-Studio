@@ -1218,19 +1218,21 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "                %2_fact2 = abs(%2_fact2);\n"
                            "                %2_fact *= 1.0 - %2_jf / 16.0;\n"
                            "                %2_col += %2_fact.xxx;\n"
-                           "                %2_col2 += %2_fact2 * BO3BeginnerPencilColHT(%2_pos3);\n"
+                           "                %2_col2 += %2_fact2 * BO3BeginnerPencilColHT(%2_pos3, %5);\n"
                            "                %2_sum += %2_fact2;\n"
                            "            }\n"
                            "        }\n"
                            "    }\n"
                            "    %2_col /= (16.0 * 3.0) * 0.75 / max(sqrt(%2_rt.y), 1.0);\n"
                            "    %2_col2 /= max(%2_sum, 1e-4);\n"
-                           "    %2_col.x *= (0.6 + 0.8 * BO3BeginnerPencilRand(%2_pos * 0.7).x * %5);\n"
+                           "    float %2_graphiteNoise = (BO3BeginnerPencilRand(%2_pos * 0.7).x - 0.5) * (0.22 * saturate(%5));\n"
+                           "    %2_col.x *= 0.86 + %2_graphiteNoise;\n"
                            "    %2_col.x = 1.0 - %2_col.x;\n"
                            "    %2_col.x *= %2_col.x * %2_col.x;\n"
                            "    float2 %2_s = sin(%2_pos * 0.1 / max(sqrt(%2_rt.y / 400.0), 0.01));\n"
                            "    float3 %2_karo = 1.0.xxx;\n"
-                           "    %2_karo -= 0.5 * float3(0.25,0.10,0.10) * dot(exp(-%2_s * %2_s * 80.0), float2(1.0,1.0)) * %6;\n"
+                           "    float %2_paperLines = dot(exp(-%2_s * %2_s * 80.0), float2(1.0,1.0));\n"
+                           "    %2_karo -= (0.035 * saturate(%6) * %2_paperLines).xxx;\n"
                            "    float %2_r = length(%2_pos - %2_rt * 0.5) / max(%2_rt.x, 1.0);\n"
                            "    float %2_vign = saturate(1.0 - %2_r * %2_r * %2_r * %7);\n"
                            "    float3 %2_pencil = saturate(%2_col.x * %2_col2 * %2_karo * %2_vign);\n"
@@ -2198,10 +2200,11 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
 // so the BO3 effect stays stable on screen.
 float3 BO3BeginnerPencilRand(float2 pos)
 {
-    float n0 = BO3BeginnerHash21(pos * 0.013 + 1.37);
-    float n1 = BO3BeginnerHash21(pos.yx * 0.017 + 4.81);
-    float n2 = BO3BeginnerHash21((pos + 23.7) * 0.011);
-    return float3(n0, n1, n2);
+    // The Shadertoy reference uses a random texture. A literal RGB hash here
+    // looks like colored TV static in BO3, so use one graphite-noise value for
+    // all channels. It preserves the paper breakup without tinting the sketch.
+    float n = BO3BeginnerHash21(pos * 0.013 + 1.37);
+    return n.xxx;
 }
 
 float3 BO3BeginnerPencilCol(float2 pos)
@@ -2214,11 +2217,15 @@ float3 BO3BeginnerPencilCol(float2 pos)
     return min(lerp(c1, c2, 1.8 * d), 0.7.xxx);
 }
 
-float3 BO3BeginnerPencilColHT(float2 pos)
+float3 BO3BeginnerPencilColHT(float2 pos, float grainAmount)
 {
-    float3 noise = BO3BeginnerPencilRand(pos * 0.7);
-    return smoothstep(0.95.xxx, 1.05.xxx,
-                      BO3BeginnerPencilCol(pos) * 0.8 + 0.2.xxx + noise);
+    // Keep the random texture contribution subtle and centered around zero.
+    // This makes it read as graphite/paper grain instead of a layer of noise
+    // that hides the scene underneath the drawing.
+    float n = BO3BeginnerPencilRand(pos * 0.7).x - 0.5;
+    float3 base = BO3BeginnerPencilCol(pos) * 0.88 + 0.12.xxx;
+    float3 value = base + n.xxx * (0.18 * saturate(grainAmount));
+    return smoothstep(0.44.xxx, 0.78.xxx, value);
 }
 
 float BO3BeginnerPencilVal(float2 pos)
@@ -3271,9 +3278,9 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "How strongly the pencil drawing replaces the original scene.", 0.0, 1.0, 0.01, 0.94),
                    FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes.", 0.25, 3.0, 0.01, 1.0),
-                   FloatParam("grain", "Grain", "How much random paper/noise variation modulates the pencil strokes.", 0.0, 1.5, 0.01, 1.0),
-                   FloatParam("paper", "Paper Texture", "Strength of the subtle paper texture and crosshatch breakup.", 0.0, 1.5, 0.01, 1.0),
-                   FloatParam("vignette", "Vignette", "Darken toward the edges for a framed sketchbook look.", 0.0, 2.0, 0.01, 1.0)}),
+                   FloatParam("grain", "Graphite Grain", "Subtle monochrome graphite breakup. Higher values add texture without colored pixel noise.", 0.0, 1.5, 0.01, 0.32),
+                   FloatParam("paper", "Paper Texture", "Strength of the faint paper/crosshatch texture. This no longer obscures the drawing.", 0.0, 1.5, 0.01, 0.18),
+                   FloatParam("vignette", "Vignette", "Darken toward the edges for a framed sketchbook look.", 0.0, 2.0, 0.01, 0.45)}),
         // Keep the legacy id so existing projects that used Red Paint Splatter
         // transparently upgrade to the new Rain Drops implementation.
         EffectDef("red_paint_splatter", "Rain Drops", "Layer animated rain droplets, gravity streaks, glass refraction and soft wet blur over the scene. The cinematic zoom/lightning from the reference shader is intentionally omitted.", "Water & Weather",

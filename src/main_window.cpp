@@ -15195,6 +15195,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         root->addWidget(help);
 
         auto* search = new QLineEdit();
+        search->setObjectName("BeginnerEffectSearch");
         search->setPlaceholderText("Search effects... e.g. glow, grain, ripple, color");
         search->setClearButtonEnabled(true);
         search->setText(savedSearch);
@@ -16354,7 +16355,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         previewSettingsToggleButton_->setMinimumWidth(92);
         previewSettingsToggleButton_->setObjectName("PreviewSettingsToggle");
         previewSettingsToggleButton_->setCheckable(true);
-        previewSettingsToggleButton_->setChecked(true);
+        // Preview Settings should never pop open just because Shader Studio was
+        // launched. The user can open it explicitly from the toolbar/View menu.
+        previewSettingsToggleButton_->setChecked(false);
         previewSettingsToggleButton_->setToolTip("Show or hide Preview Settings.");
         cameraInfo_ = new QLabel("2D preview");
         cameraInfo_->setMinimumWidth(90); cameraInfo_->setMaximumWidth(320); cameraInfo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -16504,7 +16507,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         settingsScroll->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Maximum);
         previewSettingsPanel_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         previewSettingsScroll_ = settingsScroll;
-        settingsScroll->setVisible(true);
+        settingsScroll->setVisible(false);
 
         // IMPORTANT: do not parent the floating inspector into the same widget
         // hierarchy as the Direct3D preview. D3DPreviewWidget owns a native
@@ -16747,7 +16750,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         viewMenu->addSeparator();
         auto* previewSettingsViewAction = viewMenu->addAction("Preview Settings");
         previewSettingsViewAction->setCheckable(true);
-        previewSettingsViewAction->setChecked(true);
+        previewSettingsViewAction->setChecked(false);
         connect(previewSettingsViewAction, &QAction::toggled, this, [this](bool visible){
             if(previewSettingsToggleButton_) previewSettingsToggleButton_->setChecked(visible);
         });
@@ -17978,6 +17981,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QToolButton:pressed, QPushButton:pressed { background:%9; color:#FFFFFF; }
             QToolButton:disabled, QPushButton:disabled { background:%3; color:%10; border-color:%6; }
             QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QKeySequenceEdit { background:%3; color:%7; border:1px solid %6; border-radius:4px; padding:4px 6px; min-height:20px; }
+            QLineEdit#BeginnerEffectSearch { padding-right:24px; }
+            QLineEdit#BeginnerEffectSearch QToolButton { background:transparent; border:0; padding:0; margin:0; min-width:16px; max-width:16px; min-height:16px; max-height:16px; }
+            QLineEdit#BeginnerEffectSearch QToolButton:hover { background:%5; border-radius:3px; }
             QComboBox::drop-down { border:0; width:20px; }
             QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTableWidget { background:%8; color:%7; border-color:%6; selection-background-color:%9; selection-color:#FFFFFF; }
             QDockWidget { titlebar-close-icon:url(); titlebar-normal-icon:url(); }
