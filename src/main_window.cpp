@@ -1716,10 +1716,28 @@ public:
             const QString plainMaterialTechset = makeMaterialTechset(
                 plainExportedMaterial, QStringLiteral("shaders\\beginner_material_plain.hlsl"), {}, 0,
                 bo3::PackageConfiguration::Runtime);
-            if(!plainMaterialTechset.contains("category = \"Geometry Custom\"") ||
-               !plainMaterialTechset.contains("renderFlags = \"lit deferred opaque\"") ||
-               !plainMaterialTechset.contains("Technique( \"gbuffer\" )"))
-                return "Ordinary Beginner Material did not serialize the deferred Geometry Custom contract.";
+            // Validate the serialized structure semantically. The writer emits
+            // canonical Technique("gbuffer") syntax without cosmetic spaces,
+            // so string-matching the old hand-written formatting would turn a
+            // correct Geometry Custom package into a false regression failure.
+            bo3::TechsetParseOptions plainMaterialParseOptions;
+            plainMaterialParseOptions.configuration = bo3::PackageConfiguration::Runtime;
+            const bo3::TechsetParseResult plainMaterialParsed = bo3::parseTechset(
+                plainMaterialTechset, QStringLiteral("beginner_material_plain.techsetdef"),
+                plainMaterialParseOptions);
+            if(plainMaterialParsed.validation.hasErrors())
+                return "Ordinary Beginner Material deferred techset failed to parse after serialization: " +
+                       plainMaterialParsed.validation.toText();
+            if(plainMaterialParsed.model.globals.category.compare(
+                   QStringLiteral("Geometry Custom"), Qt::CaseInsensitive) != 0 ||
+               plainMaterialParsed.model.globals.renderFlagsText.compare(
+                   QStringLiteral("lit deferred opaque"), Qt::CaseInsensitive) != 0)
+                return "Ordinary Beginner Material did not preserve the deferred Geometry Custom globals.";
+            const bo3::TechniqueResolutionResult plainMaterialGbuffer =
+                bo3::resolveTechnique(plainMaterialParsed.model, QStringLiteral("gbuffer"));
+            if(!plainMaterialGbuffer.found)
+                return "Ordinary Beginner Material did not serialize a resolvable gbuffer technique: " +
+                       plainMaterialGbuffer.validation.toText();
 
             // Keep this techset-binding regression focused on SSR itself. The
             // coverage material above intentionally stacks every Material effect,
