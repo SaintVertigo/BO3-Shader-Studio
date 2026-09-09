@@ -432,30 +432,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             out += QString("    // %1 - Float-Z world silhouettes + explicit viewmodel/world/everything targeting\n"
                            "    float3 %2_baseColor = color;\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
-                           "    float2 %2_diag = %2_texel * 0.75;\n"
                            "    float %2_centerRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
                            "    float %2_targetMask = BO3BeginnerTargetMask(%2_centerRaw, %4);\n"
-                           "    float %2_dC = BO3BeginnerSampleWorldDepth(uv);\n"
-                           "    float %2_dL = BO3BeginnerSampleWorldDepth(uv - float2(%2_diag.x,0.0));\n"
-                           "    float %2_dR = BO3BeginnerSampleWorldDepth(uv + float2(%2_diag.x,0.0));\n"
-                           "    float %2_dU = BO3BeginnerSampleWorldDepth(uv - float2(0.0,%2_diag.y));\n"
-                           "    float %2_dD = BO3BeginnerSampleWorldDepth(uv + float2(0.0,%2_diag.y));\n"
-                           "    float %2_validX = step(0.0001,%2_dC) * step(0.0001,%2_dL) * step(0.0001,%2_dR);\n"
-                           "    float %2_validY = step(0.0001,%2_dC) * step(0.0001,%2_dU) * step(0.0001,%2_dD);\n"
-                           "    float %2_logC = log2(max(%2_dC,1.0));\n"
-                           "    float %2_logL = log2(max(%2_dL,1.0)); float %2_logR = log2(max(%2_dR,1.0));\n"
-                           "    float %2_logU = log2(max(%2_dU,1.0)); float %2_logD = log2(max(%2_dD,1.0));\n"
-                           "    float %2_curveX = abs((%2_logR-%2_logC)-(%2_logC-%2_logL));\n"
-                           "    float %2_curveY = abs((%2_logD-%2_logC)-(%2_logC-%2_logU));\n"
-                           "    float %2_depthMagnitude = max(%2_curveX*%2_validX, %2_curveY*%2_validY);\n"
-                           "    float %2_depthThreshold = max(0.0008, %5 * 0.0008);\n"
-                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.72, %2_depthThreshold * 1.55, %2_depthMagnitude);\n"
-                           "    float %2_vm = BO3BeginnerViewmodelMask(%2_centerRaw);\n"
-                           "    float %2_vmL = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(%2_texel.x,0.0)));\n"
-                           "    float %2_vmR = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(%2_texel.x,0.0)));\n"
-                           "    float %2_vmU = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(0.0,%2_texel.y)));\n"
-                           "    float %2_vmD = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(0.0,%2_texel.y)));\n"
-                           "    float %2_vmBoundary = max(max(abs(%2_vm-%2_vmL),abs(%2_vm-%2_vmR)),max(abs(%2_vm-%2_vmU),abs(%2_vm-%2_vmD)));\n"
+                           "    float %2_depthEdge = BO3BeginnerDepthGeometryEdge(uv, max(%3 * 0.75, 0.5), %5);\n"
+                           "    float %2_vmBoundary = BO3BeginnerViewmodelBoundary(uv, max(%3, 0.5));\n"
                            "    float3 %2_sceneL = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(0.0,%2_texel.y))).rgb);\n"
@@ -1265,6 +1245,64 @@ float BO3BeginnerViewmodelMask(float rawDepth)
     return step(BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT, rawDepth);
 }
 
+// Depth silhouettes must ignore the ordinary perspective slope of a surface.
+// Compare the change in the log-depth derivative on opposite sides of the
+// pixel instead of treating every first-order depth change as a line. The
+// threshold is intentionally much larger than the 14-bit ground-truth capture
+// quantization step, which prevents smooth floors/walls from turning into
+// horizontal bands while preserving real object discontinuities.
+float BO3BeginnerDepthGeometryEdge(float2 uv, float pixelRadius, float thresholdControl)
+{
+    float2 texel = PostFx_GetRenderTargetSize().zw * max(pixelRadius, 0.5);
+
+    float rawC = BO3BeginnerSampleRawDepthPoint(uv);
+    float rawL = BO3BeginnerSampleRawDepthPoint(uv - float2(texel.x, 0.0));
+    float rawR = BO3BeginnerSampleRawDepthPoint(uv + float2(texel.x, 0.0));
+    float rawU = BO3BeginnerSampleRawDepthPoint(uv - float2(0.0, texel.y));
+    float rawD = BO3BeginnerSampleRawDepthPoint(uv + float2(0.0, texel.y));
+
+    float worldC = 1.0 - BO3BeginnerViewmodelMask(rawC);
+    float worldL = 1.0 - BO3BeginnerViewmodelMask(rawL);
+    float worldR = 1.0 - BO3BeginnerViewmodelMask(rawR);
+    float worldU = 1.0 - BO3BeginnerViewmodelMask(rawU);
+    float worldD = 1.0 - BO3BeginnerViewmodelMask(rawD);
+
+    float dC = BO3BeginnerLinearDepth(min(rawC, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float dL = BO3BeginnerLinearDepth(min(rawL, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float dR = BO3BeginnerLinearDepth(min(rawR, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float dU = BO3BeginnerLinearDepth(min(rawU, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float dD = BO3BeginnerLinearDepth(min(rawD, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+
+    float logC = log2(max(dC, 1.0));
+    float logL = log2(max(dL, 1.0));
+    float logR = log2(max(dR, 1.0));
+    float logU = log2(max(dU, 1.0));
+    float logD = log2(max(dD, 1.0));
+
+    float validX = worldC * worldL * worldR;
+    float validY = worldC * worldU * worldD;
+    float curveX = abs((logR - logC) - (logC - logL)) * validX;
+    float curveY = abs((logD - logC) - (logC - logU)) * validY;
+    float curvature = max(curveX, curveY);
+
+    // Beginner Depth Threshold 0.5..12 maps to a relative/log-depth curvature
+    // threshold of roughly 1.5%..13%. The default 5.0 lands near 6%, which
+    // cleanly rejects the perspective slope visible across streets and floors.
+    float edgeThreshold = 0.010 + max(thresholdControl, 0.0) * 0.010;
+    return smoothstep(edgeThreshold * 0.80, edgeThreshold * 2.60, curvature);
+}
+
+float BO3BeginnerViewmodelBoundary(float2 uv, float pixelRadius)
+{
+    float2 texel = PostFx_GetRenderTargetSize().zw * max(pixelRadius, 0.5);
+    float vm = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv));
+    float vmL = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(texel.x, 0.0)));
+    float vmR = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(texel.x, 0.0)));
+    float vmU = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(0.0, texel.y)));
+    float vmD = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(0.0, texel.y)));
+    return max(max(abs(vm - vmL), abs(vm - vmR)), max(abs(vm - vmU), abs(vm - vmD)));
+}
+
 float BO3BeginnerTargetMask(float rawDepth, float targetMode)
 {
     float viewmodel = BO3BeginnerViewmodelMask(rawDepth);
@@ -1581,26 +1619,12 @@ QString generatePostFx(const Project& project, bool forceSceneDepth = false)
     float beginnerDebugNorm = saturate((log2(max(beginnerDebugLinear, 0.001)) - 3.0) / 10.6) * beginnerDebugWorld;
     return float4(PostFx_DenormalizeColor(beginnerDebugNorm.xxx), 1.0);
 #elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 4
-    float2 beginnerDebugTexel = PostFx_GetRenderTargetSize().zw;
-    float beginnerDebugC = BO3BeginnerSampleRawDepthPoint(uv);
-    float beginnerDebugVM = BO3BeginnerViewmodelMask(beginnerDebugC);
-    float beginnerDebugCD = BO3BeginnerLinearDepth(min(beginnerDebugC, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
-    float beginnerDebugLRaw = BO3BeginnerSampleRawDepthPoint(uv-float2(beginnerDebugTexel.x,0));
-    float beginnerDebugRRaw = BO3BeginnerSampleRawDepthPoint(uv+float2(beginnerDebugTexel.x,0));
-    float beginnerDebugURaw = BO3BeginnerSampleRawDepthPoint(uv-float2(0,beginnerDebugTexel.y));
-    float beginnerDebugDRaw = BO3BeginnerSampleRawDepthPoint(uv+float2(0,beginnerDebugTexel.y));
-    float beginnerDebugVMEdge = max(max(abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugLRaw)),abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugRRaw))),max(abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugURaw)),abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugDRaw))));
-    float beginnerDebugLD = BO3BeginnerLinearDepth(min(beginnerDebugLRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
-    float beginnerDebugRD = BO3BeginnerLinearDepth(min(beginnerDebugRRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
-    float beginnerDebugUD = BO3BeginnerLinearDepth(min(beginnerDebugURaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
-    float beginnerDebugDD = BO3BeginnerLinearDepth(min(beginnerDebugDRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
-    float beginnerDebugLogC = log2(max(beginnerDebugCD,1.0));
-    float beginnerDebugLogL = log2(max(beginnerDebugLD,1.0)); float beginnerDebugLogR = log2(max(beginnerDebugRD,1.0));
-    float beginnerDebugLogU = log2(max(beginnerDebugUD,1.0)); float beginnerDebugLogD = log2(max(beginnerDebugDD,1.0));
-    float beginnerDebugCurveX = abs((beginnerDebugLogR-beginnerDebugLogC)-(beginnerDebugLogC-beginnerDebugLogL));
-    float beginnerDebugCurveY = abs((beginnerDebugLogD-beginnerDebugLogC)-(beginnerDebugLogC-beginnerDebugLogU));
-    float beginnerDebugCurvature = max(beginnerDebugCurveX, beginnerDebugCurveY);
-    float beginnerDebugEdge = max(smoothstep(0.002,0.012,beginnerDebugCurvature),beginnerDebugVMEdge);
+    // Use the exact same slope-rejecting detector as Cartoon Outlines. The
+    // default threshold (5.0) shows useful object silhouettes instead of every
+    // smooth perspective-depth change in the scene.
+    float beginnerDebugGeometryEdge = BO3BeginnerDepthGeometryEdge(uv, 1.0, 5.0);
+    float beginnerDebugVMEdge = BO3BeginnerViewmodelBoundary(uv, 1.0);
+    float beginnerDebugEdge = max(beginnerDebugGeometryEdge, beginnerDebugVMEdge);
     return float4(PostFx_DenormalizeColor(beginnerDebugEdge.xxx), 1.0);
 #elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 5
     float beginnerDebugMask = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv));
@@ -1947,8 +1971,8 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx},
                   {ColorParam("color", "Outline Color", "Color of the cartoon line work.", "#090909"),
                    FloatParam("strength", "Outline Strength", "How strongly the detected lines are drawn over the scene.", 0.0, 1.0, 0.01, 0.78),
-                   FloatParam("thickness", "Line Width", "Width of the diagonal depth samples in screen pixels.", 0.5, 6.0, 0.1, 1.5),
-                   FloatParam("depth_threshold", "Depth Threshold", "Higher values require a stronger Float-Z silhouette change before drawing a line.", 0.5, 12.0, 0.1, 5.0),
+                   FloatParam("thickness", "Line Width", "Screen-space sampling radius used to build the outline.", 0.5, 6.0, 0.1, 1.5),
+                   FloatParam("depth_threshold", "Depth Threshold", "Higher values ignore more shallow/smooth depth variation and keep only stronger geometry breaks.", 0.5, 12.0, 0.1, 5.0),
                    FloatParam("detail_edges", "Detail Edges", "Add line detail from scene luminance when depth alone is not enough.", 0.0, 1.0, 0.01, 0.14),
                    FloatParam("cel_amount", "Cel Shading", "How much luminance banding is mixed into the original scene. Zero keeps only the outlines.", 0.0, 1.0, 0.01, 0.08),
                    FloatParam("levels", "Toon Levels", "Number of brightness bands used when Cel Shading is above zero.", 2.0, 12.0, 1.0, 6.0)}),
@@ -2062,11 +2086,11 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("sky_sun", "Atmospheric Sun / Time", "Move the sun through a full day/night cycle. Its direction drives the sky color, twilight, horizon haze and a soft Rayleigh/Mie-inspired sun instead of a blown-out flat disc.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("color", "Sun Color", "Base daylight color of the sun. Sunrise and sunset warm it automatically.", "#FFF1D2"),
-                   ChoiceParam("control_mode", "Sun Control", "Time of Day follows a day/night arc. Manual Position lets you drag the sun directly in the Sky Editor.", {"Time of Day", "Manual Position"}, 0),
+                   ChoiceParam("control_mode", "Sun Control", "Time of Day follows a day/night arc. Manual Position lets you drag the sun in the 2D Sky Editor or Shift+drag it in the 3D Skybox.", {"Time of Day", "Manual Position"}, 0),
                    FloatParam("time_of_day", "Time of Day", "Move the sun through the day. 6 = sunrise, 12 = noon, 18 = sunset, 0/24 = midnight.", 0.0, 24.0, 0.05, 14.0),
                    FloatParam("azimuth", "Sun Path Direction", "Rotate the automatic day/night sun path around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
                    FloatParam("height", "Sun Arc Height", "Maximum elevation of the automatic sun at midday.", 0.20, 0.98, 0.01, 0.86),
-                   FloatParam("manual_azimuth", "Manual Horizontal", "Direct horizontal sun position used in Manual Position mode. Dragging the Sky Editor updates this value.", 0.0, 1.0, 0.001, 0.62),
+                   FloatParam("manual_azimuth", "Manual Horizontal", "Direct horizontal sun position used in Manual Position mode. Dragging the 2D Sky Editor or Shift+dragging the 3D Skybox updates this value.", 0.0, 1.0, 0.001, 0.62),
                    FloatParam("manual_elevation", "Manual Height", "Direct sun elevation used in Manual Position mode. -1 is below the horizon; +1 is overhead.", -0.98, 0.98, 0.001, 0.32),
                    FloatParam("size", "Disc Size", "Angular radius of the sun. Realistic values stay small.", 0.002, 0.030, 0.0005, 0.006),
                    FloatParam("softness", "Disc Softness", "Width of the sun-disc edge transition.", 0.0005, 0.012, 0.0005, 0.002),

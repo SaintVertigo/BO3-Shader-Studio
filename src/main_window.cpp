@@ -1546,6 +1546,8 @@ public:
                !postHlsl.contains("BO3BeginnerSampleRawDepthPoint") ||
                !postHlsl.contains("BO3BeginnerSampleWorldDepth") ||
                !postHlsl.contains("BO3BeginnerViewmodelMask") ||
+               !postHlsl.contains("BO3BeginnerDepthGeometryEdge") ||
+               !postHlsl.contains("BO3BeginnerViewmodelBoundary") ||
                !postHlsl.contains("BO3BeginnerTargetMask") ||
                !postHlsl.contains("BO3BeginnerSSAOPair") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
@@ -1555,6 +1557,11 @@ public:
             if(!postDepthDebugHlsl.contains("#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG 7") ||
                !postDepthDebugHlsl.contains("BO3BeginnerTargetMask"))
                 return "Beginner PostFX depth diagnostic preview generation is missing the Effect Mask path.";
+            const QString postDepthEdgesHlsl = beginner::generatePreviewHlsl(post, 4);
+            if(!postDepthEdgesHlsl.contains("#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG 4") ||
+               !postDepthEdgesHlsl.contains("BO3BeginnerDepthGeometryEdge(uv, 1.0, 5.0)") ||
+               !postDepthEdgesHlsl.contains("edgeThreshold = 0.010 + max(thresholdControl, 0.0) * 0.010"))
+                return "Beginner Depth Edges diagnostic is not using the slope-rejecting ground-truth Float-Z detector.";
 
             // Non-depth effects left on Everything must not acquire an unnecessary
             // Float-Z dependency. World/Viewmodel targeting is structural and adds
