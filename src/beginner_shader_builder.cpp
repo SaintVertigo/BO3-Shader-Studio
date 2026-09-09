@@ -1019,7 +1019,6 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                 .arg(definition->name, tag, colorLiteral(dry), colorLiteral(wet), coverage, scale, reflectivity, roughness);
         }
         else if(effect.typeId == "luminance_tint")
-        else if(effect.typeId == "luminance_tint")
         {
             const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
             const QColor highlightColor = parameterColor(effect, *definition, "highlight_color");
