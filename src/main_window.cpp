@@ -1588,7 +1588,6 @@ public:
                !postHlsl.contains("useSceneColor") ||
                !postHlsl.contains("edgeText") ||
                !postHlsl.contains("ASCII Art / Contours") ||
-               !postHlsl.contains("_, |, / or") ||
                !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
                !postHlsl.contains("Rain Drops") ||
                !postHlsl.contains("Shadertoy fragCoord space (Y-up)") ||
