@@ -5878,6 +5878,7 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         auto bindRuntimeSceneCodeTextures = [&](bo3::TechniqueModel& technique)
         {
             if(configuration != bo3::PackageConfiguration::Runtime) return;
+            bool boundSceneResource = false;
             for(const auto& texture : textures)
             {
                 const QString lower = texture.name.toLower();
@@ -5893,6 +5894,20 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 resource.valueKind = bo3::BindingValueKind::CodeTexture;
                 resource.valueName = codeTexture;
                 technique.pixelShader.resourceBindings << resource;
+                boundSceneResource = true;
+            }
+
+            // Stage-local bindings are serialized only for PixelShader() blocks.
+            // A plain ps = "ps_generic" assignment intentionally has no body, so
+            // attaching resolvedScene/floatZ bindings to that model silently drops
+            // them from the generated techset. Material SSR owns a real ps_main in
+            // shaderRel, therefore switch only the affected runtime techniques to
+            // an inline custom pixel stage and keep the stock generic VS unchanged.
+            if(boundSceneResource &&
+               technique.pixelShader.assignment == bo3::StageAssignmentKind::GenericName)
+            {
+                technique.pixelShader.assignment = bo3::StageAssignmentKind::InlineShader;
+                technique.pixelShader.genericName.clear();
             }
         };
 
