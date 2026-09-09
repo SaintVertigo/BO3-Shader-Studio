@@ -379,6 +379,87 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color += (%2_chroma - %2_chromaBase) * %4;\n")
                 .arg(definition->name, tag, amount, strength);
         }
+        else if(effect.typeId == "material_rust" && project.target == Target::Material)
+        {
+            const QColor rust=parameterColor(effect,*definition,"rust_color"); const QColor dark=parameterColor(effect,*definition,"dark_color");
+            const QString amount=parameterExpr(project,effect,*definition,"amount"), scale=parameterExpr(project,effect,*definition,"scale"), rough=parameterExpr(project,effect,*definition,"roughness");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%6)); float %2_p=BO3BeginnerValueNoise3(surfacePosition*(0.035*%6));\n    float %2_m=smoothstep(0.78-saturate(%5)*0.62,0.86-saturate(%5)*0.52,%2_n);\n    float3 %2_rust=lerp(%4,%3,saturate(%2_p*1.25))*(0.72+%2_n*0.38-%7*%2_p*0.16);\n    color=lerp(color,%2_rust,%2_m);\n").arg(definition->name,tag,colorLiteral(rust),colorLiteral(dark),amount,scale,rough);
+        }
+        else if(effect.typeId == "material_grime" && project.target == Target::Material)
+        {
+            const QColor grime=parameterColor(effect,*definition,"color"); const QString amount=parameterExpr(project,effect,*definition,"amount"), scale=parameterExpr(project,effect,*definition,"scale"), contrast=parameterExpr(project,effect,*definition,"contrast");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%5)); float %2_m=saturate((%2_n-(0.86-%4*0.66))*%6);\n    color=lerp(color,color*%3,%2_m*%4);\n").arg(definition->name,tag,colorLiteral(grime),amount,scale,contrast);
+        }
+        else if(effect.typeId == "material_scratches" && project.target == Target::Material)
+        {
+            const QColor sc=parameterColor(effect,*definition,"color"); const QString amount=parameterExpr(project,effect,*definition,"amount"), density=parameterExpr(project,effect,*definition,"density"), dir=parameterExpr(project,effect,*definition,"direction"), len=parameterExpr(project,effect,*definition,"length");
+            out += QString("    // %1\n    float2 %2_p=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*0.01; float %2_a=%6*6.2831853; float2 %2_d=float2(cos(%2_a),sin(%2_a)); float2 %2_q=float2(dot(%2_p,%2_d),dot(%2_p,float2(-%2_d.y,%2_d.x)));\n    float %2_line=pow(1.0-abs(sin(%2_q.y*%5*3.1415926)),18.0); float %2_seg=step(1.0-%7,BO3BeginnerHash31(float3(floor(%2_q.x*18.0),floor(%2_q.y*%5),3.7)));\n    float %2_m=saturate(%2_line*%2_seg*%4); color=lerp(color,%3,%2_m);\n").arg(definition->name,tag,colorLiteral(sc),amount,density,dir,len);
+        }
+        else if(effect.typeId == "material_dust" && project.target == Target::Material)
+        {
+            const QColor dust=parameterColor(effect,*definition,"color"); const QString amount=parameterExpr(project,effect,*definition,"amount"), scale=parameterExpr(project,effect,*definition,"scale"), upward=parameterExpr(project,effect,*definition,"upward");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%5)); float %2_up=lerp(1.0,saturate(surfaceNormal.z*0.5+0.5),%6); float %2_m=saturate(%4*%2_up*(0.55+%2_n*0.65)); color=lerp(color,%3,%2_m);\n").arg(definition->name,tag,colorLiteral(dust),amount,scale,upward);
+        }
+        else if(effect.typeId == "material_holographic" && project.target == Target::Material)
+        {
+            const QString strength=parameterExpr(project,effect,*definition,"strength"), bands=parameterExpr(project,effect,*definition,"bands"), scan=parameterExpr(project,effect,*definition,"scanlines"), speed=parameterExpr(project,effect,*definition,"speed");
+            out += QString("    // %1\n    float %2_v=1.0-saturate(dot(surfaceNormal,surfaceViewDir)); float %2_phase=%2_v*%4+t*%6+surfacePosition.z*0.013;\n    float3 %2_rainbow=0.55+0.45*cos(6.2831853*(%2_phase+float3(0.0,0.3333,0.6667))); float %2_scan=0.5+0.5*sin(surfacePosition.z*0.02*160.0+t*4.0);\n    %2_rainbow*=1.0+%5*(%2_scan-0.5)*0.35; color=lerp(color,color*0.24+%2_rainbow*0.95,%3);\n").arg(definition->name,tag,strength,bands,scan,speed);
+        }
+        else if(effect.typeId == "material_pulse_emissive" && project.target == Target::Material)
+        {
+            const QColor ec=parameterColor(effect,*definition,"color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), speed=parameterExpr(project,effect,*definition,"speed"), floor=parameterExpr(project,effect,*definition,"floor");
+            out += QString("    // %1\n    float %2_p=lerp(%6,1.0,0.5+0.5*sin(t*%5*6.2831853)); color+=%3*(%4*%2_p);\n").arg(definition->name,tag,colorLiteral(ec),strength,speed,floor);
+        }
+        else if(effect.typeId == "material_heat_energy" && project.target == Target::Material)
+        {
+            const QColor hot=parameterColor(effect,*definition,"hot_color"), core=parameterColor(effect,*definition,"core_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), speed=parameterExpr(project,effect,*definition,"speed"), distort=parameterExpr(project,effect,*definition,"distortion");
+            out += QString("    // %1\n    float3 %2_p=surfacePosition*(0.01*%6); float %2_n=BO3BeginnerFbm3(%2_p*1.7+t*%7*0.35); float %2_wave=0.5+0.5*sin((%2_p.z+%2_n*%8+t*%7)*6.2831853); float %2_core=pow(%2_wave,3.0);\n    color+=lerp(%4,%3,%2_core)*(%5*(0.22+%2_core*0.78));\n").arg(definition->name,tag,colorLiteral(hot),colorLiteral(core),strength,scale,speed,distort);
+        }
+        else if(effect.typeId == "material_forcefield" && project.target == Target::Material)
+        {
+            const QColor fc=parameterColor(effect,*definition,"color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), edge=parameterExpr(project,effect,*definition,"edge"), scale=parameterExpr(project,effect,*definition,"scale"), speed=parameterExpr(project,effect,*definition,"speed");
+            out += QString("    // %1\n    float2 %2_p=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%6); %2_p+=float2(t*%7*0.17,t*%7*0.09); float %2_hex=BO3BeginnerHexEdge(%2_p*float2(%6,%6*0.866)); float %2_rim=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),2.0)*%5;\n    color+=%3*(%4*(%2_hex*0.42+%2_rim));\n").arg(definition->name,tag,colorLiteral(fc),strength,edge,scale,speed);
+        }
+        else if(effect.typeId == "material_hex_panels" && project.target == Target::Material)
+        {
+            const QColor pc=parameterColor(effect,*definition,"panel_color"), sc=parameterColor(effect,*definition,"seam_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), seams=parameterExpr(project,effect,*definition,"seams");
+            out += QString("    // %1\n    float2 %2_p=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%6); float %2_cell=BO3BeginnerHexEdge(%2_p*float2(%6,%6*0.866)); float %2_seam=1.0-%2_cell; float3 %2_panel=%3*(0.82+BO3BeginnerValueNoise3(surfacePosition*0.08)*0.18); color=lerp(color,%2_panel,%5); color+=%4*(%2_seam*%7);\n").arg(definition->name,tag,colorLiteral(pc),colorLiteral(sc),strength,scale,seams);
+        }
+        else if(effect.typeId == "material_camouflage" && project.target == Target::Material)
+        {
+            const QColor a=parameterColor(effect,*definition,"color_a"), b=parameterColor(effect,*definition,"color_b"), c=parameterColor(effect,*definition,"color_c"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), soft=parameterExpr(project,effect,*definition,"softness");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%7)); float %2_s=max(%8*0.18,0.001); float %2_ab=smoothstep(0.36-%2_s,0.36+%2_s,%2_n); float %2_bc=smoothstep(0.67-%2_s,0.67+%2_s,%2_n); float3 %2_cam=lerp(%3,%4,%2_ab); %2_cam=lerp(%2_cam,%5,%2_bc); color=lerp(color,%2_cam,%6);\n").arg(definition->name,tag,colorLiteral(a),colorLiteral(b),colorLiteral(c),strength,scale,soft);
+        }
+        else if(effect.typeId == "material_carbon_fiber" && project.target == Target::Material)
+        {
+            const QColor base=parameterColor(effect,*definition,"base_color"), hi=parameterColor(effect,*definition,"highlight_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), shine=parameterExpr(project,effect,*definition,"shine");
+            out += QString("    // %1\n    float2 %2_p=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%6); float2 %2_g=frac(%2_p*%6); float %2_checker=step(1.0, fmod(floor(%2_p.x*%6)+floor(%2_p.y*%6),2.0)); float %2_thread=0.5+0.5*sin((%2_g.x+lerp(%2_g.y,-%2_g.y,%2_checker))*12.56637); float %2_rim=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),3.0); float3 %2_cf=lerp(%3,%4,%2_thread*0.42)+%2_rim*%7*0.18; color=lerp(color,%2_cf,%5);\n").arg(definition->name,tag,colorLiteral(base),colorLiteral(hi),strength,scale,shine);
+        }
+        else if(effect.typeId == "material_leather" && project.target == Target::Material)
+        {
+            const QColor lc=parameterColor(effect,*definition,"color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), grain=parameterExpr(project,effect,*definition,"grain"), scale=parameterExpr(project,effect,*definition,"scale"), polish=parameterExpr(project,effect,*definition,"polish");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%6)); float %2_pore=BO3BeginnerValueNoise3(surfacePosition*(0.055*%6)); float %2_rim=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),4.0); float3 %2_leather=%3*(0.72+%2_n*0.34-%5*(%2_pore-0.5)*0.18)+%2_rim*%7*0.10; color=lerp(color,%2_leather,%4);\n").arg(definition->name,tag,colorLiteral(lc),strength,grain,scale,polish);
+        }
+        else if(effect.typeId == "material_fabric" && project.target == Target::Material)
+        {
+            const QColor fc=parameterColor(effect,*definition,"color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), weave=parameterExpr(project,effect,*definition,"weave"), contrast=parameterExpr(project,effect,*definition,"contrast"), soft=parameterExpr(project,effect,*definition,"softness");
+            out += QString("    // %1\n    float2 %2_p=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%5); float2 %2_w=sin(%2_p*%5*6.2831853); float %2_thread=(%2_w.x*%2_w.y)*0.5+0.5; %2_thread=lerp(%2_thread,0.5,%7); float3 %2_fabric=%3*(1.0+(%2_thread-0.5)*%6); color=lerp(color,%2_fabric,%4);\n").arg(definition->name,tag,colorLiteral(fc),strength,weave,contrast,soft);
+        }
+        else if(effect.typeId == "material_wood" && project.target == Target::Material)
+        {
+            const QColor light=parameterColor(effect,*definition,"light_color"), dark=parameterColor(effect,*definition,"dark_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), warp=parameterExpr(project,effect,*definition,"warp");
+            out += QString("    // %1\n    float3 %2_p=surfacePosition*0.01; float %2_n=BO3BeginnerFbm3(%2_p*%6); float %2_ring=0.5+0.5*sin((length(%2_p.xy)+%2_n*%7)*%6*6.2831853); float %2_grain=0.5+0.5*sin((%2_p.z*%6*2.1+%2_n*3.0)*6.2831853); float %2_mix=saturate(%2_ring*0.72+%2_grain*0.28); color=lerp(color,lerp(%4,%3,%2_mix),%5);\n").arg(definition->name,tag,colorLiteral(light),colorLiteral(dark),strength,scale,warp);
+        }
+        else if(effect.typeId == "material_marble" && project.target == Target::Material)
+        {
+            const QColor base=parameterColor(effect,*definition,"base_color"), vein=parameterColor(effect,*definition,"vein_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), warp=parameterExpr(project,effect,*definition,"warp"), width=parameterExpr(project,effect,*definition,"width");
+            out += QString("    // %1\n    float3 %2_p=surfacePosition*(0.01*%6); float %2_n=BO3BeginnerFbm3(%2_p); float %2_wave=abs(sin((%2_p.x+%2_p.z*0.37+%2_n*%7)*6.2831853)); float %2_vein=1.0-smoothstep(%8,min(%8+0.18,0.98),%2_wave); float3 %2_marble=lerp(%3,%4,%2_vein); color=lerp(color,%2_marble,%5);\n").arg(definition->name,tag,colorLiteral(base),colorLiteral(vein),strength,scale,warp,width);
+        }
+        else if(effect.typeId == "material_stone" && project.target == Target::Material)
+        {
+            const QColor base=parameterColor(effect,*definition,"base_color"), speck=parameterColor(effect,*definition,"speck_color"); const QString strength=parameterExpr(project,effect,*definition,"strength"), scale=parameterExpr(project,effect,*definition,"scale"), speckles=parameterExpr(project,effect,*definition,"speckles"), contrast=parameterExpr(project,effect,*definition,"contrast");
+            out += QString("    // %1\n    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%6)); float %2_hi=BO3BeginnerValueNoise3(surfacePosition*(0.08*%6)); float %2_sp=step(1.0-saturate(%7)*0.16,%2_hi); float %2_t=saturate(0.5+(%2_n-0.5)*(1.0+%8)); float3 %2_stone=%3*(0.72+%2_t*0.42); %2_stone=lerp(%2_stone,%4,%2_sp); color=lerp(color,%2_stone,%5);\n").arg(definition->name,tag,colorLiteral(base),colorLiteral(speck),strength,scale,speckles,contrast);
+        }
         else if(effect.typeId == "edge_glow" && project.target == Target::Material)
         {
             const QColor glowColor = parameterColor(effect, *definition, "color");
@@ -747,24 +828,223 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QColor tint = parameterColor(effect, *definition, "tint");
             out += QString("    // %1 - material SSR uses the authored surface normal; preview uses the studio environment only\n"
                            "    float %2_surfaceFresnel = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.0, 1.0, saturate(%8)));\n"
-                           "#ifdef BO3_SHADER_STUDIO_MATERIAL_PREVIEW\n"
-                           "    float3 %2_previewReflectionDir = normalize(reflect(-surfaceViewDir, surfaceNormal));\n"
-                           "    float2 %2_previewEnvUv = BO3BeginnerMaterialPreviewEnvironmentUv(%2_previewReflectionDir);\n"
-                           "    float %2_previewBlur = %7 * %7 * 0.035;\n"
-                           "    float3 %2_previewReflection = frameBuffer.Sample(bilinearClampler, %2_previewEnvUv).rgb * 0.52;\n"
-                           "    %2_previewReflection += frameBuffer.Sample(bilinearClampler, %2_previewEnvUv + float2(%2_previewBlur,0.0)).rgb * 0.12;\n"
-                           "    %2_previewReflection += frameBuffer.Sample(bilinearClampler, %2_previewEnvUv - float2(%2_previewBlur,0.0)).rgb * 0.12;\n"
-                           "    %2_previewReflection += frameBuffer.Sample(bilinearClampler, %2_previewEnvUv + float2(0.0,%2_previewBlur*0.5)).rgb * 0.12;\n"
-                           "    %2_previewReflection += frameBuffer.Sample(bilinearClampler, %2_previewEnvUv - float2(0.0,%2_previewBlur*0.5)).rgb * 0.12;\n"
-                           "    float %2_previewBlend = saturate(%3 * lerp(0.42, 1.0, %2_surfaceFresnel));\n"
-                           "    color = lerp(color, %2_previewReflection * %9, %2_previewBlend);\n"
-                           "#else\n"
-                           "    float4 %2_trace = BO3BeginnerMaterialSSRTrace(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %4, %6, %5, %7);\n"
+                           "    float4 %2_trace = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %4, %6, %5, %7);\n"
                            "    float %2_blend = saturate(%2_trace.a * %3 * lerp(0.35, 1.0, %2_surfaceFresnel));\n"
-                           "    float3 %2_reflection = %2_trace.rgb * %9;\n"
-                           "    color = lerp(color, %2_reflection, %2_blend);\n"
-                           "#endif\n")
+                           "    color = lerp(color, %2_trace.rgb * %9, %2_blend);\n")
                 .arg(definition->name, tag, strength, maxDistance, steps, thickness, roughness, fresnel, colorLiteral(tint));
+        }
+        else if(effect.typeId == "material_mirror" && project.target == Target::Material)
+        {
+            const QColor tint = parameterColor(effect, *definition, "tint");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            out += QString("    // %1 - near-perfect material mirror using the same live scene trace as SSR\n"
+                           "    float4 %2_mirrorTrace = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %4, %6, %5, 0.0);\n"
+                           "    float %2_mirrorF = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), 3.5);\n"
+                           "    float %2_mirrorBlend = saturate(%2_mirrorTrace.a * %3 * lerp(1.0, 1.0 + %7 * 0.20, %2_mirrorF));\n"
+                           "    float3 %2_mirrorColor = %2_mirrorTrace.rgb * %8;\n"
+                           "    color = lerp(color * 0.05, %2_mirrorColor, %2_mirrorBlend);\n")
+                .arg(definition->name, tag, strength, maxDistance, steps, thickness, fresnel, colorLiteral(tint));
+        }
+        else if(effect.typeId == "material_wet_surface" && project.target == Target::Material)
+        {
+            const QString wetness = parameterExpr(project, effect, *definition, "wetness");
+            const QString darkening = parameterExpr(project, effect, *definition, "darkening");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            out += QString("    // %1\n"
+                           "    float %2_wet = saturate(%3);\n"
+                           "    color *= 1.0 - %2_wet * %4;\n"
+                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.0,1.2,saturate(%6)));\n"
+                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %7, %9, %8, %5);\n"
+                           "    float %2_b = saturate(%2_r.a * %2_wet * lerp(0.32,1.0,%2_f));\n"
+                           "    color = lerp(color, %2_r.rgb, %2_b);\n")
+                .arg(definition->name, tag, wetness, darkening, roughness, fresnel, maxDistance, steps, thickness);
+        }
+        else if(effect.typeId == "material_clear_coat" && project.target == Target::Material)
+        {
+            const QString coat = parameterExpr(project, effect, *definition, "coat");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            out += QString("    // %1\n"
+                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.5,1.1,saturate(%5)));\n"
+                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %6, %8, %7, %4);\n"
+                           "    float %2_b = saturate(%2_r.a * %3 * lerp(0.12,0.88,%2_f));\n"
+                           "    color = lerp(color, %2_r.rgb, %2_b);\n"
+                           "    color += %2_f.xxx * (%3 * 0.08);\n")
+                .arg(definition->name, tag, coat, roughness, fresnel, maxDistance, steps, thickness);
+        }
+        else if(effect.typeId == "material_chrome" && project.target == Target::Material)
+        {
+            const QColor tint = parameterColor(effect, *definition, "tint");
+            const QString reflectivity = parameterExpr(project, effect, *definition, "reflectivity");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            out += QString("    // %1\n"
+                           "    float %2_f = pow(1.0 - saturate(dot(surfaceNormal,surfaceViewDir)), lerp(4.5,1.0,saturate(%6)));\n"
+                           "    float4 %2_r = BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz, surfaceNormal, surfaceViewDir, %7, %9, %8, %5);\n"
+                           "    float3 %2_metalBase = lerp(color * 0.18, %3 * max(dot(surfaceNormal, normalize(float3(0.35,0.75,0.55))),0.0), 0.42);\n"
+                           "    float %2_b = saturate(%2_r.a * %4 * lerp(0.68,1.0,%2_f));\n"
+                           "    color = lerp(%2_metalBase, %2_r.rgb * %3, %2_b);\n")
+                .arg(definition->name, tag, colorLiteral(tint), reflectivity, roughness, fresnel, maxDistance, steps, thickness);
+        }
+        else if(effect.typeId == "material_metallic" && project.target == Target::Material)
+        {
+            const QColor tint = parameterColor(effect, *definition, "metal_tint");
+            const QString metalness = parameterExpr(project, effect, *definition, "metalness");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString contrast = parameterExpr(project, effect, *definition, "contrast");
+            out += QString("    // %1\n"
+                           "    float %2_ndv = saturate(dot(surfaceNormal, surfaceViewDir));\n"
+                           "    float %2_spec = pow(1.0-%2_ndv, lerp(1.0,6.0,saturate(%5)));\n"
+                           "    float %2_light = saturate(dot(surfaceNormal, normalize(float3(0.33,0.77,0.54))) * 0.5 + 0.5);\n"
+                           "    %2_light = saturate((%2_light-0.5)*%6+0.5);\n"
+                           "    float3 %2_metal = %3 * (0.20 + %2_light*0.72 + %2_spec*0.35);\n"
+                           "    color = lerp(color, color*0.25 + %2_metal*0.75, %4);\n")
+                .arg(definition->name, tag, colorLiteral(tint), metalness, roughness, contrast);
+        }
+        else if(effect.typeId == "material_brushed_metal" && project.target == Target::Material)
+        {
+            const QColor tint = parameterColor(effect, *definition, "tint");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString density = parameterExpr(project, effect, *definition, "density");
+            const QString direction = parameterExpr(project, effect, *definition, "direction");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            out += QString("    // %1\n"
+                           "    float2 %2_p = BO3BeginnerMaterialPlanar(surfacePosition, surfaceNormal) * 0.01;\n"
+                           "    float %2_a = %6 * 6.2831853; float2 %2_dir = float2(cos(%2_a),sin(%2_a));\n"
+                           "    float %2_brush = 0.5 + 0.5*sin(dot(%2_p,%2_dir)*%5*6.2831853 + BO3BeginnerValueNoise3(surfacePosition*0.045)*4.0);\n"
+                           "    %2_brush = lerp(0.72,1.18,pow(abs(%2_brush*2.0-1.0), lerp(0.6,2.4,%7)));\n"
+                           "    float %2_spec = pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)), lerp(2.0,7.0,%7));\n"
+                           "    float3 %2_metal = %3 * %2_brush + %2_spec.xxx*0.22;\n"
+                           "    color = lerp(color, %2_metal, %4);\n")
+                .arg(definition->name, tag, colorLiteral(tint), strength, density, direction, roughness);
+        }
+        else if(effect.typeId == "material_painted_metal" && project.target == Target::Material)
+        {
+            const QColor paint = parameterColor(effect, *definition, "paint_color");
+            const QColor metal = parameterColor(effect, *definition, "metal_color");
+            const QString coverage = parameterExpr(project, effect, *definition, "paint");
+            const QString chips = parameterExpr(project, effect, *definition, "chips");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString shine = parameterExpr(project, effect, *definition, "shine");
+            out += QString("    // %1\n"
+                           "    float %2_n = BO3BeginnerFbm3(surfacePosition * (0.01 * %7));\n"
+                           "    float %2_chip = smoothstep(0.42+%5*0.38, 0.50+%5*0.30, %2_n);\n"
+                           "    float %2_paintMask = saturate(%4 * (1.0-%2_chip));\n"
+                           "    float %2_rim = pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),3.0);\n"
+                           "    float3 %2_metal = %3 * (0.58 + %8*0.22 + %2_rim*%8*0.34);\n"
+                           "    color = lerp(%2_metal, %6 * (0.82+%2_n*0.18), %2_paintMask);\n")
+                .arg(definition->name, tag, colorLiteral(metal), coverage, chips, colorLiteral(paint), scale, shine);
+        }
+        else if(effect.typeId == "material_iridescent" && project.target == Target::Material)
+        {
+            const QColor a = parameterColor(effect, *definition, "color_a");
+            const QColor b = parameterColor(effect, *definition, "color_b");
+            const QColor c = parameterColor(effect, *definition, "color_c");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString bands = parameterExpr(project, effect, *definition, "bands");
+            out += QString("    // %1\n"
+                           "    float %2_angle = 1.0-saturate(dot(surfaceNormal,surfaceViewDir));\n"
+                           "    float %2_phase = frac(%2_angle*%7);\n"
+                           "    float3 %2_ab = lerp(%3,%4,smoothstep(0.0,0.5,min(%2_phase*2.0,1.0)));\n"
+                           "    float3 %2_bc = lerp(%4,%5,smoothstep(0.5,1.0,%2_phase));\n"
+                           "    float3 %2_film = lerp(%2_ab,%2_bc,step(0.5,%2_phase));\n"
+                           "    color = lerp(color, color*0.35 + %2_film*0.85, %6);\n")
+                .arg(definition->name, tag, colorLiteral(a), colorLiteral(b), colorLiteral(c), strength, bands);
+        }
+        else if(effect.typeId == "material_frosted_glass" && project.target == Target::Material)
+        {
+            const QColor tint = parameterColor(effect, *definition, "tint");
+            const QString opacity = parameterExpr(project, effect, *definition, "opacity");
+            const QString blur = parameterExpr(project, effect, *definition, "blur");
+            const QString distortion = parameterExpr(project, effect, *definition, "distortion");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            out += QString("    // %1 - screen-sampled frosted glass approximation\n"
+                           "    float2 %2_uv = BO3BeginnerMaterialSSRProjectUv(input.worldPosition.xyz);\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
+                           "    float2 %2_refract = surfaceNormal.xy * %6 * %2_texel * 7.0;\n"
+                           "    %2_uv = saturate(%2_uv + %2_refract);\n"
+                           "    float2 %2_bx = float2(%2_texel.x*%5,0); float2 %2_by=float2(0,%2_texel.y*%5);\n"
+                           "    float3 %2_bg = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,%2_uv).rgb)*0.44;\n"
+                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv+%2_bx)).rgb)*0.14;\n"
+                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv-%2_bx)).rgb)*0.14;\n"
+                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv+%2_by)).rgb)*0.14;\n"
+                           "    %2_bg += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler,saturate(%2_uv-%2_by)).rgb)*0.14;\n"
+                           "    float %2_f=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),lerp(5.0,1.2,%7));\n"
+                           "    float3 %2_glass=lerp(%2_bg*%3,%3,0.13+%2_f*0.15);\n"
+                           "    color=lerp(color,%2_glass,saturate(%4));\n")
+                .arg(definition->name, tag, colorLiteral(tint), opacity, blur, distortion, fresnel);
+        }
+        else if(effect.typeId == "material_ice" && project.target == Target::Material)
+        {
+            const QColor ice = parameterColor(effect, *definition, "ice_color");
+            const QColor crack = parameterColor(effect, *definition, "crack_color");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString cracks = parameterExpr(project, effect, *definition, "cracks");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            out += QString("    // %1\n"
+                           "    float3 %2_p=surfacePosition*(0.01*%7); float %2_n=BO3BeginnerFbm3(%2_p);\n"
+                           "    float %2_v=abs(frac((%2_n+dot(%2_p,float3(0.31,0.57,0.23)))*5.0)-0.5)*2.0;\n"
+                           "    float %2_cr=smoothstep(0.82,0.98,%2_v)*%6;\n"
+                           "    float %2_f=pow(1.0-saturate(dot(surfaceNormal,surfaceViewDir)),2.2)*%8;\n"
+                           "    float3 %2_ice=%3*(0.58+%2_n*0.30)+%4*%2_cr+%3*%2_f;\n"
+                           "    color=lerp(color,%2_ice,%5);\n")
+                .arg(definition->name, tag, colorLiteral(ice), colorLiteral(crack), strength, cracks, scale, fresnel);
+        }
+        else if(effect.typeId == "material_water_surface" && project.target == Target::Material)
+        {
+            const QColor water = parameterColor(effect, *definition, "water_color");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString ripples = parameterExpr(project, effect, *definition, "ripples");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            out += QString("    // %1\n"
+                           "    float2 %2_wp=BO3BeginnerMaterialPlanar(surfacePosition,surfaceNormal)*(0.01*%6);\n"
+                           "    float2 %2_wave=float2(sin((%2_wp.x+t*%7)*6.2831853)+cos((%2_wp.y-t*%7*0.73)*6.2831853), cos((%2_wp.y+t*%7*0.61)*6.2831853)+sin((%2_wp.x-t*%7*0.47)*6.2831853));\n"
+                           "    float3 %2_n=normalize(surfaceNormal+float3(%2_wave.x,%2_wave.y,0.0)*(%5*0.16));\n"
+                           "    float %2_f=pow(1.0-saturate(dot(%2_n,surfaceViewDir)),2.6);\n"
+                           "    float4 %2_r=BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz,%2_n,surfaceViewDir,%9,%11,%10,%8);\n"
+                           "    float3 %2_body=%3*(0.38+0.30*saturate(dot(%2_n,normalize(float3(0.2,0.8,0.55)))));\n"
+                           "    float3 %2_water=lerp(%2_body,%2_r.rgb,saturate(%2_r.a*(0.32+%2_f*0.68)));\n"
+                           "    color=lerp(color,%2_water,%4);\n")
+                .arg(definition->name, tag, colorLiteral(water), strength, ripples, scale, speed, roughness, maxDistance, steps, thickness);
+        }
+        else if(effect.typeId == "material_wet_concrete" && project.target == Target::Material)
+        {
+            const QColor dry = parameterColor(effect, *definition, "dry_color");
+            const QColor wet = parameterColor(effect, *definition, "wet_color");
+            const QString coverage = parameterExpr(project, effect, *definition, "coverage");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString reflectivity = parameterExpr(project, effect, *definition, "reflectivity");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            out += QString("    // %1\n"
+                           "    float %2_n=BO3BeginnerFbm3(surfacePosition*(0.01*%6));\n"
+                           "    float %2_mask=smoothstep(0.86-saturate(%5)*0.68,0.94-saturate(%5)*0.58,%2_n);\n"
+                           "    float3 %2_base=lerp(%3,%4,%2_mask)*(0.82+%2_n*0.18);\n"
+                           "    float4 %2_r=BO3BeginnerMaterialReflectionSample(input.worldPosition.xyz,surfaceNormal,surfaceViewDir,%9,%11,%10,%8);\n"
+                           "    color=lerp(%2_base,%2_r.rgb,saturate(%2_mask*%7*%2_r.a));\n")
+                .arg(definition->name, tag, colorLiteral(dry), colorLiteral(wet), coverage, scale, reflectivity, roughness, maxDistance, steps, thickness);
         }
         else if(effect.typeId == "wet_ground_reflections" && project.target == Target::PostFx && hasUv)
         {
@@ -1452,6 +1732,26 @@ bool projectUsesEffect(const Project& project, const QString& id)
     return false;
 }
 
+bool isMaterialSceneSamplingEffect(const QString& id)
+{
+    return id == QStringLiteral("material_screen_space_reflections") ||
+           id == QStringLiteral("material_mirror") ||
+           id == QStringLiteral("material_wet_surface") ||
+           id == QStringLiteral("material_clear_coat") ||
+           id == QStringLiteral("material_chrome") ||
+           id == QStringLiteral("material_frosted_glass") ||
+           id == QStringLiteral("material_water_surface") ||
+           id == QStringLiteral("material_wet_concrete");
+}
+
+bool projectUsesMaterialSceneSampling(const Project& project)
+{
+    if(project.target != Target::Material) return false;
+    for(const Effect& effect : project.effects)
+        if(effect.enabled && isMaterialSceneSamplingEffect(effect.typeId)) return true;
+    return false;
+}
+
 const Effect* firstEnabledEffect(const Project& project, const QString& id)
 {
     for(const Effect& effect : project.effects)
@@ -1482,7 +1782,7 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
 bool projectRequiresSceneDepth(const Project& project)
 {
     if(project.target == Target::Material)
-        return projectUsesEffect(project, QStringLiteral("material_screen_space_reflections"));
+        return projectUsesMaterialSceneSampling(project);
     if(project.target != Target::PostFx) return false;
     for(const Effect& effect : project.effects)
     {
@@ -1505,9 +1805,20 @@ QString optionalHelpers(const Project& project, bool forceSceneDepth = false)
         projectUsesEffect(project, "red_paint_splatter") ||
         projectUsesEffect(project, "vhs_tape") ||
         projectUsesEffect(project, "vhs_dropouts");
+    const bool needsMaterialProcedural = project.target == Target::Material && (
+        projectUsesEffect(project, "noise") || projectUsesEffect(project, "dissolve") ||
+        projectUsesEffect(project, "material_wet_concrete") || projectUsesEffect(project, "material_painted_metal") ||
+        projectUsesEffect(project, "material_rust") || projectUsesEffect(project, "material_grime") ||
+        projectUsesEffect(project, "material_scratches") || projectUsesEffect(project, "material_dust") ||
+        projectUsesEffect(project, "material_holographic") || projectUsesEffect(project, "material_heat_energy") ||
+        projectUsesEffect(project, "material_forcefield") || projectUsesEffect(project, "material_hex_panels") ||
+        projectUsesEffect(project, "material_camouflage") || projectUsesEffect(project, "material_carbon_fiber") ||
+        projectUsesEffect(project, "material_leather") || projectUsesEffect(project, "material_fabric") ||
+        projectUsesEffect(project, "material_wood") || projectUsesEffect(project, "material_marble") ||
+        projectUsesEffect(project, "material_stone") || projectUsesEffect(project, "material_ice") ||
+        projectUsesEffect(project, "material_brushed_metal") || projectUsesEffect(project, "material_water_surface"));
     const bool needsHash31 =
-        (project.target == Target::Material && projectUsesEffect(project, "noise")) ||
-        projectUsesEffect(project, "dissolve") ||
+        needsMaterialProcedural ||
         projectUsesEffect(project, "sky_clouds") ||
         projectUsesEffect(project, "sky_mountains") ||
         projectUsesEffect(project, "sky_stars") ||
@@ -1626,6 +1937,64 @@ float BO3BeginnerHash31(float3 p)
     p = frac(p * 0.1031);
     p += dot(p, p.yzx + 33.33);
     return frac((p.x + p.y) * p.z);
+}
+)HLSL");
+    }
+
+    if(needsMaterialProcedural)
+    {
+        out += QStringLiteral(R"HLSL(
+float BO3BeginnerValueNoise3(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = BO3BeginnerHash31(i + float3(0,0,0));
+    float n100 = BO3BeginnerHash31(i + float3(1,0,0));
+    float n010 = BO3BeginnerHash31(i + float3(0,1,0));
+    float n110 = BO3BeginnerHash31(i + float3(1,1,0));
+    float n001 = BO3BeginnerHash31(i + float3(0,0,1));
+    float n101 = BO3BeginnerHash31(i + float3(1,0,1));
+    float n011 = BO3BeginnerHash31(i + float3(0,1,1));
+    float n111 = BO3BeginnerHash31(i + float3(1,1,1));
+    float nx00 = lerp(n000, n100, f.x);
+    float nx10 = lerp(n010, n110, f.x);
+    float nx01 = lerp(n001, n101, f.x);
+    float nx11 = lerp(n011, n111, f.x);
+    return lerp(lerp(nx00, nx10, f.y), lerp(nx01, nx11, f.y), f.z);
+}
+
+float BO3BeginnerFbm3(float3 p)
+{
+    float v = 0.0;
+    float a = 0.55;
+    [unroll] for(int i = 0; i < 4; ++i)
+    {
+        v += BO3BeginnerValueNoise3(p) * a;
+        p = p * 2.03 + float3(7.1, 3.7, 5.3);
+        a *= 0.48;
+    }
+    return saturate(v / 1.03);
+}
+
+float2 BO3BeginnerMaterialPlanar(float3 p, float3 n)
+{
+    float3 an = abs(n);
+    if(an.z >= an.x && an.z >= an.y) return p.xy;
+    if(an.x >= an.y) return p.zy;
+    return p.xz;
+}
+
+float BO3BeginnerHexEdge(float2 p)
+{
+    const float2 k = float2(1.0, 1.7320508);
+    float2 a = frac(p) - 0.5;
+    float2 b = frac(p + 0.5) - 0.5;
+    a.x *= 1.1547005; b.x *= 1.1547005;
+    float da = max(abs(a.x), dot(abs(a), normalize(float2(0.5,0.8660254))));
+    float db = max(abs(b.x), dot(abs(b), normalize(float2(0.5,0.8660254))));
+    float d = min(da, db);
+    return 1.0 - smoothstep(0.39, 0.47, d);
 }
 )HLSL");
     }
@@ -1806,7 +2175,7 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
 
     if(projectUsesEffect(project, "screen_space_reflections") ||
        projectUsesEffect(project, "wet_ground_reflections") ||
-       projectUsesEffect(project, "material_screen_space_reflections"))
+       projectUsesMaterialSceneSampling(project))
     {
         out += QStringLiteral(R"HLSL(
 // BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX and custom materials.
@@ -1928,7 +2297,7 @@ float4 BO3BeginnerSSRTrace(float2 uv, float rawCenter,
 }
 )HLSL");
 
-        if(projectUsesEffect(project, "material_screen_space_reflections"))
+        if(projectUsesMaterialSceneSampling(project))
         {
             out += QStringLiteral(R"HLSL(
 // Material SSR must use the material's actual world-space surface normal and
@@ -2012,6 +2381,25 @@ float2 BO3BeginnerMaterialPreviewEnvironmentUv(float3 direction)
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
+}
+
+float4 BO3BeginnerMaterialReflectionSample(float3 worldPosition, float3 worldNormal, float3 surfaceViewDir,
+                                           float maxDistance, float thickness, float stepCount, float roughness)
+{
+#ifdef BO3_SHADER_STUDIO_MATERIAL_PREVIEW
+    float3 reflectionDir = normalize(reflect(-surfaceViewDir, normalize(worldNormal)));
+    float2 envUv = BO3BeginnerMaterialPreviewEnvironmentUv(reflectionDir);
+    float blur = roughness * roughness * 0.035;
+    float3 reflected = frameBuffer.Sample(bilinearClampler, envUv).rgb * 0.52;
+    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2( blur,0.0)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(-blur,0.0)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0, blur*0.5)).rgb * 0.12;
+    reflected += frameBuffer.Sample(bilinearClampler, envUv + float2(0.0,-blur*0.5)).rgb * 0.12;
+    return float4(reflected, 1.0);
+#else
+    return BO3BeginnerMaterialSSRTrace(worldPosition, worldNormal, surfaceViewDir,
+                                       maxDistance, thickness, stepCount, roughness);
+#endif
 }
 )HLSL");
         }
@@ -2356,7 +2744,7 @@ float4 ps_main(PS_INPUT input) : SV_Target
 QString generateMaterial(const Project& project)
 {
     const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
-    const bool usesSceneReflections = projectUsesEffect(project, "material_screen_space_reflections");
+    const bool usesSceneReflections = projectUsesMaterialSceneSampling(project);
     const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
     const QString screenIncludes = usesSceneReflections
@@ -2791,6 +3179,105 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("thickness", "Hit Thickness", "Depth tolerance used when the reflected ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
                    FloatParam("roughness", "Roughness", "Blur the reflected scene to imitate rough glossy materials.", 0.0, 1.0, 0.01, 0.18),
                    FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.72)}),
+        EffectDef("material_mirror", "Mirror", "Turn the surface into a near-perfect live mirror using BO3 resolvedScene + Float-Z screen-space ray tracing.", "Reflections & Surface",
+                  {Target::Material},
+                  {ColorParam("tint", "Mirror Tint", "Tint of the reflected scene. White produces a neutral mirror.", "#FFFFFF"),
+                   FloatParam("strength", "Reflectivity", "How completely the mirror replaces the base surface.", 0.0, 1.0, 0.01, 0.98),
+                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by each mirror ray.", 50.0, 3200.0, 25.0, 1400.0),
+                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflected ray.", 8.0, 32.0, 1.0, 28.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used to accept reflection intersections.", 0.1, 20.0, 0.1, 2.5),
+                   FloatParam("fresnel", "Edge Fresnel", "Extra reflection strength at grazing angles.", 0.0, 1.0, 0.01, 0.18)}),
+        EffectDef("material_wet_surface", "Wet Surface", "Darken a surface as it gets wet and add glossy screen-space reflections with controllable water-film roughness.", "Reflections & Surface",
+                  {Target::Material},
+                  {FloatParam("wetness", "Wetness", "Overall amount of water film on the material.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("darkening", "Wet Darkening", "How much the underlying material darkens when wet.", 0.0, 0.8, 0.01, 0.28),
+                   FloatParam("roughness", "Roughness", "Blur amount of the wet reflection.", 0.0, 1.0, 0.01, 0.22),
+                   FloatParam("fresnel", "Fresnel", "Grazing-angle water-film reflection strength.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("max_distance", "Max Distance", "Maximum distance traced for wet reflections.", 25.0, 2400.0, 25.0, 800.0),
+                   FloatParam("steps", "Ray Steps", "Maximum depth samples per wet reflection ray.", 6.0, 32.0, 1.0, 18.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
+        EffectDef("material_clear_coat", "Clear Coat", "Add a glossy lacquer-like top coat over the existing material with a clean Fresnel reflection layer.", "Reflections & Surface",
+                  {Target::Material},
+                  {FloatParam("coat", "Coat Strength", "Amount of glossy clear coat over the base material.", 0.0, 1.0, 0.01, 0.68),
+                   FloatParam("roughness", "Coat Roughness", "Reflection blur in the clear coat.", 0.0, 1.0, 0.01, 0.10),
+                   FloatParam("fresnel", "Fresnel", "How strongly the coat builds toward grazing angles.", 0.0, 1.0, 0.01, 0.74),
+                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by the coat reflection.", 25.0, 2400.0, 25.0, 700.0),
+                   FloatParam("steps", "Ray Steps", "Maximum depth samples per coat reflection ray.", 6.0, 32.0, 1.0, 16.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for coat reflection hits.", 0.1, 24.0, 0.1, 3.0)}),
+        EffectDef("material_chrome", "Chrome", "Create a highly reflective metallic finish with a tinted base and slightly softened live scene reflections.", "Metals & Coatings",
+                  {Target::Material},
+                  {ColorParam("tint", "Metal Tint", "Tint of the chrome reflection.", "#E8EEF5"),
+                   FloatParam("reflectivity", "Reflectivity", "Strength of the live reflected scene.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("roughness", "Roughness", "Blur of the chrome reflection.", 0.0, 1.0, 0.01, 0.08),
+                   FloatParam("fresnel", "Fresnel", "Extra reflectivity at grazing angles.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by chrome reflections.", 25.0, 2800.0, 25.0, 1200.0),
+                   FloatParam("steps", "Ray Steps", "Maximum depth samples per chrome reflection ray.", 6.0, 32.0, 1.0, 24.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 2.8)}),
+        EffectDef("material_metallic", "Metallic Surface", "Give the base color a dense metallic response with view-angle highlights and controlled reflectance.", "Metals & Coatings",
+                  {Target::Material},
+                  {ColorParam("metal_tint", "Metal Tint", "Color mixed into the metallic response.", "#B7C0C9"),
+                   FloatParam("metalness", "Metalness", "How strongly the surface takes on the metallic response.", 0.0, 1.0, 0.01, 0.78),
+                   FloatParam("roughness", "Roughness", "Broadens and softens the view-angle highlight.", 0.02, 1.0, 0.01, 0.34),
+                   FloatParam("contrast", "Metal Contrast", "Contrast of metallic light/dark response.", 0.5, 2.5, 0.01, 1.25)}),
+        EffectDef("material_brushed_metal", "Brushed Metal", "Add fine directional brushing and anisotropic-looking highlights to a metallic surface without a texture map.", "Metals & Coatings",
+                  {Target::Material},
+                  {ColorParam("tint", "Metal Tint", "Tint applied to the brushed metal.", "#BFC5CA"),
+                   FloatParam("strength", "Strength", "Amount of brushed-metal treatment.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("density", "Brush Density", "Number of fine brush lines across the surface.", 8.0, 420.0, 1.0, 115.0),
+                   FloatParam("direction", "Direction", "Rotate the brushing direction around the local surface.", 0.0, 1.0, 0.01, 0.08),
+                   FloatParam("roughness", "Roughness", "Softness of the brushed highlight.", 0.02, 1.0, 0.01, 0.28)}),
+        EffectDef("material_painted_metal", "Painted Metal", "Layer colored paint over metal with randomized chips that reveal a brighter metallic under-surface.", "Metals & Coatings",
+                  {Target::Material},
+                  {ColorParam("paint_color", "Paint Color", "Color of the painted outer layer.", "#B52F36"),
+                   ColorParam("metal_color", "Exposed Metal", "Color of metal visible through chipped paint.", "#AAB3BA"),
+                   FloatParam("paint", "Paint Coverage", "How much of the metal remains covered by paint.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("chips", "Chip Amount", "Amount of random chipped/exposed areas.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("scale", "Chip Scale", "Size of the chipped pattern.", 2.0, 120.0, 0.5, 32.0),
+                   FloatParam("shine", "Metal Shine", "Brightness of exposed metallic regions.", 0.0, 2.0, 0.01, 0.55)}),
+        EffectDef("material_iridescent", "Pearlescent / Iridescent", "Shift the surface through multiple colors as the view angle changes, like pearl paint or thin-film coatings.", "Metals & Coatings",
+                  {Target::Material},
+                  {ColorParam("color_a", "Primary Color", "First thin-film color.", "#55C7FF"),
+                   ColorParam("color_b", "Secondary Color", "Second thin-film color.", "#F06CFF"),
+                   ColorParam("color_c", "Tertiary Color", "Third thin-film color.", "#FFD45D"),
+                   FloatParam("strength", "Strength", "How strongly the angle colors replace the base surface.", 0.0, 1.0, 0.01, 0.62),
+                   FloatParam("bands", "Color Bands", "Frequency of view-angle color changes.", 0.5, 12.0, 0.05, 3.2)}),
+        EffectDef("material_frosted_glass", "Frosted Glass", "Approximate frosted/translucent glass by sampling and blurring the scene behind the material with tint and Fresnel edges.", "Glass & Water",
+                  {Target::Material},
+                  {ColorParam("tint", "Glass Tint", "Tint applied to the blurred scene behind the glass.", "#D9F2FF"),
+                   FloatParam("opacity", "Glass Strength", "Amount of frosted glass replacing the base surface.", 0.0, 1.0, 0.01, 0.78),
+                   FloatParam("blur", "Frost Blur", "Screen-space blur radius of the sampled background.", 0.0, 14.0, 0.1, 5.0),
+                   FloatParam("distortion", "Refraction", "Small normal-based offset of the scene behind the glass.", 0.0, 3.0, 0.01, 0.52),
+                   FloatParam("fresnel", "Edge Fresnel", "Brighten and reflect the glass toward grazing angles.", 0.0, 1.0, 0.01, 0.62)}),
+        EffectDef("material_ice", "Ice", "Create a cold translucent-looking ice finish with procedural fractures, blue depth tint and reflective edges.", "Glass & Water",
+                  {Target::Material},
+                  {ColorParam("ice_color", "Ice Color", "Main body color of the ice.", "#9FE8FF"),
+                   ColorParam("crack_color", "Crack Color", "Color of the procedural ice fractures.", "#E9FBFF"),
+                   FloatParam("strength", "Strength", "Overall amount of the ice treatment.", 0.0, 1.0, 0.01, 0.88),
+                   FloatParam("cracks", "Cracks", "Visibility of fine procedural fractures.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("scale", "Crystal Scale", "Size of ice/crack structures.", 2.0, 120.0, 0.5, 28.0),
+                   FloatParam("fresnel", "Edge Shine", "Strength of bright reflective ice edges.", 0.0, 2.0, 0.01, 0.92)}),
+        EffectDef("material_water_surface", "Water Surface", "Create animated rippled water with view-angle Fresnel and live screen-space scene reflections.", "Glass & Water",
+                  {Target::Material},
+                  {ColorParam("water_color", "Water Color", "Tint of the water body.", "#1A6E91"),
+                   FloatParam("strength", "Water Strength", "How strongly the water treatment replaces the base material.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("ripples", "Ripple Strength", "Perturbation applied to the surface normal.", 0.0, 2.0, 0.01, 0.48),
+                   FloatParam("scale", "Ripple Scale", "Spatial frequency of animated ripples.", 0.5, 40.0, 0.1, 8.5),
+                   FloatParam("speed", "Ripple Speed", "Animation speed of the water waves.", -4.0, 4.0, 0.01, 0.55),
+                   FloatParam("roughness", "Reflection Roughness", "Blur of the reflected scene.", 0.0, 1.0, 0.01, 0.16),
+                   FloatParam("max_distance", "Max Distance", "Maximum scene distance traced by water reflections.", 25.0, 2400.0, 25.0, 900.0),
+                   FloatParam("steps", "Ray Steps", "Maximum depth samples per water reflection ray.", 6.0, 32.0, 1.0, 20.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
+        EffectDef("material_wet_concrete", "Puddle / Wet Concrete", "Break a concrete-like surface into dry and wet patches, with darker puddles and live localized reflections.", "Glass & Water",
+                  {Target::Material},
+                  {ColorParam("dry_color", "Dry Concrete", "Dry concrete tint.", "#777A78"),
+                   ColorParam("wet_color", "Wet Concrete", "Dark tint used inside wet patches.", "#30383A"),
+                   FloatParam("coverage", "Puddle Coverage", "Amount of the surface occupied by wet patches.", 0.0, 1.0, 0.01, 0.48),
+                   FloatParam("scale", "Puddle Scale", "Size of procedural wet patches.", 1.0, 80.0, 0.5, 16.0),
+                   FloatParam("reflectivity", "Wet Reflectivity", "Strength of reflections in puddled regions.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("roughness", "Wet Roughness", "Blur of puddle reflections.", 0.0, 1.0, 0.01, 0.28),
+                   FloatParam("max_distance", "Max Distance", "Maximum distance traced in wet regions.", 25.0, 2400.0, 25.0, 800.0),
+                   FloatParam("steps", "Ray Steps", "Maximum depth samples per wet-region reflection ray.", 6.0, 32.0, 1.0, 16.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance for puddle reflection hits.", 0.1, 24.0, 0.1, 3.5)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color used in darker areas.", "#4F65B4"),
@@ -2993,16 +3480,129 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("scale", "Scale", "Size and complexity of the nebula regions.", 0.35, 3.0, 0.01, 0.82),
                    FloatParam("drift", "Drift", "How far the fractal domain slowly moves over time.", 0.0, 1.0, 0.01, 0.18)}),
 
-        EffectDef("edge_glow", "Edge Glow", "Add a camera-facing rim glow around the edges of a model.", "Material & Glow",
+        EffectDef("material_rust", "Rust / Corrosion", "Add layered orange-brown corrosion patches, pits and rough color breakup procedurally across the material.", "Surface Detail",
+                  {Target::Material},
+                  {ColorParam("rust_color", "Rust Color", "Primary corrosion color.", "#A14E21"),
+                   ColorParam("dark_color", "Deep Rust", "Darker color used in pits and dense corrosion.", "#3A2118"),
+                   FloatParam("amount", "Rust Amount", "Fraction of the surface overtaken by corrosion.", 0.0, 1.0, 0.01, 0.46),
+                   FloatParam("scale", "Rust Scale", "Size of the corrosion patches.", 1.0, 100.0, 0.5, 22.0),
+                   FloatParam("roughness", "Surface Roughness", "Strength of pitted noisy breakup.", 0.0, 1.0, 0.01, 0.58)}),
+        EffectDef("material_grime", "Dirt / Grime", "Accumulate dark uneven grime in procedural patches to age or dirty a surface.", "Surface Detail",
+                  {Target::Material},
+                  {ColorParam("color", "Grime Color", "Color of accumulated dirt.", "#302C22"),
+                   FloatParam("amount", "Grime Amount", "How much dirt covers the surface.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("scale", "Patch Scale", "Size of grime buildup regions.", 1.0, 120.0, 0.5, 28.0),
+                   FloatParam("contrast", "Edge Contrast", "Sharpness of dirty/clean transitions.", 0.5, 5.0, 0.05, 1.8)}),
+        EffectDef("material_scratches", "Scratches", "Overlay fine directional scratches and occasional deeper marks without needing a scratch texture.", "Surface Detail",
+                  {Target::Material},
+                  {ColorParam("color", "Scratch Color", "Color revealed along scratches.", "#C8CDD2"),
+                   FloatParam("amount", "Scratch Amount", "Density/visibility of scratches.", 0.0, 1.0, 0.01, 0.36),
+                   FloatParam("density", "Density", "Number of fine scratch lines.", 8.0, 600.0, 1.0, 180.0),
+                   FloatParam("direction", "Direction", "Rotate the dominant scratch direction.", 0.0, 1.0, 0.01, 0.15),
+                   FloatParam("length", "Scratch Length", "How continuous scratches remain along their direction.", 0.05, 1.0, 0.01, 0.48)}),
+        EffectDef("material_dust", "Dust", "Add pale powdery surface accumulation with more visibility on upward-facing areas.", "Surface Detail",
+                  {Target::Material},
+                  {ColorParam("color", "Dust Color", "Color of the powder/dust layer.", "#C7BFAE"),
+                   FloatParam("amount", "Dust Amount", "Overall amount of dust accumulation.", 0.0, 1.0, 0.01, 0.34),
+                   FloatParam("scale", "Dust Scale", "Size of mottled dust breakup.", 1.0, 120.0, 0.5, 36.0),
+                   FloatParam("upward", "Upward Bias", "Prefer upward-facing surface normals when accumulating dust.", 0.0, 1.0, 0.01, 0.68)}),
+        EffectDef("material_holographic", "Holographic", "Create a view-angle rainbow holographic foil with fine animated scan detail.", "Sci-Fi & Stylized",
+                  {Target::Material},
+                  {FloatParam("strength", "Strength", "Amount of holographic color shift.", 0.0, 1.0, 0.01, 0.74),
+                   FloatParam("bands", "Rainbow Bands", "Frequency of holographic color bands.", 0.5, 20.0, 0.1, 6.0),
+                   FloatParam("scanlines", "Scan Detail", "Amount of fine moving scan texture.", 0.0, 1.0, 0.01, 0.20),
+                   FloatParam("speed", "Animation Speed", "Motion speed of the holographic bands.", -3.0, 3.0, 0.01, 0.25)}),
+        EffectDef("material_pulse_emissive", "Pulse Emissive", "Animate a colored HDR emission layer without changing the base material's entire brightness.", "Energy & Emissive",
+                  {Target::Material},
+                  {ColorParam("color", "Emission Color", "Color of the pulsing light.", "#45DFFF"),
+                   FloatParam("strength", "Brightness", "Peak HDR emission strength.", 0.0, 8.0, 0.05, 1.6),
+                   FloatParam("speed", "Pulse Speed", "Number of emission pulses per second.", 0.05, 6.0, 0.01, 0.85),
+                   FloatParam("floor", "Minimum Glow", "Fraction of peak emission that remains between pulses.", 0.0, 1.0, 0.01, 0.18)}),
+        EffectDef("material_heat_energy", "Heat / Energy", "Add animated flowing hot-energy bands and HDR glow across the surface.", "Energy & Emissive",
+                  {Target::Material},
+                  {ColorParam("hot_color", "Hot Color", "Brightest energy color.", "#FFF0A0"),
+                   ColorParam("core_color", "Core Color", "Secondary energy/core color.", "#FF4B1F"),
+                   FloatParam("strength", "Glow Strength", "HDR strength of animated energy bands.", 0.0, 8.0, 0.05, 1.9),
+                   FloatParam("scale", "Flow Scale", "Frequency of the flowing pattern.", 0.5, 40.0, 0.1, 7.0),
+                   FloatParam("speed", "Flow Speed", "Animation speed of the energy flow.", -4.0, 4.0, 0.01, 0.65),
+                   FloatParam("distortion", "Flow Distortion", "Amount of procedural bending in the energy bands.", 0.0, 2.0, 0.01, 0.55)}),
+        EffectDef("material_forcefield", "Forcefield", "Build a bright Fresnel shell with moving hex-like energy cells and a controllable emissive tint.", "Energy & Emissive",
+                  {Target::Material},
+                  {ColorParam("color", "Field Color", "Color of the forcefield energy.", "#55D8FF"),
+                   FloatParam("strength", "Brightness", "HDR brightness of the field.", 0.0, 8.0, 0.05, 1.5),
+                   FloatParam("edge", "Edge Strength", "How strongly the field glows at grazing angles.", 0.0, 2.0, 0.01, 0.9),
+                   FloatParam("scale", "Cell Scale", "Size of the procedural energy cells.", 1.0, 80.0, 0.5, 16.0),
+                   FloatParam("speed", "Flow Speed", "Animation speed across the field.", -3.0, 3.0, 0.01, 0.35)}),
+        EffectDef("material_hex_panels", "Hex / Sci-Fi Panels", "Overlay procedural hex-like panel cells with emissive seams and configurable scale.", "Sci-Fi & Stylized",
+                  {Target::Material},
+                  {ColorParam("panel_color", "Panel Color", "Color multiplied into each panel.", "#243746"),
+                   ColorParam("seam_color", "Seam Color", "Color of glowing panel seams.", "#5BE7FF"),
+                   FloatParam("strength", "Strength", "Amount of panel pattern applied.", 0.0, 1.0, 0.01, 0.78),
+                   FloatParam("scale", "Panel Scale", "Number/size of cells over the surface.", 1.0, 80.0, 0.5, 14.0),
+                   FloatParam("seams", "Seam Brightness", "HDR brightness of the cell borders.", 0.0, 5.0, 0.01, 0.72)}),
+        EffectDef("material_camouflage", "Camouflage", "Generate configurable three-color camouflage patches procedurally in local 3D space.", "Sci-Fi & Stylized",
+                  {Target::Material},
+                  {ColorParam("color_a", "Color A", "First camouflage color.", "#4E5A3B"),
+                   ColorParam("color_b", "Color B", "Second camouflage color.", "#7A704E"),
+                   ColorParam("color_c", "Color C", "Third camouflage color.", "#242B22"),
+                   FloatParam("strength", "Strength", "How strongly camouflage replaces the base color.", 0.0, 1.0, 0.01, 0.90),
+                   FloatParam("scale", "Pattern Scale", "Size of camouflage blobs.", 0.5, 60.0, 0.1, 8.0),
+                   FloatParam("softness", "Edge Softness", "Smoothness of color transitions between blobs.", 0.0, 1.0, 0.01, 0.20)}),
+        EffectDef("material_carbon_fiber", "Carbon Fiber", "Create a fine woven carbon-fiber pattern with alternating strand directions and glossy dark response.", "Sci-Fi & Stylized",
+                  {Target::Material},
+                  {ColorParam("base_color", "Fiber Color", "Base carbon fiber color.", "#11161A"),
+                   ColorParam("highlight_color", "Weave Highlight", "Color of highlighted weave strands.", "#37424A"),
+                   FloatParam("strength", "Strength", "Amount of carbon-fiber treatment.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("scale", "Weave Scale", "Density of woven fibers.", 4.0, 220.0, 1.0, 68.0),
+                   FloatParam("shine", "Gloss", "Strength of view-angle glossy response.", 0.0, 2.0, 0.01, 0.72)}),
+        EffectDef("material_leather", "Leather", "Create mottled leather grain with soft pores, subtle creases and view-angle polish.", "Natural Materials",
+                  {Target::Material},
+                  {ColorParam("color", "Leather Color", "Primary leather color.", "#6E3E28"),
+                   FloatParam("strength", "Strength", "Amount of leather treatment.", 0.0, 1.0, 0.01, 0.88),
+                   FloatParam("grain", "Grain", "Strength of pores and mottled grain.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("scale", "Grain Scale", "Size of leather texture features.", 1.0, 120.0, 0.5, 34.0),
+                   FloatParam("polish", "Polish", "View-angle highlight strength.", 0.0, 1.5, 0.01, 0.32)}),
+        EffectDef("material_fabric", "Fabric", "Generate woven textile fibers with crossing thread directions and controllable softness.", "Natural Materials",
+                  {Target::Material},
+                  {ColorParam("color", "Fabric Color", "Base textile color.", "#4B6680"),
+                   FloatParam("strength", "Strength", "Amount of woven fabric treatment.", 0.0, 1.0, 0.01, 0.88),
+                   FloatParam("weave", "Weave Density", "Number of visible thread crossings.", 4.0, 260.0, 1.0, 90.0),
+                   FloatParam("contrast", "Thread Contrast", "Difference between crossing thread directions.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("softness", "Softness", "Reduces sharp/high-contrast thread detail.", 0.0, 1.0, 0.01, 0.36)}),
+        EffectDef("material_wood", "Wood Grain", "Create layered wood growth rings and flowing grain from procedural local-space noise.", "Natural Materials",
+                  {Target::Material},
+                  {ColorParam("light_color", "Light Wood", "Lighter wood grain color.", "#B9824E"),
+                   ColorParam("dark_color", "Dark Wood", "Darker growth-ring color.", "#4B2D1B"),
+                   FloatParam("strength", "Strength", "Amount of wood treatment.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("scale", "Ring Scale", "Frequency of growth rings/grain.", 0.5, 80.0, 0.1, 12.0),
+                   FloatParam("warp", "Grain Warp", "How much the rings bend with procedural noise.", 0.0, 2.0, 0.01, 0.65)}),
+        EffectDef("material_marble", "Marble", "Build flowing stone veins by warping a procedural field between base and vein colors.", "Natural Materials",
+                  {Target::Material},
+                  {ColorParam("base_color", "Stone Color", "Main marble body color.", "#D8D6D0"),
+                   ColorParam("vein_color", "Vein Color", "Color of the marble veins.", "#555B67"),
+                   FloatParam("strength", "Strength", "Amount of marble treatment.", 0.0, 1.0, 0.01, 0.92),
+                   FloatParam("scale", "Vein Scale", "Frequency of marble veins.", 0.5, 60.0, 0.1, 7.0),
+                   FloatParam("warp", "Vein Warp", "Amount of organic bending in the veins.", 0.0, 3.0, 0.01, 1.15),
+                   FloatParam("width", "Vein Width", "Thickness of darker stone veins.", 0.01, 0.6, 0.01, 0.18)}),
+        EffectDef("material_stone", "Stone / Concrete", "Generate mottled mineral/concrete color, pores and speckles in seamless local 3D space.", "Natural Materials",
+                  {Target::Material},
+                  {ColorParam("base_color", "Base Stone", "Main stone/concrete color.", "#777A78"),
+                   ColorParam("speck_color", "Speck Color", "Color of pores/mineral flecks.", "#3B403F"),
+                   FloatParam("strength", "Strength", "Amount of stone treatment.", 0.0, 1.0, 0.01, 0.90),
+                   FloatParam("scale", "Mineral Scale", "Size of mottled stone features.", 1.0, 120.0, 0.5, 24.0),
+                   FloatParam("speckles", "Speckles", "Amount of small pores/mineral flecks.", 0.0, 1.0, 0.01, 0.42),
+                   FloatParam("contrast", "Surface Contrast", "Contrast of light/dark mineral variation.", 0.0, 2.0, 0.01, 0.62)}),
+
+        EffectDef("edge_glow", "Edge Glow", "Add a camera-facing rim glow around the edges of a model.", "Energy & Emissive",
                   {Target::Material},
                   {ColorParam("color", "Glow Color", "Color of the rim light.", "#6FE8FF"),
                    FloatParam("strength", "Strength", "How bright the edge glow becomes.", 0.0, 5.0, 0.01, 1.25),
                    FloatParam("power", "Edge Width", "Lower values make a wider rim; higher values tighten it.", 0.5, 8.0, 0.05, 2.5)}),
-        EffectDef("emission", "Emission", "Add BO3-friendly HDR color so a material can look self-lit and energetic.", "Material & Glow",
+        EffectDef("emission", "Emission", "Add BO3-friendly HDR color so a material can look self-lit and energetic.", "Energy & Emissive",
                   {Target::Material},
                   {ColorParam("color", "Emission Color", "Color emitted by the surface.", "#45DFFF"),
                    FloatParam("strength", "Brightness", "HDR emission strength. Values above 1 can glow strongly in BO3.", 0.0, 8.0, 0.05, 1.4)}),
-        EffectDef("dissolve", "Dissolve", "Cut away parts of a material with a procedural pattern and a bright edge.", "Material & Glow",
+        EffectDef("dissolve", "Dissolve", "Cut away parts of a material with a procedural pattern and a bright edge.", "Sci-Fi & Stylized",
                   {Target::Material},
                   {FloatParam("amount", "Dissolve Amount", "0 keeps the surface; higher values remove more of it.", 0.0, 0.95, 0.01, 0.28),
                    FloatParam("scale", "Pattern Scale", "Size of the dissolve pattern.", 4.0, 400.0, 1.0, 90.0),
@@ -3075,7 +3675,8 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target)
     if(target == Target::PostFx)
         return {{"blank", "Blank / Original Scene"}, {"cinematic", "Cinematic"}, {"retro_crt", "Retro CRT"}};
     if(target == Target::Material)
-        return {{"blank", "Blank Surface"}, {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
+        return {{"blank", "Blank Surface"}, {"mirror", "Mirror"}, {"wet_surface", "Wet Surface"},
+                {"neon_surface", "Neon Surface"}, {"hologram", "Hologram"}};
     return {{"blank", "Blank Sky"}, {"sunset", "Sunset"}, {"lake_sunset", "Still Water Sunset"},
                 {"mountain_dawn", "Mountain Dawn"}, {"cloudy_day", "Cloudy Day"}, {"starry_night", "Starry Night"},
                 {"aurora_night", "Aurora Night"}, {"dream_sky", "Dream Sky"}, {"space_nebula", "Space Nebula"}};
@@ -3109,6 +3710,18 @@ Project makePreset(const QString& presetId, Target target)
         add("film_grain", {{"amount", 0.22}, {"grain_size", 1.30}, {"speed", 1.0}});
         add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
         add("vignette", {{"strength", 0.28}, {"size", 0.68}, {"softness", 0.45}});
+    }
+    else if(target == Target::Material && id == "mirror")
+    {
+        project.name = "Mirror";
+        project.settings["baseColor"] = "#101214";
+        add("material_mirror", {{"tint", "#FFFFFF"}, {"strength", 0.98}, {"max_distance", 1400.0}, {"steps", 28.0}, {"thickness", 2.5}, {"fresnel", 0.18}});
+    }
+    else if(target == Target::Material && id == "wet_surface")
+    {
+        project.name = "Wet Surface";
+        project.settings["baseColor"] = "#4C5256";
+        add("material_wet_surface", {{"wetness", 0.88}, {"darkening", 0.32}, {"roughness", 0.20}, {"fresnel", 0.74}, {"max_distance", 900.0}, {"steps", 20.0}, {"thickness", 3.5}});
     }
     else if(target == Target::Material && id == "neon_surface")
     {

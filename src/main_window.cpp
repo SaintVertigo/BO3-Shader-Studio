@@ -1666,6 +1666,20 @@ public:
                !materialHlsl.contains("BO3_SHADER_STUDIO_MATERIAL_PREVIEW") ||
                !materialHlsl.contains("BO3BeginnerMaterialPreviewEnvironmentUv"))
                 return "Beginner Material screen-space reflection module is missing its surface-normal runtime trace or camera-matched preview contract.";
+            if(!beginner::effectDefinition(QStringLiteral("material_mirror")) ||
+               !beginner::effectDefinition(QStringLiteral("material_wet_surface")) ||
+               !beginner::effectDefinition(QStringLiteral("material_clear_coat")) ||
+               !beginner::effectDefinition(QStringLiteral("material_chrome")) ||
+               !beginner::effectDefinition(QStringLiteral("material_frosted_glass")) ||
+               !beginner::effectDefinition(QStringLiteral("material_water_surface")) ||
+               !beginner::effectDefinition(QStringLiteral("material_carbon_fiber")) ||
+               !beginner::effectDefinition(QStringLiteral("material_marble")))
+                return "Beginner Material expansion is missing one or more core surface definitions.";
+            if(!materialHlsl.contains("Mirror - near-perfect material mirror") ||
+               !materialHlsl.contains("BO3BeginnerMaterialReflectionSample") ||
+               !materialHlsl.contains("BO3BeginnerFbm3") ||
+               !materialHlsl.contains("BO3BeginnerHexEdge"))
+                return "Beginner Material expansion is missing mirror/reflection or procedural surface generation paths.";
 
             // The package adapter validates the authored Material contract above,
             // but Beginner export ultimately passes through the Custom Material
@@ -1683,8 +1697,22 @@ public:
             if(!compileGlslValidationHlsl(exportedMaterial, exportedMaterialDiagnostics, true))
                 return "Beginner Material exported runtime HLSL failed FXC validation: " + exportedMaterialDiagnostics;
 
+            // Keep this techset-binding regression focused on SSR itself. The
+            // coverage material above intentionally stacks every Material effect,
+            // which is useful for FXC coverage but not representative of one
+            // practical runtime parameter set.
+            beginner::Project focusedMaterialSsr = beginner::makeDefaultProject(beginner::Target::Material);
+            focusedMaterialSsr.effects.push_back(beginner::makeDefaultEffect(QStringLiteral("material_screen_space_reflections")));
+            const QString focusedMaterialSsrHlsl = beginner::generateHlsl(focusedMaterialSsr);
+            QString focusedMaterialDescription;
+            QString focusedMaterialError;
+            const QString focusedExportedMaterial = makeBo3CustomMaterialShader(
+                focusedMaterialSsrHlsl, focusedMaterialDescription, focusedMaterialError, 1);
+            if(focusedExportedMaterial.isEmpty() || !focusedMaterialError.isEmpty())
+                return "Focused Beginner Material SSR failed the BO3 Custom Material bridge: " + focusedMaterialError;
+
             QVector<ExportParamBinding> materialSsrBindings =
-                buildBeginnerExportParamBindings(material, exportedMaterial);
+                buildBeginnerExportParamBindings(focusedMaterialSsr, focusedExportedMaterial);
             for(const ExportParamBinding& binding : materialSsrBindings)
             {
                 if(binding.name == QStringLiteral("bb_material_screen_space_reflections_0_perspective"))
@@ -1702,7 +1730,7 @@ public:
             materialSsrBindings.push_back(staleMaterialSsrPerspective);
 
             const QString materialSsrTechset = makeMaterialTechset(
-                exportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 1,
+                focusedExportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), materialSsrBindings, 1,
                 bo3::PackageConfiguration::Runtime);
             bo3::TechsetParseOptions materialSsrParseOptions;
             materialSsrParseOptions.configuration = bo3::PackageConfiguration::Runtime;
@@ -14096,7 +14124,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                id == "depth_chromatic_aberration" || id == "depth_contours" || id == "depth_heatmap" ||
                id == "depth_isolation" || id == "contact_shadows" ||
                id == "screen_space_reflections" || id == "wet_ground_reflections" ||
-               id == "material_screen_space_reflections";
+               id == "material_screen_space_reflections" || id == "material_mirror" ||
+               id == "material_wet_surface" || id == "material_clear_coat" || id == "material_chrome" ||
+               id == "material_frosted_glass" || id == "material_water_surface" || id == "material_wet_concrete";
     }
 
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
@@ -14110,6 +14140,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         if(id == "cinematic") return "Film contrast + soft color + vignette";
         if(id == "retro_crt") return "Scanlines + film grain + color split";
+        if(id == "mirror") return "Near-perfect live scene reflection";
+        if(id == "wet_surface") return "Dark wet finish + glossy reflections";
         if(id == "neon_surface") return "Emission + edge glow + slow pulse";
         if(id == "hologram") return "Edge glow + scanlines + flicker";
         if(id == "sunset") return "Warm horizon + low sun + haze";
@@ -14123,571 +14155,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return "Ready-made BO3-safe preset";
     }
 
-    static QPixmap beginnerEffectPreviewPixmap(const beginner::EffectDefinition& definition, bool supported)
-    {
-        const int width = 220;
-        const int height = 58;
-        QPixmap pixmap(width, height);
-        pixmap.fill(Qt::transparent);
-
-        QPainter painter(&pixmap);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        const QRectF bounds(0.5, 0.5, width - 1.0, height - 1.0);
-        painter.setPen(QPen(QColor("#314252"), 1.0));
-        painter.setBrush(QColor("#0D151E"));
-        painter.drawRoundedRect(bounds, 7.0, 7.0);
-
-        const QRectF inner(4.0, 4.0, width - 8.0, height - 8.0);
-        const QString id = definition.id;
-
-        auto fillLinear = [&](const QColor& a, const QColor& b, bool vertical = false)
-        {
-            QLinearGradient gradient(vertical ? inner.topLeft() : QPointF(inner.left(), inner.center().y()),
-                                     vertical ? QPointF(inner.left(), inner.bottom()) : QPointF(inner.right(), inner.center().y()));
-            gradient.setColorAt(0.0, a);
-            gradient.setColorAt(1.0, b);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(gradient);
-            painter.drawRoundedRect(inner, 5.0, 5.0);
-        };
-
-        if(id == "tint")
-        {
-            fillLinear(QColor("#20354B"), QColor("#73A7FF"));
-        }
-        else if(id == "brightness")
-        {
-            fillLinear(QColor("#0C1117"), QColor("#F2F5F7"));
-        }
-        else if(id == "contrast")
-        {
-            painter.fillRect(inner, QColor("#171B20"));
-            for(int i = 0; i < 5; ++i)
-            {
-                const double t = static_cast<double>(i) / 4.0;
-                const QColor c = QColor::fromRgbF(t, t, t);
-                painter.fillRect(QRectF(inner.left() + i * inner.width() / 5.0, inner.top(),
-                                        inner.width() / 5.0, inner.height()), c);
-            }
-        }
-        else if(id == "saturation")
-        {
-            QLinearGradient gradient(inner.topLeft(), inner.topRight());
-            gradient.setColorAt(0.0, QColor("#6D7074"));
-            gradient.setColorAt(0.35, QColor("#DD4B78"));
-            gradient.setColorAt(0.68, QColor("#47C5D8"));
-            gradient.setColorAt(1.0, QColor("#E3D85C"));
-            painter.fillRect(inner, QBrush(gradient));
-        }
-        else if(id == "grayscale")
-        {
-            fillLinear(QColor("#1B1D20"), QColor("#D9DDE1"));
-        }
-        else if(id == "invert")
-        {
-            painter.fillRect(inner, QColor("#111418"));
-            painter.fillRect(QRectF(inner.center().x(), inner.top(), inner.width() / 2.0, inner.height()), QColor("#E9EDF1"));
-            painter.setPen(QPen(QColor("#71A7FF"), 2.0));
-            painter.drawLine(QPointF(inner.center().x(), inner.top() + 4.0), QPointF(inner.center().x(), inner.bottom() - 4.0));
-        }
-        else if(id == "vignette")
-        {
-            QRadialGradient gradient(inner.center(), inner.width() * 0.55);
-            gradient.setColorAt(0.0, QColor("#7FA6C7"));
-            gradient.setColorAt(0.55, QColor("#426078"));
-            gradient.setColorAt(1.0, QColor("#050709"));
-            painter.fillRect(inner, QBrush(gradient));
-        }
-        else if(id == "noise" || id == "film_grain")
-        {
-            painter.fillRect(inner, QColor("#313A43"));
-            const int step = id == "film_grain" ? 3 : 7;
-            for(int y = static_cast<int>(inner.top()); y < inner.bottom(); y += step)
-            {
-                for(int x = static_cast<int>(inner.left()); x < inner.right(); x += step)
-                {
-                    const int value = (x * 17 + y * 29 + (x * y) % 41) & 0x7F;
-                    const QColor c(90 + value, 90 + value, 90 + value);
-                    painter.fillRect(QRect(x, y, qMax(1, step - 1), qMax(1, step - 1)), c);
-                }
-            }
-        }
-        else if(id == "scanlines")
-        {
-            fillLinear(QColor("#183441"), QColor("#315E72"));
-            painter.setPen(QPen(QColor(5, 12, 16, 180), 2.0));
-            for(int y = static_cast<int>(inner.top()) + 4; y < inner.bottom(); y += 6)
-                painter.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y));
-        }
-        else if(id == "pulse" || id == "flicker")
-        {
-            fillLinear(QColor("#18233A"), QColor("#5A3A78"));
-            painter.setPen(QPen(QColor("#AEE8FF"), 2.0));
-            QPainterPath path;
-            const int points = 80;
-            for(int i = 0; i < points; ++i)
-            {
-                const double x = inner.left() + inner.width() * i / (points - 1.0);
-                double wave = 0.0;
-                if(id == "pulse")
-                    wave = std::sin(i * 0.22);
-                else
-                    wave = ((i * 37) % 19) / 9.0 - 1.0;
-                const double y = inner.center().y() - wave * inner.height() * 0.28;
-                if(i == 0) path.moveTo(x, y); else path.lineTo(x, y);
-            }
-            painter.drawPath(path);
-        }
-        else if(id == "uv_scroll")
-        {
-            fillLinear(QColor("#173249"), QColor("#274E70"));
-            painter.setPen(QPen(QColor("#8AD7FF"), 2.0));
-            for(int x = static_cast<int>(inner.left()) - 20; x < inner.right(); x += 34)
-            {
-                painter.drawLine(QPointF(x, inner.bottom() - 6), QPointF(x + 34, inner.top() + 6));
-                painter.drawLine(QPointF(x + 26, inner.top() + 8), QPointF(x + 34, inner.top() + 6));
-            }
-        }
-        else if(id == "wave_ripple")
-        {
-            painter.fillRect(inner, QColor("#14253A"));
-            painter.setPen(QPen(QColor("#69C8FF"), 2.0));
-            for(int radius = 7; radius < 55; radius += 10)
-                painter.drawEllipse(inner.center(), radius * 1.7, radius * 0.58);
-        }
-        else if(id == "cartoon_outlines")
-        {
-            painter.fillRect(inner, QColor("#F0D9A8"));
-            painter.setPen(QPen(QColor("#141414"), 4.0));
-            painter.setBrush(QColor("#7DB8E8"));
-            painter.drawRoundedRect(QRectF(inner.left() + 18, inner.top() + 18, inner.width() - 36, inner.height() - 36), 14, 14);
-            painter.drawLine(QPointF(inner.left() + 20, inner.center().y()), QPointF(inner.right() - 20, inner.center().y()));
-            painter.drawEllipse(QPointF(inner.center().x(), inner.center().y()), 18, 14);
-        }
-        else if(id == "ambient_occlusion")
-        {
-            painter.fillRect(inner, QColor("#D4D9DE"));
-            QRadialGradient gradient(inner.center(), inner.width() * 0.36);
-            gradient.setColorAt(0.0, QColor("#F3F5F7"));
-            gradient.setColorAt(0.48, QColor("#BAC3CC"));
-            gradient.setColorAt(0.82, QColor("#515B66"));
-            gradient.setColorAt(1.0, QColor("#E9EDF1"));
-            painter.setBrush(gradient);
-            painter.setPen(Qt::NoPen);
-            painter.drawEllipse(QRectF(inner.center().x() - 34, inner.top() + 10, 68, inner.height() - 20));
-        }
-        else if(id == "depth_fog")
-        {
-            QLinearGradient g(inner.topLeft(), inner.bottomRight());
-            g.setColorAt(0.0, QColor("#243650"));
-            g.setColorAt(0.55, QColor("#6B87A8"));
-            g.setColorAt(1.0, QColor("#C9D6E6"));
-            painter.fillRect(inner, g);
-            painter.setPen(QPen(QColor(255,255,255,120), 2.0));
-            painter.drawLine(QPointF(inner.left() + 16, inner.bottom() - 20), QPointF(inner.center().x() - 8, inner.center().y() + 6));
-            painter.drawLine(QPointF(inner.left() + 32, inner.bottom() - 20), QPointF(inner.center().x() + 10, inner.center().y() + 6));
-        }
-        else if(id == "depth_of_field")
-        {
-            fillLinear(QColor("#1A2633"), QColor("#AFC4D6"));
-            painter.setPen(QPen(QColor(255,255,255,80), 8.0));
-            painter.drawEllipse(QRectF(inner.center().x()-22, inner.center().y()-16, 44, 32));
-            painter.setPen(QPen(QColor("#FFFFFF"), 2.0));
-            painter.drawEllipse(QRectF(inner.center().x()-13, inner.center().y()-10, 26, 20));
-        }
-        else if(id == "depth_edge_glow")
-        {
-            painter.fillRect(inner, QColor("#0A1118"));
-            painter.setBrush(QColor("#213747"));
-            painter.setPen(QPen(QColor("#58C8FF"), 5.0));
-            painter.drawRoundedRect(QRectF(inner.left()+28, inner.top()+11, inner.width()-56, inner.height()-22), 9, 9);
-        }
-        else if(id == "distance_tint" || id == "depth_heatmap")
-        {
-            QLinearGradient g(inner.topLeft(), inner.topRight());
-            if(id == "depth_heatmap")
-            {
-                g.setColorAt(0.0, QColor("#2B4CFF")); g.setColorAt(0.5, QColor("#3DFF88")); g.setColorAt(1.0, QColor("#FF4D37"));
-            }
-            else
-            {
-                g.setColorAt(0.0, QColor("#FFD9B0")); g.setColorAt(1.0, QColor("#6A8FD4"));
-            }
-            painter.fillRect(inner, g);
-        }
-        else if(id == "depth_desaturation" || id == "distance_darkening")
-        {
-            QLinearGradient g(inner.topLeft(), inner.topRight());
-            g.setColorAt(0.0, QColor("#A86D4A"));
-            g.setColorAt(0.55, id == "depth_desaturation" ? QColor("#777777") : QColor("#493B36"));
-            g.setColorAt(1.0, id == "depth_desaturation" ? QColor("#242424") : QColor("#050607"));
-            painter.fillRect(inner, g);
-        }
-        else if(id == "depth_pixelation")
-        {
-            painter.fillRect(inner, QColor("#18232E"));
-            const int cols = 12;
-            for(int x=0; x<cols; ++x)
-            {
-                const int block = 2 + x/3;
-                painter.fillRect(QRectF(inner.left()+x*inner.width()/cols, inner.top()+8+(x%3)*5,
-                                        inner.width()/cols+1, inner.height()-16-(x%3)*5),
-                                 QColor::fromHsl((205+x*7)%360, 105, 75+block*11));
-            }
-        }
-        else if(id == "depth_chromatic_aberration")
-        {
-            painter.fillRect(inner, QColor("#0D1118"));
-            const QRectF r(inner.center().x()-35, inner.top()+10, 70, inner.height()-20);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255,55,70,160)); painter.drawEllipse(r.translated(-7,0));
-            painter.setBrush(QColor(65,220,150,160)); painter.drawEllipse(r);
-            painter.setBrush(QColor(55,105,255,160)); painter.drawEllipse(r.translated(7,0));
-        }
-        else if(id == "depth_contours")
-        {
-            painter.fillRect(inner, QColor("#071915"));
-            painter.setPen(QPen(QColor("#5BFFE1"), 2.0));
-            for(int i=0; i<6; ++i)
-                painter.drawEllipse(inner.center(), 14.0 + i*18.0, 5.0 + i*6.0);
-        }
-        else if(id == "depth_isolation")
-        {
-            fillLinear(QColor("#15191E"), QColor("#15191E"));
-            painter.fillRect(QRectF(inner.center().x()-32, inner.top(), 64, inner.height()), QColor("#A9C9E8"));
-            painter.setPen(QPen(QColor("#FFFFFF"), 1.5));
-            painter.drawLine(QPointF(inner.center().x()-32, inner.top()), QPointF(inner.center().x()-32, inner.bottom()));
-            painter.drawLine(QPointF(inner.center().x()+32, inner.top()), QPointF(inner.center().x()+32, inner.bottom()));
-        }
-        else if(id == "contact_shadows")
-        {
-            painter.fillRect(inner, QColor("#D4D7D9"));
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor("#45505A"));
-            painter.drawEllipse(QRectF(inner.center().x()-22, inner.center().y()-15, 44, 30));
-            painter.setBrush(QColor(20,24,28,155));
-            painter.drawEllipse(QRectF(inner.center().x()-5, inner.center().y()+7, 78, 15));
-        }
-        else if(id == "screen_space_reflections" || id == "material_screen_space_reflections")
-        {
-            painter.fillRect(inner, QColor("#111820"));
-            QLinearGradient g(inner.topLeft(), inner.bottomLeft());
-            g.setColorAt(0.0, QColor("#2B4050"));
-            g.setColorAt(0.52, QColor("#16232D"));
-            g.setColorAt(0.53, QColor("#477A8E"));
-            g.setColorAt(1.0, QColor("#0B1820"));
-            painter.fillRect(inner, g);
-            painter.setPen(QPen(QColor(150,220,255,170), 1.5));
-            painter.drawLine(QPointF(inner.left()+12, inner.center().y()), QPointF(inner.right()-12, inner.center().y()));
-            painter.drawLine(QPointF(inner.center().x()-22, inner.top()+9), QPointF(inner.center().x()+18, inner.center().y()-3));
-            painter.drawLine(QPointF(inner.center().x()+18, inner.center().y()+3), QPointF(inner.center().x()-26, inner.bottom()-8));
-        }
-        else if(id == "wet_ground_reflections")
-        {
-            QLinearGradient g(inner.topLeft(), inner.bottomLeft());
-            g.setColorAt(0.0, QColor("#24313A"));
-            g.setColorAt(0.50, QColor("#1A2025"));
-            g.setColorAt(0.51, QColor("#365C69"));
-            g.setColorAt(1.0, QColor("#0A151A"));
-            painter.fillRect(inner, g);
-            painter.setPen(QPen(QColor(120,205,230,150), 1.3));
-            for(int i=0; i<4; ++i)
-                painter.drawEllipse(QRectF(inner.center().x()-42+i*12, inner.center().y()+5+i*3, 44, 9));
-        }
-        else if(id == "luminance_tint")
-        {
-            QLinearGradient g(inner.topLeft(), inner.topRight());
-            g.setColorAt(0.0, QColor("#4F65B4"));
-            g.setColorAt(0.5, QColor("#20252D"));
-            g.setColorAt(1.0, QColor("#FFD280"));
-            painter.fillRect(inner, g);
-            painter.setPen(QPen(QColor(255,255,255,120), 1.2));
-            painter.drawLine(QPointF(inner.center().x(), inner.top()+8), QPointF(inner.center().x(), inner.bottom()-8));
-        }
-        else if(id == "chromatic_aberration")
-        {
-            painter.fillRect(inner, QColor("#10151A"));
-            const QRectF shape(inner.center().x() - 38, inner.top() + 10, 76, inner.height() - 20);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(255, 65, 78, 180)); painter.drawRoundedRect(shape.translated(-7, 0), 8, 8);
-            painter.setBrush(QColor(60, 220, 150, 180)); painter.drawRoundedRect(shape, 8, 8);
-            painter.setBrush(QColor(64, 120, 255, 180)); painter.drawRoundedRect(shape.translated(7, 0), 8, 8);
-        }
-        else if(id == "posterize")
-        {
-            const int bars = 6;
-            for(int i = 0; i < bars; ++i)
-            {
-                const double t = i / double(bars - 1);
-                painter.fillRect(QRectF(inner.left() + inner.width() * t, inner.top(), inner.width() / bars + 1.0, inner.height()),
-                                 QColor::fromHslF(0.58 - t * 0.18, 0.55, 0.28 + t * 0.45));
-            }
-        }
-        else if(id == "fisheye")
-        {
-            painter.fillRect(inner, QColor("#101820"));
-            painter.setPen(QPen(QColor("#79D8FF"), 1.5));
-            for(int x = static_cast<int>(inner.left()) + 8; x < inner.right(); x += 18)
-                painter.drawLine(QPointF(x, inner.top() + 4), QPointF(inner.center().x() + (x - inner.center().x()) * 0.7, inner.bottom() - 4));
-            painter.drawEllipse(QRectF(inner.left() + 10, inner.top() + 8, inner.width() - 20, inner.height() - 16));
-        }
-        else if(id == "paint_strokes")
-        {
-            fillLinear(QColor("#3B5875"), QColor("#B98B61"));
-            painter.setPen(Qt::NoPen);
-            for(int i = 0; i < 9; ++i)
-            {
-                const int w = 22 + (i % 3) * 10;
-                const int h = 9 + (i % 2) * 6;
-                const int x = static_cast<int>(inner.left()) + 8 + (i * 23) % static_cast<int>(inner.width() - w - 8);
-                const int y = static_cast<int>(inner.top()) + 8 + (i * 17) % static_cast<int>(inner.height() - h - 8);
-                painter.setBrush(QColor::fromHsl((210 + i * 9) % 360, 90, 110 + (i % 4) * 18, 210));
-                painter.drawRoundedRect(QRectF(x, y, w, h), 5, 5);
-            }
-        }
-        else if(id == "red_paint_splatter")
-        {
-            // Rain Drops - translucent cool droplets with long glass streaks.
-            QLinearGradient rainBg(inner.topLeft(), inner.bottomRight());
-            rainBg.setColorAt(0.0, QColor("#1B2D39"));
-            rainBg.setColorAt(1.0, QColor("#527486"));
-            painter.fillRect(inner, rainBg);
-            painter.setPen(QPen(QColor(220, 242, 255, 190), 1.2));
-            painter.setBrush(QColor(205, 235, 250, 70));
-            painter.drawEllipse(QRectF(inner.left() + 26, inner.top() + 9, 16, 25));
-            painter.drawEllipse(QRectF(inner.center().x() - 8, inner.top() + 17, 20, 30));
-            painter.drawEllipse(QRectF(inner.right() - 42, inner.top() + 8, 14, 21));
-            painter.setPen(QPen(QColor(210, 238, 252, 165), 2.0));
-            painter.drawLine(QPointF(inner.left() + 34, inner.top() + 30), QPointF(inner.left() + 35, inner.bottom() - 5));
-            painter.drawLine(QPointF(inner.center().x() + 2, inner.top() + 42), QPointF(inner.center().x() + 1, inner.bottom() - 3));
-            painter.drawLine(QPointF(inner.right() - 35, inner.top() + 26), QPointF(inner.right() - 36, inner.bottom() - 9));
-            painter.setBrush(QColor(230, 248, 255, 150));
-            painter.setPen(Qt::NoPen);
-            for(int i = 0; i < 10; ++i)
-            {
-                const double x = inner.left() + 12 + ((i * 37) % qMax(1, static_cast<int>(inner.width() - 24)));
-                const double y = inner.top() + 7 + ((i * 19) % qMax(1, static_cast<int>(inner.height() - 14)));
-                const double r = 1.5 + (i % 3);
-                painter.drawEllipse(QPointF(x, y), r, r * 1.35);
-            }
-        }
-        else if(id == "water_distortion")
-        {
-            fillLinear(QColor("#12324B"), QColor("#1E7FA2"));
-            painter.setPen(QPen(QColor(190, 244, 255, 180), 2.0));
-            for(int y = static_cast<int>(inner.top()) + 14; y < inner.bottom() - 8; y += 12)
-            {
-                QPainterPath path;
-                path.moveTo(inner.left(), y);
-                for(int x = static_cast<int>(inner.left()); x <= inner.right(); x += 8)
-                    path.lineTo(x, y + std::sin((x - inner.left()) * 0.12 + y * 0.08) * 3.5);
-                painter.drawPath(path);
-            }
-        }
-        else if(id == "psx_dithering")
-        {
-            painter.fillRect(inner, QColor("#17212B"));
-            const QColor cols[4] = {QColor("#203A5B"), QColor("#476A8D"), QColor("#8A6D6F"), QColor("#D0B477")};
-            for(int y = 0; y < 8; ++y)
-                for(int x = 0; x < 16; ++x)
-                    painter.fillRect(QRectF(inner.left()+x*inner.width()/16.0, inner.top()+y*inner.height()/8.0,
-                                            inner.width()/16.0+1, inner.height()/8.0+1), cols[(x+y*3)&3]);
-            painter.setPen(QPen(QColor(10,10,10,110),1.0));
-            for(int y=0;y<8;++y) for(int x=0;x<16;++x)
-                if(((x*5+y*3)&3)==0) painter.drawPoint(QPointF(inner.left()+x*inner.width()/16.0+2, inner.top()+y*inner.height()/8.0+2));
-        }
-        else if(id == "sharpness")
-        {
-            fillLinear(QColor("#253544"), QColor("#89A6BD"));
-            painter.setPen(QPen(QColor("#E8F5FF"), 2.0));
-            painter.drawRect(QRectF(inner.left()+20, inner.top()+18, inner.width()-40, inner.height()-36));
-            painter.drawLine(QPointF(inner.left()+26, inner.bottom()-24), QPointF(inner.center().x(), inner.top()+28));
-            painter.drawLine(QPointF(inner.center().x(), inner.top()+28), QPointF(inner.right()-28, inner.bottom()-30));
-        }
-        else if(id == "pixel_resolution")
-        {
-            painter.fillRect(inner, QColor("#10161D"));
-            const int sx=12, sy=6;
-            for(int y=0;y<sy;++y) for(int x=0;x<sx;++x)
-            {
-                const int h=(x*37+y*53)&255;
-                painter.fillRect(QRectF(inner.left()+x*inner.width()/sx,inner.top()+y*inner.height()/sy,
-                                        inner.width()/sx+1,inner.height()/sy+1), QColor::fromHsl(h,130,105+(y%3)*24));
-            }
-        }
-        else if(id == "vhs_tape" || id == "vhs_dropouts")
-        {
-            fillLinear(QColor("#1B2832"), QColor("#3D4650"));
-            painter.setPen(QPen(QColor(220,235,235,110),1.0));
-            for(int y=static_cast<int>(inner.top())+5;y<inner.bottom();y+=5)
-                painter.drawLine(QPointF(inner.left(),y),QPointF(inner.right(),y));
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(240,245,245,90));
-            painter.drawRect(QRectF(inner.left()+8,inner.center().y()-4,inner.width()*0.62,7));
-            painter.setBrush(QColor(70,210,225,100)); painter.drawRect(QRectF(inner.left()+18,inner.top()+15,inner.width()*0.38,5));
-            painter.setBrush(QColor(230,70,80,90)); painter.drawRect(QRectF(inner.left()+25,inner.top()+21,inner.width()*0.38,5));
-        }
-        else if(id == "sky_sun")
-        {
-            fillLinear(QColor("#173B72"), QColor("#E88963"), true);
-            QRadialGradient g(QPointF(inner.right()-42, inner.top()+29), 31);
-            g.setColorAt(0.0,QColor("#FFF5C8")); g.setColorAt(0.25,QColor("#FFD27C")); g.setColorAt(1.0,QColor(255,180,85,0));
-            painter.fillRect(inner,QBrush(g));
-        }
-        else if(id == "sky_moon")
-        {
-            painter.fillRect(inner,QColor("#071126"));
-            QRadialGradient g(QPointF(inner.right()-46, inner.top()+30), 30);
-            g.setColorAt(0.0,QColor("#F5F8FF")); g.setColorAt(0.22,QColor("#D5E3FF")); g.setColorAt(0.44,QColor(105,140,205,70)); g.setColorAt(1.0,QColor(0,0,0,0));
-            painter.fillRect(inner,QBrush(g));
-            painter.setPen(Qt::NoPen); painter.setBrush(QColor("#F0F4FF")); painter.drawEllipse(QPointF(inner.right()-46,inner.top()+30),10,10);
-            painter.setBrush(QColor("#071126")); painter.drawEllipse(QPointF(inner.right()-41,inner.top()+27),9,10);
-        }
-        else if(id == "sky_haze")
-        {
-            QLinearGradient g(inner.topLeft(),inner.bottomLeft());
-            g.setColorAt(0.0,QColor("#31547B")); g.setColorAt(0.42,QColor("#6D87A3")); g.setColorAt(0.63,QColor("#D2BEAD")); g.setColorAt(1.0,QColor("#6D5E62"));
-            painter.fillRect(inner,g);
-            QLinearGradient haze(inner.topLeft(),inner.bottomLeft()); haze.setColorAt(0.0,QColor(255,255,255,0)); haze.setColorAt(0.58,QColor(225,232,238,150)); haze.setColorAt(0.74,QColor(225,232,238,0));
-            painter.fillRect(inner,haze);
-        }
-        else if(id == "sky_stars")
-        {
-            painter.fillRect(inner,QColor("#061126"));
-            painter.setPen(Qt::NoPen);
-            for(int i=0;i<34;++i)
-            {
-                int x=static_cast<int>(inner.left())+5+(i*47)%qMax(6,static_cast<int>(inner.width()-10));
-                int y=static_cast<int>(inner.top())+5+(i*29)%qMax(6,static_cast<int>(inner.height()-10));
-                int r=(i%7==0)?2:1;
-                painter.setBrush(i%4==0?QColor("#BBD9FF"):QColor("#F4F6FF")); painter.drawEllipse(QPointF(x,y),r,r);
-            }
-        }
-        else if(id == "sky_clouds" || id == "sky_realistic_clouds")
-        {
-            fillLinear(QColor("#436B8C"), QColor("#B8C9D8"), true);
-            painter.setPen(Qt::NoPen);
-            for(int i=0;i<8;++i)
-            {
-                const qreal x=inner.left()+18+(i*31)%static_cast<int>(inner.width()-36);
-                const qreal y=inner.top()+20+(i%3)*16;
-                QColor c=id=="sky_realistic_clouds"?QColor(222,229,235,200):QColor(235,241,245,185);
-                painter.setBrush(c); painter.drawEllipse(QRectF(x-18,y-9,46,22));
-                if(id=="sky_realistic_clouds") { painter.setBrush(QColor(74,91,110,90)); painter.drawEllipse(QRectF(x-14,y+2,42,15)); }
-            }
-        }
-        else if(id == "sky_water")
-        {
-            QLinearGradient sky(inner.topLeft(), inner.bottomLeft());
-            sky.setColorAt(0.0, QColor("#244E7A"));
-            sky.setColorAt(0.48, QColor("#E58B61"));
-            sky.setColorAt(0.52, QColor("#5C6670"));
-            sky.setColorAt(1.0, QColor("#122C3B"));
-            painter.fillRect(inner, sky);
-            painter.setPen(QPen(QColor(210,230,235,105),1.2));
-            const qreal hy=inner.center().y();
-            painter.drawLine(QPointF(inner.left(),hy),QPointF(inner.right(),hy));
-            for(int i=0;i<5;++i)
-            {
-                const qreal y=hy+8+i*9;
-                QPainterPath wave; wave.moveTo(inner.left(),y);
-                for(int x=0;x<=50;++x)
-                {
-                    const qreal px=inner.left()+x*inner.width()/50.0;
-                    wave.lineTo(px,y+std::sin(x*0.42+i)*1.8);
-                }
-                painter.drawPath(wave);
-            }
-            QRadialGradient sun(QPointF(inner.right()-45,inner.top()+25),26);
-            sun.setColorAt(0,QColor("#FFF1C5")); sun.setColorAt(0.22,QColor("#FFD181")); sun.setColorAt(1,QColor(255,180,80,0));
-            painter.fillRect(inner,QBrush(sun));
-        }
-        else if(id == "sky_mountains")
-        {
-            fillLinear(QColor("#527397"), QColor("#D6A582"), true);
-            QPainterPath farPath; farPath.moveTo(inner.left(),inner.bottom());
-            for(int x=0;x<=12;++x){ qreal px=inner.left()+x*inner.width()/12.0; qreal py=inner.center().y()+9-std::abs(std::sin(x*1.37))*23; farPath.lineTo(px,py); }
-            farPath.lineTo(inner.right(),inner.bottom()); farPath.closeSubpath(); painter.fillPath(farPath,QColor("#53657A"));
-            QPainterPath nearPath; nearPath.moveTo(inner.left(),inner.bottom());
-            for(int x=0;x<=10;++x){ qreal px=inner.left()+x*inner.width()/10.0; qreal py=inner.center().y()+20-std::abs(std::sin(x*1.91+0.6))*31; nearPath.lineTo(px,py); }
-            nearPath.lineTo(inner.right(),inner.bottom()); nearPath.closeSubpath(); painter.fillPath(nearPath,QColor("#151B24"));
-        }
-        else if(id == "sky_aurora")
-        {
-            painter.fillRect(inner,QColor("#061528"));
-            QLinearGradient g(inner.topLeft(),inner.bottomRight()); g.setColorAt(0.0,QColor(30,255,145,0)); g.setColorAt(0.45,QColor(45,235,155,210)); g.setColorAt(0.72,QColor(91,105,255,165)); g.setColorAt(1.0,QColor(50,70,180,0));
-            QPainterPath pth; pth.moveTo(inner.left(),inner.bottom()-8);
-            for(int x=0;x<=60;++x){ qreal px=inner.left()+x*inner.width()/60.0; qreal py=inner.center().y()+std::sin(x*0.31)*13+std::sin(x*0.09)*9; pth.lineTo(px,py); }
-            pth.lineTo(inner.right(),inner.bottom()); pth.lineTo(inner.left(),inner.bottom()); pth.closeSubpath(); painter.fillPath(pth,g);
-        }
-        else if(id == "sky_nebula")
-        {
-            painter.fillRect(inner,QColor("#020817"));
-            QRadialGradient g1(QPointF(inner.left()+inner.width()*0.38,inner.center().y()),inner.width()*0.35); g1.setColorAt(0,QColor(75,80,255,220)); g1.setColorAt(0.5,QColor(145,52,190,120)); g1.setColorAt(1,QColor(0,0,0,0)); painter.fillRect(inner,QBrush(g1));
-            QRadialGradient g2(QPointF(inner.right()-35,inner.top()+24),inner.width()*0.24); g2.setColorAt(0,QColor(40,210,220,140)); g2.setColorAt(1,QColor(0,0,0,0)); painter.fillRect(inner,QBrush(g2));
-        }
-        else if(id == "edge_glow")
-        {
-            painter.fillRect(inner, QColor("#101820"));
-            QRadialGradient gradient(inner.center(), inner.height() * 0.46);
-            gradient.setColorAt(0.0, QColor("#172431"));
-            gradient.setColorAt(0.65, QColor("#254A5A"));
-            gradient.setColorAt(0.88, QColor("#77F0FF"));
-            gradient.setColorAt(1.0, QColor("#0A0D11"));
-            painter.setBrush(gradient);
-            painter.setPen(Qt::NoPen);
-            painter.drawEllipse(QRectF(inner.center().x() - 34, inner.top() + 5, 68, inner.height() - 10));
-        }
-        else if(id == "emission")
-        {
-            painter.fillRect(inner, QColor("#071116"));
-            QRadialGradient gradient(inner.center(), inner.width() * 0.32);
-            gradient.setColorAt(0.0, QColor("#D9FFFF"));
-            gradient.setColorAt(0.18, QColor("#66ECFF"));
-            gradient.setColorAt(0.55, QColor(50, 190, 235, 95));
-            gradient.setColorAt(1.0, QColor(0, 0, 0, 0));
-            painter.fillRect(inner, QBrush(gradient));
-        }
-        else if(id == "dissolve")
-        {
-            fillLinear(QColor("#0C1820"), QColor("#19455B"));
-            for(int i = 0; i < 18; ++i)
-            {
-                const int x = static_cast<int>(inner.left()) + (i * 47) % static_cast<int>(inner.width() - 10);
-                const int y = static_cast<int>(inner.top()) + (i * 23) % static_cast<int>(inner.height() - 8);
-                painter.fillRect(QRect(x, y, 8 + (i % 3) * 3, 5 + (i % 2) * 4), QColor("#050708"));
-            }
-            painter.setPen(QPen(QColor("#FF9A4F"), 2.0));
-            painter.drawLine(QPointF(inner.center().x() + 12, inner.top() + 4), QPointF(inner.center().x() - 8, inner.bottom() - 4));
-        }
-        else if(id == "gradient")
-        {
-            fillLinear(QColor("#63D8D0"), QColor("#5740A8"), true);
-        }
-        else if(id == "grid_rings")
-        {
-            painter.fillRect(inner, QColor("#0C1720"));
-            painter.setPen(QPen(QColor("#5BDCF2"), 1.2));
-            for(int x = static_cast<int>(inner.left()) + 10; x < inner.right(); x += 18)
-                painter.drawLine(QPointF(x, inner.top()), QPointF(x, inner.bottom()));
-            for(int y = static_cast<int>(inner.top()) + 8; y < inner.bottom(); y += 15)
-                painter.drawLine(QPointF(inner.left(), y), QPointF(inner.right(), y));
-            painter.setPen(QPen(QColor("#C1F7FF"), 1.5));
-            painter.drawEllipse(inner.center(), 24, 17);
-        }
-        else
-        {
-            fillLinear(QColor("#18222C"), QColor("#30495D"));
-        }
-
-        if(!supported)
-        {
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(8, 10, 13, 145));
-            painter.drawRoundedRect(inner, 5.0, 5.0);
-        }
-        return pixmap;
-    }
+    // Effect-browser artwork was intentionally removed. Cards are text-only.
 
     bool beginnerProjectNameIsAutomatic(beginner::Target target, const QString& name) const
     {
@@ -15643,7 +15111,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* title = new QLabel("Add an effect");
         title->setObjectName("InspectorTitle");
         auto* help = new QLabel(
-            QString("Pick a visual effect for your %1 shader. Shader Studio only lets you add combinations with a BO3-safe implementation.")
+            QString("Pick a visual effect for your %1 shader. Only effects that actually work on this shader type are shown.")
                 .arg(beginnerTargetShortName(beginnerProject_.target).toLower()));
         help->setWordWrap(true);
         help->setObjectName("CompactHelp");
@@ -15666,7 +15134,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         categoryList->addItem("All Effects");
         QStringList categories;
         for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
+        {
+            if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
             if(!categories.contains(definition.category)) categories << definition.category;
+        }
         for(const QString& category : categories) categoryList->addItem(category);
         int savedCategoryRow = 0;
         for(int row = 0; row < categoryList->count(); ++row)
@@ -15711,20 +15182,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QVector<const beginner::EffectDefinition*> visible;
             for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             {
+                // Do not show incompatible shader-type effects at all. A Material
+                // browser should contain Material effects, not a wall of disabled
+                // Screen/Sky cards that can never be selected.
+                if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
                 if(selectedCategory != "All Effects" && definition.category != selectedCategory) continue;
                 if(!query.isEmpty() &&
                    !definition.name.contains(query, Qt::CaseInsensitive) &&
                    !definition.description.contains(query, Qt::CaseInsensitive) &&
-                   !definition.category.contains(query, Qt::CaseInsensitive) &&
-                   !beginnerEffectAvailability(definition).contains(query, Qt::CaseInsensitive))
+                   !definition.category.contains(query, Qt::CaseInsensitive))
                     continue;
                 visible.push_back(&definition);
             }
-            std::stable_sort(visible.begin(), visible.end(), [&](const auto* a, const auto* b)
+            std::stable_sort(visible.begin(), visible.end(), [](const auto* a, const auto* b)
             {
-                const bool aSupported = beginner::supportsTarget(*a, beginnerProject_.target);
-                const bool bSupported = beginner::supportsTarget(*b, beginnerProject_.target);
-                if(aSupported != bSupported) return aSupported > bSupported;
                 return a->name.localeAwareCompare(b->name) < 0;
             });
 
@@ -15732,41 +15203,33 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             for(const beginner::EffectDefinition* definitionPtr : visible)
             {
                 const beginner::EffectDefinition& definition = *definitionPtr;
-                const bool supported = beginner::supportsTarget(definition, beginnerProject_.target);
 
                 auto* card = new BeginnerEffectCard();
                 card->setObjectName("BeginnerEffectCard");
-                card->setProperty("supported", supported);
-                card->setMinimumHeight(currentColumns == 1 ? 186 : 218);
+                card->setProperty("supported", true);
+                card->setMinimumHeight(currentColumns == 1 ? 122 : 136);
                 card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-                if(supported)
+                card->setCursor(Qt::PointingHandCursor);
+                card->setToolTip("Double-click anywhere on this card to add the effect.");
+                card->activated = [this, &dlg, id = definition.id]
                 {
-                    card->setCursor(Qt::PointingHandCursor);
-                    card->setToolTip("Double-click anywhere on this card to add the effect.");
-                    card->activated = [this, &dlg, id = definition.id]
-                    {
-                        addBeginnerEffect(id);
-                        dlg.accept();
-                    };
-                }
+                    addBeginnerEffect(id);
+                    dlg.accept();
+                };
 
                 auto* layout = new QVBoxLayout(card);
                 layout->setContentsMargins(12, 10, 12, 10);
                 layout->setSpacing(5);
 
-                auto* visual = new QLabel();
-                visual->setPixmap(beginnerEffectPreviewPixmap(definition, supported));
-                visual->setFixedHeight(58);
-                visual->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
-                visual->setAttribute(Qt::WA_TransparentForMouseEvents);
-                layout->addWidget(visual);
-
+                // The old effect-browser artwork was decorative/generated and
+                // frequently misleading. Keep cards compact and descriptive so
+                // the browser behaves like a shader editor rather than a gallery.
                 auto* headingRow = new QHBoxLayout();
                 auto* name = new QLabel(definition.name);
-                name->setObjectName(supported ? "EffectCardTitle" : "EffectCardTitleDisabled");
+                name->setObjectName("EffectCardTitle");
                 name->setAttribute(Qt::WA_TransparentForMouseEvents);
                 auto* category = new QLabel(definition.category.toUpper());
-                category->setObjectName(supported ? "EffectCardCategory" : "EffectCardCategoryDisabled");
+                category->setObjectName("EffectCardCategory");
                 category->setAttribute(Qt::WA_TransparentForMouseEvents);
                 headingRow->addWidget(name, 1);
                 headingRow->addWidget(category, 0, Qt::AlignRight);
@@ -15775,42 +15238,28 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 auto* description = new QLabel(definition.description);
                 description->setWordWrap(true);
                 description->setObjectName("CompactHelp");
-                description->setEnabled(supported);
                 description->setAttribute(Qt::WA_TransparentForMouseEvents);
                 layout->addWidget(description);
                 layout->addStretch(1);
 
                 auto* availability = new QLabel();
                 availability->setWordWrap(true);
-                if(supported)
-                {
-                    const bool usesSceneDepth = beginnerEffectUsesSceneDepth(definition.id);
-                    availability->setText(usesSceneDepth
-                        ? QString::fromUtf8("✓ Works with this shader   •   Uses scene depth")
-                        : QString::fromUtf8("✓ Works with this shader"));
-                    availability->setObjectName("EffectAvailabilityGood");
-                }
-                else
-                {
-                    availability->setText("Works with: " + beginnerEffectAvailability(definition));
-                    availability->setObjectName("EffectAvailabilityWarn");
-                }
+                const bool usesSceneDepth = beginnerEffectUsesSceneDepth(definition.id);
+                availability->setText(usesSceneDepth
+                    ? QString::fromUtf8("✓ BO3 compatible   •   Scene/Float-Z sampling")
+                    : QString::fromUtf8("✓ BO3 compatible"));
+                availability->setObjectName("EffectAvailabilityGood");
                 availability->setAttribute(Qt::WA_TransparentForMouseEvents);
                 layout->addWidget(availability);
 
-                auto* add = new QPushButton(supported ? "+ Add Effect" : "Not available for this shader");
-                add->setEnabled(supported);
-                if(supported) add->setObjectName("PrimaryAction");
+                auto* add = new QPushButton("+ Add Effect");
+                add->setObjectName("PrimaryAction");
                 layout->addWidget(add);
-
-                if(supported)
+                connect(add, &QPushButton::clicked, &dlg, [this, &dlg, id = definition.id]
                 {
-                    connect(add, &QPushButton::clicked, &dlg, [this, &dlg, id = definition.id]
-                    {
-                        addBeginnerEffect(id);
-                        dlg.accept();
-                    });
-                }
+                    addBeginnerEffect(id);
+                    dlg.accept();
+                });
 
                 cardGrid->addWidget(card, visibleIndex / currentColumns, visibleIndex % currentColumns);
                 ++visibleIndex;
