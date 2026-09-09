@@ -68,5 +68,6 @@ if "!ISOLATED_BUILD!"=="1" (
     )
     if exist "dist\version.json" copy /Y "dist\version.json" "!REGRESSION_DIST!\version.json" >nul
 )
+if exist shaders xcopy /E /I /Y /Q shaders "!REGRESSION_DIST!\shaders" >nul
 if exist tests xcopy /E /I /Y /Q tests "!REGRESSION_DIST!\tests" >nul
 exit /b 0

@@ -801,7 +801,18 @@ public:
     void setSkyEditorSunInteractionEnabled(bool enabled)
     {
         skyEditorSunInteractionEnabled_ = enabled;
-        if(!enabled && sunDragging_)
+        if(!enabled && !skySunShiftInteractionEnabled_ && sunDragging_)
+        {
+            sunDragging_ = false;
+            releaseMouse();
+            unsetCursor();
+        }
+    }
+
+    void setSkySunShiftInteractionEnabled(bool enabled)
+    {
+        skySunShiftInteractionEnabled_ = enabled;
+        if(!enabled && !skyEditorSunInteractionEnabled_ && sunDragging_)
         {
             sunDragging_ = false;
             releaseMouse();
@@ -835,7 +846,11 @@ protected:
 
     void mousePressEvent(QMouseEvent* event) override
     {
-        if(skyEditorSunInteractionEnabled_ && event->button() == Qt::LeftButton && event->modifiers() == Qt::NoModifier)
+        const bool plainSkyEditorDrag = skyEditorSunInteractionEnabled_ &&
+            event->button() == Qt::LeftButton && event->modifiers() == Qt::NoModifier;
+        const bool shiftedSkySunDrag = skySunShiftInteractionEnabled_ &&
+            event->button() == Qt::LeftButton && (event->modifiers() & Qt::ShiftModifier);
+        if(plainSkyEditorDrag || shiftedSkySunDrag)
         {
             sunDragging_ = true;
             setCursor(Qt::CrossCursor);
@@ -976,6 +991,7 @@ private:
     bool cameraPanning_ = false;
     bool lightDragging_ = false;
     bool skyEditorSunInteractionEnabled_ = false;
+    bool skySunShiftInteractionEnabled_ = false;
     bool sunDragging_ = false;
     QPointF lastCameraMouse_{};
     std::function<void()> cameraChangedCallback_;
@@ -1563,6 +1579,40 @@ public:
             if(!tintDepthDebugHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
                !tintDepthDebugHlsl.contains("BO3BeginnerSampleRawDepthPoint"))
                 return "Beginner depth diagnostics did not force the preview-only Float-Z helpers.";
+
+            QString depthCaptureSource;
+            const QStringList depthCaptureCandidates = {
+                QDir(QCoreApplication::applicationDirPath()).filePath("shaders/bo3_floatz_capture.hlsl"),
+                QDir::current().filePath("shaders/bo3_floatz_capture.hlsl")
+            };
+            for(const QString& candidate : depthCaptureCandidates)
+            {
+                QFile captureFile(candidate);
+                if(captureFile.open(QIODevice::ReadOnly | QIODevice::Text))
+                {
+                    depthCaptureSource = QString::fromUtf8(captureFile.readAll());
+                    break;
+                }
+            }
+            if(depthCaptureSource.isEmpty() ||
+               !depthCaptureSource.contains("BO3CaptureEncodeDepth") ||
+               !depthCaptureSource.contains("BO3CaptureCalibration") ||
+               !depthCaptureSource.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               !depthCaptureSource.contains("PostFx_DenormalizeColor"))
+                return "Bundled BO3 ground-truth Float-Z capture shader is missing or incomplete.";
+            QString depthCaptureCompileDiagnostics;
+            if(!compileGlslValidationHlsl(depthCaptureSource, depthCaptureCompileDiagnostics, true))
+                return "Bundled BO3 Float-Z capture HLSL failed FXC validation: " + depthCaptureCompileDiagnostics;
+            bo3::PackageAdapterRequest depthCaptureRequest;
+            depthCaptureRequest.target = bo3::PackageTarget::PostFx;
+            depthCaptureRequest.configuration = bo3::PackageConfiguration::Runtime;
+            depthCaptureRequest.source = depthCaptureSource;
+            depthCaptureRequest.sourceFileName = "bo3_floatz_capture.hlsl";
+            const bo3::PackageAdapterResult depthCaptureAdapted = bo3::adaptShaderPackage(depthCaptureRequest);
+            if(depthCaptureAdapted.confidence == bo3::AutomationConfidence::Unsupported ||
+               depthCaptureAdapted.diagnostics.hasErrors())
+                return "Bundled BO3 Float-Z capture shader could not be adapted as runtime PostFX: " +
+                       depthCaptureAdapted.diagnostics.toText();
 
             const QStringList depthSceneIds = {
                 "shadows_of_evil", "der_eisendrache", "gorod_krovi", "the_giant", "zetsubou"};
@@ -3514,10 +3564,10 @@ private:
     {
         if (!preview_ || !camera3D_ || !cameraInfo_) return;
 
-        const bool beginnerSkyEditor = beginnerUiMode_ && beginnerProjectActive_ &&
+        const bool beginnerSkyMode = beginnerUiMode_ && beginnerProjectActive_ &&
             beginnerProject_.target == beginner::Target::Sky;
         bool beginnerSkyHasSun = false;
-        if(beginnerSkyEditor)
+        if(beginnerSkyMode)
         {
             for(const beginner::Effect& effect : beginnerProject_.effects)
             {
@@ -3527,31 +3577,59 @@ private:
                     break;
                 }
             }
-        }
 
-        // Beginner Sky deliberately uses a fixed full-frame 2D editor. The sky
-        // direction is generated by the shader, so orbiting the preview camera
-        // only obscures the authoring model. Plain left-drag instead moves the
-        // shader's sun directly and updates its runtime constants every frame.
-        preview_->setSkyEditorSunInteractionEnabled(beginnerSkyEditor && beginnerSkyHasSun);
-        if(beginnerSkyEditor)
-        {
+            // Beginner Sky has two authoring views of the exact same shader:
+            // 3D Skybox restores the original orbit/look camera, while 2D Sky
+            // Editor freezes that camera and reserves plain left-drag for direct
+            // sun placement. In 3D, Shift+left-drag moves the same Beginner sun
+            // without stealing normal left-drag camera navigation.
             {
                 QSignalBlocker blocker(camera3D_);
-                camera3D_->setChecked(false);
+                camera3D_->setChecked(beginnerSky3DView_);
             }
-            camera3D_->setText("Sky Editor");
-            camera3D_->setEnabled(false);
-            preview_->setCameraInteractionEnabled(false);
-            cameraInfo_->setText(beginnerSkyHasSun
-                ? "Full sky editor  |  Left-drag to position sun  |  sliders update live"
-                : "Full sky editor  |  Add Sun & Time to drag the sun directly");
+            camera3D_->setEnabled(true);
+            camera3D_->setText(beginnerSky3DView_ ? "3D Skybox" : "2D Sky Editor");
+            camera3D_->setToolTip(beginnerSky3DView_
+                ? "3D Skybox: left-drag to look around, Shift+left-drag to move the Beginner sun, mouse wheel changes FOV, and R resets the view."
+                : "2D Sky Editor: the camera is fixed and left-drag directly positions the Beginner sun. Toggle back to restore 3D skybox navigation.");
+            preview_->setSkyEditorSunInteractionEnabled(!beginnerSky3DView_ && beginnerSkyHasSun);
+            preview_->setSkySunShiftInteractionEnabled(beginnerSky3DView_ && beginnerSkyHasSun);
+            preview_->setCameraInteractionEnabled(beginnerSky3DView_);
+            preview_->setToolTip(beginnerSky3DView_
+                ? (beginnerSkyHasSun
+                    ? "3D Skybox: left-drag looks around; Shift+left-drag moves the Beginner sun; wheel changes FOV; R or double-click resets the camera."
+                    : "3D Skybox: left-drag looks around; wheel changes FOV; R or double-click resets the camera.")
+                : (beginnerSkyHasSun
+                    ? "2D Sky Editor: left-drag directly positions the Beginner sun."
+                    : "2D Sky Editor: add Sun & Time to enable direct sun dragging."));
+
+            if(beginnerSky3DView_)
+            {
+                cameraInfo_->setText(beginnerSkyHasSun
+                    ? QString("3D Skybox  |  L:look  Shift+L:move sun  |  Yaw %1  Pitch %2  FOV %3  |  Wheel:FOV  R:reset")
+                        .arg(preview_->renderer().CameraYawDegrees(), 0, 'f', 1)
+                        .arg(preview_->renderer().CameraPitchDegrees(), 0, 'f', 1)
+                        .arg(preview_->renderer().CameraFovDegrees(), 0, 'f', 1)
+                    : QString("3D Skybox  |  L:look  |  Yaw %1  Pitch %2  FOV %3  |  Add Sun & Time for Shift+drag sun")
+                        .arg(preview_->renderer().CameraYawDegrees(), 0, 'f', 1)
+                        .arg(preview_->renderer().CameraPitchDegrees(), 0, 'f', 1)
+                        .arg(preview_->renderer().CameraFovDegrees(), 0, 'f', 1));
+            }
+            else
+            {
+                cameraInfo_->setText(beginnerSkyHasSun
+                    ? "2D Sky Editor  |  Left-drag to position sun  |  sliders update live"
+                    : "2D Sky Editor  |  Add Sun & Time to drag the sun directly");
+            }
             return;
         }
 
+        preview_->setSkyEditorSunInteractionEnabled(false);
+        preview_->setSkySunShiftInteractionEnabled(false);
         camera3D_->setEnabled(true);
         const bool enabled = camera3D_->isChecked();
         camera3D_->setText(enabled ? "Perspective" : "2D Preview");
+        camera3D_->setToolTip("Toggle interactive 3D camera navigation. Off uses the shader's normal 2D/fullscreen preview.");
         const bool geometryMode = (preview_->renderer().GetPreviewMode() == PreviewMode::ForwardMaterial ||
                                    preview_->renderer().GetPreviewMode() == PreviewMode::DeferredGBuffer);
         const bool deferredMode = preview_->renderer().GetPreviewMode() == PreviewMode::DeferredGBuffer;
@@ -14414,6 +14492,119 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return "Shadows of Evil";
     }
 
+    bool importBO3DepthCaptureSheet(const QString& requestedPath = QString(), bool showMessage = true)
+    {
+        if(!preview_) return false;
+        QString path = requestedPath;
+        if(path.trimmed().isEmpty())
+        {
+            path = QFileDialog::getOpenFileName(
+                this,
+                "Import BO3 Float-Z Capture",
+                currentDirectory(),
+                "Lossless capture images (*.png *.bmp *.tif *.tiff);;All images (*.png *.bmp *.tif *.tiff *.jpg *.jpeg);;All files (*.*)");
+        }
+        if(path.isEmpty()) return false;
+
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if((suffix == "jpg" || suffix == "jpeg") && showMessage)
+        {
+            QMessageBox::warning(
+                this,
+                "BO3 Float-Z Capture",
+                "JPEG is lossy and can corrupt the encoded depth cells. A native-resolution PNG is strongly recommended.\n\n"
+                "The importer will reject the image if calibration or too many depth cells were altered.");
+        }
+
+        QString initError;
+        if(!preview_->ensureInitialized(initError))
+        {
+            if(showMessage && !initError.isEmpty())
+                QMessageBox::critical(this, "DirectX initialization failed", initError);
+            return false;
+        }
+
+        std::wstring error;
+        if(!preview_->renderer().ImportBO3DepthCaptureSheet(fs::path(path.toStdWString()), error))
+        {
+            if(showMessage)
+                QMessageBox::warning(this, "BO3 Float-Z Capture Import", ToQString(error));
+            return false;
+        }
+
+        sourceImagePath_.clear();
+        preview_->update();
+        rebuildBeginnerEffectParameters();
+        updateBeginnerBuilderSummary();
+        if(showMessage)
+        {
+            statusBar()->showMessage(
+                QString("Ground-truth BO3 Float-Z capture loaded — paired same-frame color/depth, zNear=%1. BO3 does not need to stay open.")
+                    .arg(preview_->renderer().PreviewZNear(), 0, 'g', 6),
+                6500);
+        }
+        return true;
+    }
+
+    void showBO3DepthCaptureDialog()
+    {
+        QDialog dialog(this);
+        dialog.setWindowTitle("BO3 Ground-Truth Float-Z Capture");
+        dialog.resize(640, 430);
+        auto* root = new QVBoxLayout(&dialog);
+
+        auto* title = new QLabel("Capture BO3's real Float-Z once, then preview depth effects offline");
+        title->setObjectName("InspectorTitle");
+        title->setWordWrap(true);
+        root->addWidget(title);
+
+        auto* intro = new QLabel(
+            "The old built-in depth maps are only approximations. This workflow captures resolvedScene + BO3 floatZ from the exact same in-game frame, including BO3's 63/64 viewmodel depth-hack classification and the frame's zNear value. After the PNG is imported, BO3 can be closed.");
+        intro->setWordWrap(true);
+        root->addWidget(intro);
+
+        auto* steps = new QLabel(
+            "1. Open the bundled capture shader below.\n"
+            "2. Export/install it as PostFX with frameBuffer = resolvedScene and DepthSampler = floatZ.\n"
+            "3. Activate that PostFX in BO3 and frame the scene you want. The screen should become a 2x2 capture sheet.\n"
+            "4. Hide HUD/overlays if they draw over the sheet, then save a LOSSLESS native-resolution PNG. Do not crop or resize it.\n"
+            "5. Import that PNG here. Shader Studio decodes the real depth and uses it for Cartoon Outlines, AO, fog, DoF and target masks.");
+        steps->setWordWrap(true);
+        steps->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        root->addWidget(steps);
+
+        auto* note = new QLabel(
+            "Capture sheet: top-left = color, top-right = encoded Float-Z, bottom-left = readable depth diagnostic, bottom-right = calibration/zNear. The importer validates the calibration before accepting the depth data.");
+        note->setWordWrap(true);
+        note->setObjectName("CompactHelp");
+        root->addWidget(note);
+        root->addStretch(1);
+
+        auto* actions = new QHBoxLayout();
+        auto* openShader = new QPushButton("Open Capture Shader");
+        openShader->setObjectName("PrimaryAction");
+        auto* importCapture = new QPushButton("Import Capture PNG...");
+        auto* close = new QPushButton("Close");
+        actions->addWidget(openShader);
+        actions->addWidget(importCapture);
+        actions->addStretch(1);
+        actions->addWidget(close);
+        root->addLayout(actions);
+
+        connect(openShader, &QPushButton::clicked, &dialog, [this, &dialog]
+        {
+            dialog.accept();
+            openBundledExample("bo3_floatz_capture.hlsl");
+        });
+        connect(importCapture, &QPushButton::clicked, &dialog, [this]
+        {
+            importBO3DepthCaptureSheet();
+        });
+        connect(close, &QPushButton::clicked, &dialog, &QDialog::reject);
+        dialog.exec();
+    }
+
+
     void activateBuiltInDepthPreview(bool showMessage = true, const QString& requestedSceneId = QString())
     {
         if(!preview_) return;
@@ -14440,7 +14631,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateBeginnerBuilderSummary();
         if(showMessage)
             statusBar()->showMessage(
-                QString("Using BO3 Game Depth Preview — %1 with paired image-aligned preview depth + viewmodel data. BO3 export uses live floatZ.")
+                QString("Using LEGACY approximate Game Depth Preview — %1. For trustworthy depth, use Tools > BO3 Ground-Truth Float-Z Capture. BO3 export itself still uses live floatZ.")
                     .arg(beginnerDepthPreviewSceneName(sceneId)),
                 4600);
     }
@@ -14694,16 +14885,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             const bool hasDepth = preview_ && preview_->renderer().HasPreviewDepthTexture();
             const bool builtInDepth = preview_ && preview_->renderer().BuiltInDepthSceneActive();
+            const bool capturedDepth = preview_ && preview_->renderer().CapturedBO3DepthSceneActive();
             auto* depthNotice = new QLabel();
-            if(builtInDepth)
-                depthNotice->setText(QString("BO3 Game Depth Preview active: %1. The screenshot is real BO3 and uses a paired depth/viewmodel preview asset. Export uses BO3's live Float-Z.")
+            if(capturedDepth)
+                depthNotice->setText(QString("Ground-truth BO3 Float-Z capture active. Color and depth came from the same BO3 frame; the 63/64 viewmodel category and captured zNear (%1) are being used directly in the preview.")
+                    .arg(preview_->renderer().PreviewZNear(), 0, 'g', 6));
+            else if(builtInDepth)
+                depthNotice->setText(QString("LEGACY approximate Game Depth Preview active: %1. This depth was inferred/authored from the screenshot and is not ground truth. Use Import Real BO3 Capture below for trustworthy outlines/AO/fog.")
                     .arg(beginnerDepthPreviewSceneName(beginnerDepthPreviewSceneId_)));
             else if(hasDepth)
-                depthNotice->setText("Matching custom depth is loaded for this preview image. BO3 supplies live Float-Z automatically after export.");
+                depthNotice->setText("A custom depth texture is loaded. It can be useful, but only a BO3 Float-Z capture reproduces the game's actual Float-Z/viewmodel classification.");
             else
-                depthNotice->setText("This effect needs scene depth. Pick a BO3 Game Depth Preview scene below; Shader Studio loads its paired depth/viewmodel preview data automatically.");
+                depthNotice->setText("This effect needs scene depth. Import a real BO3 Float-Z capture for ground-truth previewing, or use one of the legacy approximate scenes below as a temporary fallback.");
             depthNotice->setWordWrap(true);
-            depthNotice->setObjectName(hasDepth ? "DepthStatusGood" : "DepthStatusWarn");
+            depthNotice->setObjectName((capturedDepth || (hasDepth && !builtInDepth)) ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
 
             auto* depthSceneRow = new QWidget();
@@ -14756,9 +14951,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 liveCompileTimer_.start();
             });
 
-            auto* depthScene = new QPushButton(builtInDepth ? "Refresh Game Depth Preview" : "Use Game Depth Preview");
-            depthScene->setObjectName(builtInDepth ? "" : "PrimaryAction");
-            depthScene->setToolTip("Use a real BO3 screenshot with a paired preview depth map and first-person viewmodel mask. BO3 export still uses the live Float-Z surface.");
+            auto* realDepthCapture = new QPushButton(capturedDepth ? "Import Another Real BO3 Capture..." : "Set Up / Import Real BO3 Float-Z Capture...");
+            realDepthCapture->setObjectName("PrimaryAction");
+            realDepthCapture->setToolTip("Create or import the 2x2 lossless capture sheet produced by the bundled BO3 Float-Z capture shader. This uses ground-truth BO3 depth instead of guessed screenshot depth.");
+            beginnerEffectParamsLayout_->addWidget(realDepthCapture);
+            connect(realDepthCapture, &QPushButton::clicked, this, [this, capturedDepth]
+            {
+                if(capturedDepth) importBO3DepthCaptureSheet();
+                else showBO3DepthCaptureDialog();
+            });
+
+            auto* depthScene = new QPushButton(builtInDepth ? "Refresh Legacy Approximate Scene" : "Use Legacy Approximate Scene");
+            depthScene->setToolTip("Temporary fallback only: these bundled screenshot depth maps are authored/inferred approximations, not real BO3 Float-Z captures.");
             beginnerEffectParamsLayout_->addWidget(depthScene);
             connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
 
@@ -14961,17 +15165,36 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const double nx = std::clamp(position.x() / width, 0.0, 1.0);
         const double ny = std::clamp(position.y() / height, 0.0, 1.0);
 
-        // The Sky Editor locks the preview camera at yaw/pitch zero. Convert the
-        // mouse pixel through that same perspective ray used by the built-in sky
-        // vertex shader, so the generated sun disk lands under the cursor rather
-        // than using an unrelated 0..1 screen-space approximation.
+        // Convert the mouse pixel through the exact perspective basis used by
+        // the built-in sky vertex shader. This works in both views: the 2D Sky
+        // Editor uses the current frozen camera basis, while Shift+drag in the
+        // 3D Skybox includes the current yaw/pitch so the sun lands beneath the
+        // cursor in world-space rather than jumping when the camera is rotated.
         const double ndcX = nx * 2.0 - 1.0;
         const double ndcY = 1.0 - ny * 2.0;
         const double aspect = width / height;
-        const double tanHalfFov = std::tan(preview_->renderer().CameraFovDegrees() * 0.5 * 3.14159265358979323846 / 180.0);
-        double rayX = 1.0;
-        double rayY = ndcX * aspect * tanHalfFov;
-        double rayZ = ndcY * tanHalfFov;
+        const double pi = 3.14159265358979323846;
+        const double tanHalfFov = std::tan(preview_->renderer().CameraFovDegrees() * 0.5 * pi / 180.0);
+        const double yaw = preview_->renderer().CameraYawDegrees() * pi / 180.0;
+        const double pitch = preview_->renderer().CameraPitchDegrees() * pi / 180.0;
+        const double cp = std::cos(pitch);
+        const double sp = std::sin(pitch);
+        const double cy = std::cos(yaw);
+        const double sy = std::sin(yaw);
+        const double forwardX = cp * cy;
+        const double forwardY = cp * sy;
+        const double forwardZ = sp;
+        const double rightX = -sy;
+        const double rightY = cy;
+        const double rightZ = 0.0;
+        const double upX = -sp * cy;
+        const double upY = -sp * sy;
+        const double upZ = cp;
+        const double screenX = ndcX * aspect * tanHalfFov;
+        const double screenY = ndcY * tanHalfFov;
+        double rayX = forwardX + rightX * screenX + upX * screenY;
+        double rayY = forwardY + rightY * screenX + upY * screenY;
+        double rayZ = forwardZ + rightZ * screenX + upZ * screenY;
         const double rayLength = std::max(1e-8, std::sqrt(rayX*rayX + rayY*rayY + rayZ*rayZ));
         rayX /= rayLength; rayY /= rayLength; rayZ /= rayLength;
         double manualAzimuth = std::atan2(rayY, rayX) / (2.0 * 3.14159265358979323846);
@@ -16023,6 +16246,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         savePreviewPackageAction_->setToolTip("Save the exact live temporary package after BO3 validation reaches PASS or WARNING. FAIL/UNKNOWN packages cannot be saved as validated output.");
         packageAsMenu->setToolTip("Analyze the current HLSL, adapt a protected copy when needed, generate a structured techset, and validate the resulting BO3 package.");
 
+        auto* depthCaptureAction = toolsMenu->addAction("BO3 Ground-Truth Float-Z Capture...");
+        depthCaptureAction->setToolTip("Capture BO3 resolvedScene + real floatZ from one frame, then import it as an offline depth-preview scene. This replaces guessed screenshot depth with ground-truth BO3 data.");
+
         auto* glslConverterAction = toolsMenu->addAction("GLSL → BO3 HLSL Converter...");
         glslConverterAction->setToolTip("Convert common GLSL/Shadertoy fragment shaders into BO3 PostFX, procedural sky, Material / Surface, or HLSL syntax.");
         auto* shaderInputsAction = toolsMenu->addAction("Shader Inputs / Textures...");
@@ -16066,7 +16292,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         sourceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         sourceButton->setMinimumWidth(104);
         sourceButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide 3D depth; depth effects can use BO3 Game Depth Preview instead.");
+        sourceButton->setToolTip("Choose the image or screenshot used to preview screen effects. Color-only images cannot provide real 3D depth; use a ground-truth BO3 Float-Z capture for depth effects.");
         beginnerPreviewImageToolbarAction_ = toolbar->addWidget(sourceButton);
 
         beginnerLiveGameToolbarAction_ = toolbar->addAction("Live Game");
@@ -16087,7 +16313,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Use one of the built-in BO3 screenshots with paired preview depth + viewmodel data. Scene choices appear in the depth-effect inspector; export uses BO3 live floatZ.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Legacy approximate fallback scenes. For accurate depth use Tools > BO3 Ground-Truth Float-Z Capture; export always uses BO3 live floatZ.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -16276,6 +16502,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(packageSkyAction, &QAction::triggered, this, [this]{ packageShaderAs(bo3::PackageTarget::Skybox); });
         connect(reviewPreviewMappingsAction_, &QAction::triggered, this, [this]{ reviewTemporaryPreviewMappings(); });
         connect(savePreviewPackageAction_, &QAction::triggered, this, [this]{ saveCurrentPreviewPackageAs(); });
+        connect(depthCaptureAction, &QAction::triggered, this, [this]{ showBO3DepthCaptureDialog(); });
         connect(glslConverterAction, &QAction::triggered, this, [this]{ showGlslConverter(); });
         connect(glslRegressionAction, &QAction::triggered, this, [this]{ runGlslConverterRegressionSuite(); });
         connect(glslBatchValidateAction, &QAction::triggered, this, [this]{ batchValidateGlslFolder(); });
@@ -16857,7 +17084,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             preview_->renderer().SetDisplayFitMode(static_cast<DisplayFitMode>(displayFitCombo_->currentData().toInt()));
             preview_->update();
         });
-        connect(camera3D_, &QToolButton::clicked, this, [this](bool enabled){ cameraUserOverride_ = true; preview_->setCameraInteractionEnabled(enabled); updateCameraUi(); });
+        connect(camera3D_, &QToolButton::clicked, this, [this](bool enabled){
+            if(beginnerUiMode_ && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::Sky)
+            {
+                beginnerSky3DView_ = enabled;
+            }
+            else
+            {
+                cameraUserOverride_ = true;
+                if(preview_) preview_->setCameraInteractionEnabled(enabled);
+            }
+            updateCameraUi();
+            if(preview_) preview_->renderNow();
+        });
         connect(previewMaxButton_, &QPushButton::toggled, this, [this](bool enabled){ setPreviewMaximized(enabled); });
         connect(resetCamera, &QPushButton::clicked, this, [this]{ preview_->renderer().ResetCamera(); updateCameraUi(); });
 
@@ -19504,7 +19743,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         refreshPostFxRuntimeUi();
         if(beginnerUiMode_ && beginnerProjectUsesSceneDepth())
             statusBar()->showMessage(
-                "Live Game captures scene color only. For Cartoon Outlines, AO or Depth Fog, use Game Depth Preview because external window capture cannot access BO3 floatZ.", 8000);
+                "Live Game captures display color only. For Cartoon Outlines, AO or Depth Fog, import a ground-truth BO3 Float-Z capture; ordinary Windows capture cannot access the game's floatZ surface.", 8000);
         else
             statusBar()->showMessage(
                 "Source: LIVE BO3 WINDOW — LDR APPROX (Windows Graphics Capture, external/non-invasive)", 6000);
@@ -20437,6 +20676,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QString currentTheme_ = "BO3 Dark";
     QString beginnerDepthPreviewSceneId_ = "shadows_of_evil";
     int beginnerDepthDebugView_ = 0;
+    bool beginnerSky3DView_ = true;
     bool modified_ = false, loadingText_ = false, refreshingVectors_ = false, lastWriteTimeValid_ = false;
     bool beginnerUiMode_ = true;
     PreviewMode detectedPreviewMode_ = PreviewMode::HLSL;

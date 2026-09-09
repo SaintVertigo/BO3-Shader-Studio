@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -1371,6 +1372,10 @@ public:
         sourceSRV_.Reset();
         sourceWidth_ = sourceHeight_ = 0;
         sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
+        depthUserLoaded_ = false;
+        builtInDepthScene_ = false;
+        capturedBO3DepthScene_ = false;
+        previewZNear_ = 0.1f;
         liveCaptureSource_ = true;
         liveCaptureNotification_.clear();
         ResetTemporalExposureState();
@@ -1391,6 +1396,8 @@ public:
         }
         liveCaptureSource_ = false;
         builtInDepthScene_ = false;
+        capturedBO3DepthScene_ = false;
+        previewZNear_ = 0.1f;
         liveCaptureNotification_.clear();
         ResetTemporalExposureState();
     }
@@ -1463,6 +1470,8 @@ public:
 
             depthUserLoaded_ = false;
             builtInDepthScene_ = false;
+            capturedBO3DepthScene_ = false;
+            previewZNear_ = 0.1f;
             sourceSRV_ = srv;
             sourceWidth_ = w;
             sourceHeight_ = h;
@@ -1525,6 +1534,8 @@ public:
             depthHeight_ = h;
             depthUserLoaded_ = true;
             builtInDepthScene_ = false;
+            capturedBO3DepthScene_ = false;
+            previewZNear_ = 0.1f;
         }
         else
         {
@@ -1533,6 +1544,8 @@ public:
             // than silently reusing it and producing false diagonal/contact artifacts.
             depthUserLoaded_ = false;
             builtInDepthScene_ = false;
+            capturedBO3DepthScene_ = false;
+            previewZNear_ = 0.1f;
             sourceSRV_ = srv;
             sourceWidth_ = w;
             sourceHeight_ = h;
@@ -1542,6 +1555,240 @@ public:
         }
         return true;
     }
+
+    bool ImportBO3DepthCaptureSheet(const fs::path& path, std::wstring& error)
+    {
+        if(liveCaptureSource_) StopLiveCapture();
+
+        QImage sheet(QString::fromStdWString(path.wstring()));
+        if(sheet.isNull())
+        {
+            error = L"Could not decode the BO3 Float-Z capture image: " + path.wstring();
+            return false;
+        }
+        sheet = sheet.convertToFormat(QImage::Format_RGBA8888);
+        if(sheet.width() < 640 || sheet.height() < 360 || (sheet.width() & 1) != 0 || (sheet.height() & 1) != 0)
+        {
+            error = L"BO3 Float-Z capture sheets must be an even-sized 2x2 capture image (minimum 640x360). Do not crop or resize the screenshot.";
+            return false;
+        }
+
+        const int captureW = sheet.width() / 2;
+        const int captureH = sheet.height() / 2;
+        constexpr int kLevels = 32;
+        constexpr float kDepthLogMin = -5.0f;   // 0.03125 world units/meters in the diagnostic convention.
+        constexpr float kDepthLogMax = 17.0f;   // 131072.0
+        constexpr float kZNearLogMin = -12.0f;
+        constexpr float kZNearLogMax = 0.0f;
+        constexpr float kDepthHackSplit = 63.0f / 64.0f;
+
+        // The bottom-right quadrant contains a 32-level neutral calibration ramp.
+        // The importer learns the screenshot/display transfer from the capture
+        // itself rather than assuming the game/window capture is linear or sRGB.
+        std::array<std::array<float, kLevels>, 3> calibration{};
+        std::array<std::array<float, kLevels>, 3> calibrationStdDev{};
+        for(int level = 0; level < kLevels; ++level)
+        {
+            const int localX0 = std::clamp(static_cast<int>(std::floor((level + 0.22f) * captureW / kLevels)), 0, captureW - 1);
+            const int localX1 = std::clamp(static_cast<int>(std::ceil ((level + 0.78f) * captureW / kLevels)), localX0 + 1, captureW);
+            const int localY0 = std::clamp(static_cast<int>(captureH * 0.10f), 0, captureH - 1);
+            const int localY1 = std::clamp(static_cast<int>(captureH * 0.58f), localY0 + 1, captureH);
+
+            std::array<double,3> sum{0.0,0.0,0.0};
+            std::array<double,3> sumSq{0.0,0.0,0.0};
+            uint64_t count = 0;
+            const int stepX = std::max(1, (localX1 - localX0) / 12);
+            const int stepY = std::max(1, (localY1 - localY0) / 10);
+            for(int y = localY0; y < localY1; y += stepY)
+            {
+                const uchar* row = sheet.constScanLine(captureH + y);
+                for(int x = localX0; x < localX1; x += stepX)
+                {
+                    const uchar* px = row + (captureW + x) * 4;
+                    for(int c = 0; c < 3; ++c)
+                    {
+                        const double v = px[c];
+                        sum[c] += v;
+                        sumSq[c] += v * v;
+                    }
+                    ++count;
+                }
+            }
+            if(count == 0)
+            {
+                error = L"BO3 Float-Z capture calibration could not be sampled.";
+                return false;
+            }
+            for(int c = 0; c < 3; ++c)
+            {
+                const double mean = sum[c] / static_cast<double>(count);
+                const double variance = std::max(0.0, sumSq[c] / static_cast<double>(count) - mean * mean);
+                calibration[c][level] = static_cast<float>(mean);
+                calibrationStdDev[c][level] = static_cast<float>(std::sqrt(variance));
+            }
+        }
+
+        for(int c = 0; c < 3; ++c)
+        {
+            for(int level = 0; level < kLevels; ++level)
+            {
+                if(calibrationStdDev[c][level] > 8.0f)
+                {
+                    error = L"BO3 Float-Z capture calibration is noisy or compressed. Use a lossless PNG at the game's native screenshot resolution (no JPEG, resizing, or filtering).";
+                    return false;
+                }
+                if(level > 0 && calibration[c][level] <= calibration[c][level - 1] + 0.35f)
+                {
+                    error = L"BO3 Float-Z capture calibration levels collapsed. Use a lossless PNG and disable any external screenshot color/filter processing.";
+                    return false;
+                }
+            }
+        }
+
+        auto decodeLevel = [&](int capturedByte, int channel) -> int
+        {
+            int best = 0;
+            float bestDistance = std::numeric_limits<float>::max();
+            for(int level = 0; level < kLevels; ++level)
+            {
+                const float d = std::abs(static_cast<float>(capturedByte) - calibration[channel][level]);
+                if(d < bestDistance)
+                {
+                    bestDistance = d;
+                    best = level;
+                }
+            }
+            return best;
+        };
+
+        auto decodeTripletAt = [&](float localX, float localY) -> std::array<int,3>
+        {
+            const int cx = captureW + std::clamp(static_cast<int>(localX * captureW), 0, captureW - 1);
+            const int cy = captureH + std::clamp(static_cast<int>(localY * captureH), 0, captureH - 1);
+            std::array<double,3> sum{0.0,0.0,0.0};
+            int samples = 0;
+            for(int oy = -2; oy <= 2; ++oy)
+            {
+                const int sy = std::clamp(cy + oy, captureH, sheet.height() - 1);
+                const uchar* row = sheet.constScanLine(sy);
+                for(int ox = -2; ox <= 2; ++ox)
+                {
+                    const int sx = std::clamp(cx + ox, captureW, sheet.width() - 1);
+                    const uchar* px = row + sx * 4;
+                    for(int c = 0; c < 3; ++c) sum[c] += px[c];
+                    ++samples;
+                }
+            }
+            return {
+                decodeLevel(static_cast<int>(std::lround(sum[0] / samples)), 0),
+                decodeLevel(static_cast<int>(std::lround(sum[1] / samples)), 1),
+                decodeLevel(static_cast<int>(std::lround(sum[2] / samples)), 2)
+            };
+        };
+
+        const auto magicA = decodeTripletAt(0.25f, 0.74f);
+        const auto magicB = decodeTripletAt(0.75f, 0.74f);
+        if(magicA != std::array<int,3>{3,27,11} || magicB != std::array<int,3>{29,5,23})
+        {
+            error = L"This image is not a valid BO3 Shader Studio Float-Z capture sheet (calibration/magic marker mismatch). Export and use the bundled bo3_floatz_capture.hlsl shader.";
+            return false;
+        }
+
+        const auto versionMark = decodeTripletAt(0.50f, 0.965f);
+        if(versionMark != std::array<int,3>{1,19,30})
+        {
+            error = L"Unsupported BO3 Float-Z capture-sheet version.";
+            return false;
+        }
+
+        const auto zTriplet = decodeTripletAt(0.50f, 0.86f);
+        const uint32_t zCode = static_cast<uint32_t>(zTriplet[0]) |
+                               (static_cast<uint32_t>(zTriplet[1]) << 5u) |
+                               (static_cast<uint32_t>(zTriplet[2] & 15) << 10u);
+        const float zNorm = static_cast<float>(zCode) / 16383.0f;
+        const float capturedZNear = std::exp2(kZNearLogMin + (kZNearLogMax - kZNearLogMin) * zNorm);
+        if(!std::isfinite(capturedZNear) || capturedZNear < 0.0001f || capturedZNear > 1.0f)
+        {
+            error = L"BO3 Float-Z capture contains an invalid zNear calibration value.";
+            return false;
+        }
+
+        std::vector<uint8_t> color(static_cast<size_t>(captureW) * captureH * 4u, 255u);
+        std::vector<float> rawDepth(static_cast<size_t>(captureW) * captureH * 4u, 0.0f);
+        uint64_t offGridSamples = 0;
+        const uint64_t totalDepthSamples = static_cast<uint64_t>(captureW) * captureH * 3u;
+
+        auto nearestLevelDistance = [&](int capturedByte, int channel, int decodedLevel) -> float
+        {
+            return std::abs(static_cast<float>(capturedByte) - calibration[channel][decodedLevel]);
+        };
+
+        for(int y = 0; y < captureH; ++y)
+        {
+            const uchar* colorRow = sheet.constScanLine(y);
+            const uchar* encodedRow = sheet.constScanLine(y);
+            for(int x = 0; x < captureW; ++x)
+            {
+                const uchar* srcColor = colorRow + x * 4;
+                const uchar* encoded = encodedRow + (captureW + x) * 4;
+                const int r5 = decodeLevel(encoded[0], 0);
+                const int g5 = decodeLevel(encoded[1], 1);
+                const int b5 = decodeLevel(encoded[2], 2);
+                if(nearestLevelDistance(encoded[0], 0, r5) > 7.0f) ++offGridSamples;
+                if(nearestLevelDistance(encoded[1], 1, g5) > 7.0f) ++offGridSamples;
+                if(nearestLevelDistance(encoded[2], 2, b5) > 7.0f) ++offGridSamples;
+
+                const bool viewmodel = (b5 & 16) != 0;
+                const uint32_t depthCode = static_cast<uint32_t>(r5) |
+                                           (static_cast<uint32_t>(g5) << 5u) |
+                                           (static_cast<uint32_t>(b5 & 15) << 10u);
+                const float depthNorm = static_cast<float>(depthCode) / 16383.0f;
+                const float distance = std::exp2(kDepthLogMin + (kDepthLogMax - kDepthLogMin) * depthNorm);
+                const float processed = std::clamp(capturedZNear / std::max(distance, 0.0000001f), 0.00000001f, 0.999999f);
+                float raw = viewmodel
+                    ? (processed + 63.0f) / 64.0f
+                    : processed * kDepthHackSplit;
+                if(viewmodel) raw = std::clamp(raw, kDepthHackSplit + 0.000001f, 0.999999f);
+                else raw = std::clamp(raw, 0.00000001f, kDepthHackSplit - 0.000001f);
+
+                const size_t i = (static_cast<size_t>(y) * captureW + x) * 4u;
+                color[i + 0] = srcColor[0];
+                color[i + 1] = srcColor[1];
+                color[i + 2] = srcColor[2];
+                color[i + 3] = 255u;
+                rawDepth[i + 0] = raw;
+                rawDepth[i + 1] = raw;
+                rawDepth[i + 2] = raw;
+                rawDepth[i + 3] = 1.0f;
+            }
+        }
+
+        if(totalDepthSamples > 0 && static_cast<double>(offGridSamples) / static_cast<double>(totalDepthSamples) > 0.08)
+        {
+            error = L"Too much of the encoded Float-Z quadrant was altered. Hide HUD/overlays and capture a lossless native-resolution PNG without resizing or video compression.";
+            return false;
+        }
+
+        ComPtr<ID3D11ShaderResourceView> colorSrv;
+        ComPtr<ID3D11ShaderResourceView> depthSrv;
+        if(!CreateTextureSRV(color.data(), static_cast<UINT>(captureW), static_cast<UINT>(captureH), colorSrv, error)) return false;
+        if(!CreateFloatTextureSRV(rawDepth.data(), static_cast<UINT>(captureW), static_cast<UINT>(captureH), depthSrv, error)) return false;
+
+        sourceSRV_ = colorSrv;
+        depthSRV_ = depthSrv;
+        sourceWidth_ = depthWidth_ = static_cast<UINT>(captureW);
+        sourceHeight_ = depthHeight_ = static_cast<UINT>(captureH);
+        sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
+        sourceHdrPeakLuminance_ = 1.0f;
+        sourceHdrMeanLuminance_ = 0.20f;
+        depthUserLoaded_ = false;
+        builtInDepthScene_ = false;
+        capturedBO3DepthScene_ = true;
+        previewZNear_ = capturedZNear;
+        ResetTemporalExposureState();
+        return true;
+    }
+
 
     bool UseBuiltInDepthScene(std::wstring& error, const QString& requestedSceneId)
     {
@@ -1575,11 +1822,12 @@ public:
             }
         }
 
-        // Built-in Game Depth Preview scenes use paired, image-aligned authored
-        // assets. The 16-bit PNG stores a logarithmic world-distance proxy and
-        // the 8-bit mask identifies the first-person weapon/arms. Packing that
-        // mask into BO3's Float-Z depth-hack range makes World Only / Viewmodel
-        // Only exercise the same classification path as the exported HLSL.
+        // LEGACY FALLBACK ONLY: these built-in Game Depth Preview scenes use
+        // paired image-aligned authored/inferred assets, not ground-truth BO3
+        // Float-Z. The 16-bit PNG stores a logarithmic world-distance proxy and
+        // the 8-bit mask identifies the first-person weapon/arms. New accurate
+        // depth work should use ImportBO3DepthCaptureSheet(), which decodes the
+        // real same-frame BO3 Float-Z capture instead of inventing geometry.
         QImage sourceImage(QString::fromLatin1(scene->colorResource));
         QImage depthImage(QString::fromLatin1(scene->depthResource));
         QImage viewmodelImage(QString::fromLatin1(scene->viewmodelResource));
@@ -1656,17 +1904,21 @@ public:
         sourceHdrMeanLuminance_ = 0.20f;
         depthUserLoaded_ = false;
         builtInDepthScene_ = true;
+        capturedBO3DepthScene_ = false;
+        previewZNear_ = zNear;
         ResetTemporalExposureState();
         return true;
     }
 
     bool HasUserDepthTexture() const { return depthUserLoaded_; }
-    bool HasPreviewDepthTexture() const { return depthUserLoaded_ || builtInDepthScene_; }
+    bool HasPreviewDepthTexture() const { return depthUserLoaded_ || builtInDepthScene_ || capturedBO3DepthScene_; }
     bool BuiltInDepthSceneActive() const { return builtInDepthScene_; }
+    bool CapturedBO3DepthSceneActive() const { return capturedBO3DepthScene_; }
+    float PreviewZNear() const { return previewZNear_; }
 
     ID3D11ShaderResourceView* ActivePreviewDepthSRV() const
     {
-        return (depthUserLoaded_ || builtInDepthScene_) && depthSRV_
+        return (depthUserLoaded_ || builtInDepthScene_ || capturedBO3DepthScene_) && depthSRV_
             ? depthSRV_.Get() : neutralDepthSRV_.Get();
     }
 
@@ -4520,6 +4772,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
         sourceHeight_ = depthHeight_ = h;
         depthUserLoaded_ = false;
         builtInDepthScene_ = false;
+        capturedBO3DepthScene_ = false;
+        previewZNear_ = 0.1f;
         sourceEncoding_ = PreviewSourceEncoding::LdrSrgb;
         sourceHdrPeakLuminance_ = 1.0f;
         sourceHdrMeanLuminance_ = 0.18f;
@@ -5161,7 +5415,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
         const float shaderPitch = shaderDrivenMovementDisabled_ ? shaderMovementFrozenPitch_ : cameraPitchDegrees_;
         const float shaderFov = shaderDrivenMovementDisabled_ ? shaderMovementFrozenFov_ : cameraFovDegrees_;
         const std::array<float, 4> params{shaderYaw, shaderPitch, shaderFov, previewModeFlag};
-        const std::array<float, 4> previewZNear{0.1f, 0.0f, 0.0f, 0.0f};
+        const std::array<float, 4> previewZNear{std::max(previewZNear_, 0.000001f), 0.0f, 0.0f, 0.0f};
         const std::array<float, 4> one4{1.0f, 1.0f, 1.0f, 1.0f};
         const float runtimeExposureScale = std::exp2(postFxRuntimeExposureEV_);
         const float runtimeInvExposure = runtimeExposureScale > 0.000001f ? 1.0f / runtimeExposureScale : 1.0f;
@@ -5575,6 +5829,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
     ComPtr<ID3D11ShaderResourceView> neutralDepthSRV_;
     bool depthUserLoaded_ = false;
     bool builtInDepthScene_ = false;
+    bool capturedBO3DepthScene_ = false;
+    float previewZNear_ = 0.1f;
     ComPtr<ID3D11ShaderResourceView> environmentSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralNormalSRV_;
@@ -5856,6 +6112,11 @@ bool PreviewRenderer::LoadTexture(const std::filesystem::path& path, bool depth,
     return impl_->LoadTexture(path, depth, error);
 }
 
+bool PreviewRenderer::ImportBO3DepthCaptureSheet(const std::filesystem::path& path, std::wstring& error)
+{
+    return impl_->ImportBO3DepthCaptureSheet(path, error);
+}
+
 bool PreviewRenderer::UseBuiltInDepthScene(std::wstring& error, const QString& sceneId)
 {
     return impl_->UseBuiltInDepthScene(error, sceneId);
@@ -5874,6 +6135,16 @@ bool PreviewRenderer::HasPreviewDepthTexture() const
 bool PreviewRenderer::BuiltInDepthSceneActive() const
 {
     return impl_->BuiltInDepthSceneActive();
+}
+
+bool PreviewRenderer::CapturedBO3DepthSceneActive() const
+{
+    return impl_->CapturedBO3DepthSceneActive();
+}
+
+float PreviewRenderer::PreviewZNear() const
+{
+    return impl_->PreviewZNear();
 }
 
 void PreviewRenderer::SetPaused(bool paused)
