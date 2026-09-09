@@ -326,23 +326,22 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
             const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail_edges"));
             const QString celAmount = floatLiteral(parameterFloat(effect, *definition, "cel_amount"));
-            out += QString("    // %1 - point-sampled Float-Z silhouettes plus optional image-detail ink\n"
+            out += QString("    // %1 - Float-Z world silhouettes with viewmodel/depth-hack rejection plus optional image-detail ink\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
                            "    float2 %2_diag = %2_texel * 0.75;\n"
-                           "    float %2_rawBL = BO3BeginnerSampleRawDepthPoint(uv + float2(-%2_diag.x, %2_diag.y));\n"
-                           "    float %2_rawTR = BO3BeginnerSampleRawDepthPoint(uv + float2( %2_diag.x,-%2_diag.y));\n"
-                           "    float %2_rawBR = BO3BeginnerSampleRawDepthPoint(uv + float2( %2_diag.x, %2_diag.y));\n"
-                           "    float %2_rawTL = BO3BeginnerSampleRawDepthPoint(uv + float2(-%2_diag.x,-%2_diag.y));\n"
-                           "    float %2_d0 = FloatZ_Process(%2_rawBL);\n"
-                           "    float %2_d1 = FloatZ_Process(%2_rawTR);\n"
-                           "    float %2_d2 = FloatZ_Process(%2_rawBR);\n"
-                           "    float %2_d3 = FloatZ_Process(%2_rawTL);\n"
-                           "    float %2_fd0 = %2_d1 - %2_d0;\n"
-                           "    float %2_fd1 = %2_d3 - %2_d2;\n"
-                           "    float %2_depthMagnitude = length(float2(%2_fd0,%2_fd1)) * 100.0;\n"
-                           "    float %2_depthReference = max(min(min(%2_d0,%2_d1),min(%2_d2,%2_d3)), 0.0001);\n"
-                           "    float %2_depthThreshold = max(0.015, %4 * %2_depthReference);\n"
-                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.78, %2_depthThreshold * 1.32, %2_depthMagnitude);\n"
+                           "    float %2_d0 = BO3BeginnerSampleWorldDepth(uv + float2(-%2_diag.x, %2_diag.y));\n"
+                           "    float %2_d1 = BO3BeginnerSampleWorldDepth(uv + float2( %2_diag.x,-%2_diag.y));\n"
+                           "    float %2_d2 = BO3BeginnerSampleWorldDepth(uv + float2( %2_diag.x, %2_diag.y));\n"
+                           "    float %2_d3 = BO3BeginnerSampleWorldDepth(uv + float2(-%2_diag.x,-%2_diag.y));\n"
+                           "    float %2_valid0 = step(0.0001, %2_d0) * step(0.0001, %2_d1);\n"
+                           "    float %2_valid1 = step(0.0001, %2_d2) * step(0.0001, %2_d3);\n"
+                           "    float %2_rel0 = abs(%2_d1 - %2_d0) / max(min(%2_d0, %2_d1), 1.0);\n"
+                           "    float %2_rel1 = abs(%2_d3 - %2_d2) / max(min(%2_d2, %2_d3), 1.0);\n"
+                           "    %2_rel0 *= %2_valid0;\n"
+                           "    %2_rel1 *= %2_valid1;\n"
+                           "    float %2_depthMagnitude = max(%2_rel0, %2_rel1);\n"
+                           "    float %2_depthThreshold = max(0.0025, %4 * 0.004);\n"
+                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.72, %2_depthThreshold * 1.36, %2_depthMagnitude);\n"
                            "    float3 %2_sceneL = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(0.0,%2_texel.y))).rgb);\n"
@@ -825,35 +824,55 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
             const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
             const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
-            out += QString("    // %1 - continuous volumetric-look cloud deck without visible raymarch slices\n"
+            const QString thickness = floatLiteral(parameterFloat(effect, *definition, "thickness"));
+            const QString detailAmount = floatLiteral(parameterFloat(effect, *definition, "detail"));
+            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const QString sunStrength = floatLiteral(parameterFloat(effect, *definition, "sun_strength"));
+            const QString silverLining = floatLiteral(parameterFloat(effect, *definition, "silver_lining"));
+            const QString horizonFade = floatLiteral(parameterFloat(effect, *definition, "horizon_fade"));
+            const QString quality = floatLiteral(parameterFloat(effect, *definition, "quality"));
+            out += QString("    // %1 - texture-backed 3D volumetric raymarch using RGBA noise + blue-noise jitter\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
                            "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
-                           "    float %2_layerHeight = 1.8 + %8 * 3.2;\n"
-                           "    float %2_viewZ = max(d.z, 0.035);\n"
-                           "    float %2_cloudT = %2_layerHeight / %2_viewZ;\n"
-                           "    float2 %2_world = d.xy * %2_cloudT + %2_wind * (t * %5 * 0.32);\n"
-                           "    float3 %2_p = float3(%2_world * (%3 * 0.16), t * %5 * 0.018);\n"
-                           "    float %2_broad = BO3BeginnerFbm3(%2_p * 0.62 + float3(1.7,-2.4,0.9));\n"
-                           "    float %2_shape = BO3BeginnerFbm3(%2_p);\n"
-                           "    float %2_detail = BO3BeginnerFbm3(%2_p * 2.15 + float3(4.3,1.2,-3.7));\n"
-                           "    float %2_field = %2_broad * 0.34 + %2_shape * 0.78 - (1.0 - %2_detail) * 0.15;\n"
-                           "    float %2_threshold = lerp(0.82, 0.39, saturate(%4));\n"
-                           "    float %2_density = smoothstep(%2_threshold, %2_threshold + 0.13, %2_field);\n"
-                           "    %2_density = %2_density * %2_density * (3.0 - 2.0 * %2_density);\n"
-                           "    float %2_skyMask = smoothstep(0.014, 0.075, d.z);\n"
-                           "    float3 %2_sunStep = float3(beginnerSunDir.xy * 0.24, beginnerSunDir.z * 0.11);\n"
-                           "    float %2_sunField = BO3BeginnerFbm3(%2_p + %2_sunStep);\n"
-                           "    float %2_lightThrough = saturate(0.48 + (%2_shape - %2_sunField) * 1.8);\n"
-                           "    float %2_forward = pow(saturate(dot(d, beginnerSunDir)), 22.0) * beginnerDaylight;\n"
-                           "    float %2_edge = smoothstep(0.04, 0.42, 1.0 - %2_density) * %2_forward;\n"
-                           "    float %2_heightLight = saturate(0.52 + d.z * 0.55);\n"
-                           "    float %2_light = saturate(0.20 + %2_lightThrough * 0.62 + %2_heightLight * 0.18 + %2_edge * 0.38);\n"
-                           "    float3 %2_cloudColor = lerp(%10, %11, %2_light);\n"
-                           "    %2_cloudColor *= %7 * lerp(0.62, 1.0, beginnerDaylight);\n"
-                           "    float %2_alpha = saturate(%2_density * %6 * %2_skyMask);\n"
-                           "    float %2_horizonAtmosphere = smoothstep(0.012, 0.12, d.z);\n"
-                           "    %2_cloudColor = lerp(color, %2_cloudColor, %2_horizonAtmosphere);\n"
-                           "    color = lerp(color, %2_cloudColor, %2_alpha);\n")
+                           "    float %2_layerBase = max(0.18, 0.56 + %8 * 0.90);\n"
+                           "    float %2_layerThickness = max(0.12, %12);\n"
+                           "    float %2_viewZ = max(d.z, 0.010);\n"
+                           "    float %2_enter = %2_layerBase / %2_viewZ;\n"
+                           "    float %2_exit = min((%2_layerBase + %2_layerThickness) / %2_viewZ, 72.0);\n"
+                           "    float %2_path = max(%2_exit - %2_enter, 0.0);\n"
+                           "    int %2_steps = clamp((int)round(%18), 16, 64);\n"
+                           "    float %2_stepLen = %2_path / max((float)%2_steps, 1.0);\n"
+                           "    float2 %2_blueUv = frac(d.xy * 0.37 + d.yz * 0.19 + float2(0.413, 0.173));\n"
+                           "    float %2_jitter = iChannel1.SampleLevel(glslSampler1, %2_blueUv, 0.0).r;\n"
+                           "    float %2_marchT = %2_enter + %2_stepLen * %2_jitter;\n"
+                           "    float4 %2_accum = float4(0.0,0.0,0.0,0.0);\n"
+                           "    [loop] for(int %2_i=0; %2_i<64; ++%2_i)\n"
+                           "    {\n"
+                           "        if(%2_i >= %2_steps || %2_marchT > %2_exit || %2_accum.a > 0.985) break;\n"
+                           "        float3 %2_pos = d * %2_marchT;\n"
+                           "        %2_pos.xy += %2_wind * (t * %5 * 0.085);\n"
+                           "        float %2_density = BO3BeginnerCloudDensity(%2_pos, %2_layerBase, %2_layerThickness, %3, %4, %13, %14) * %6;\n"
+                           "        if(%2_density > 0.002)\n"
+                           "        {\n"
+                           "            float3 %2_lightPos = %2_pos + beginnerSunDir * (0.32 + %2_layerThickness * 0.12);\n"
+                           "            float %2_sunDensity = BO3BeginnerCloudDensity(%2_lightPos, %2_layerBase, %2_layerThickness, %3, %4, %13 * 0.72, %14);\n"
+                           "            float %2_lightThrough = saturate(0.46 + (%2_density - %2_sunDensity) * (1.8 + %15));\n"
+                           "            float %2_forward = pow(saturate(dot(d, beginnerSunDir)), 18.0) * beginnerDaylight;\n"
+                           "            float %2_edgeLight = %2_forward * %16 * (1.0 - smoothstep(0.42, 0.94, %2_density));\n"
+                           "            float %2_light = saturate(0.16 + %2_lightThrough * (0.58 + 0.24 * %15) + %2_edgeLight);\n"
+                           "            float3 %2_sampleColor = lerp(%10, %11, %2_light);\n"
+                           "            %2_sampleColor *= %7 * lerp(0.62, 1.0, beginnerDaylight);\n"
+                           "            float %2_distanceFog = 1.0 - exp(-%2_marchT * 0.020 * %17);\n"
+                           "            %2_sampleColor = lerp(%2_sampleColor, color, saturate(%2_distanceFog * 0.72));\n"
+                           "            float %2_sampleAlpha = 1.0 - exp(-%2_density * %2_stepLen * 3.2);\n"
+                           "            %2_sampleAlpha *= smoothstep(0.005, 0.050, d.z);\n"
+                           "            float %2_remain = 1.0 - %2_accum.a;\n"
+                           "            %2_accum.rgb += %2_sampleColor * (%2_sampleAlpha * %2_remain);\n"
+                           "            %2_accum.a += %2_sampleAlpha * %2_remain;\n"
+                           "        }\n"
+                           "        %2_marchT += %2_stepLen;\n"
+                           "    }\n"
+                           "    color = color * (1.0 - %2_accum.a) + %2_accum.rgb;\n")
                 .arg(definition->name)
                 .arg(tag)
                 .arg(scale)
@@ -864,7 +883,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                 .arg(height)
                 .arg(direction)
                 .arg(colorLiteral(shadowColor))
-                .arg(colorLiteral(lightColor));
+                .arg(colorLiteral(lightColor))
+                .arg(thickness)
+                .arg(detailAmount)
+                .arg(softness)
+                .arg(sunStrength)
+                .arg(silverLining)
+                .arg(horizonFade)
+                .arg(quality);
         }
         else if(effect.typeId == "sky_mountains" && project.target == Target::Sky)
         {
@@ -1034,7 +1060,6 @@ QString optionalHelpers(const Project& project)
         (project.target == Target::Material && projectUsesEffect(project, "noise")) ||
         projectUsesEffect(project, "dissolve") ||
         projectUsesEffect(project, "sky_clouds") ||
-        projectUsesEffect(project, "sky_realistic_clouds") ||
         projectUsesEffect(project, "sky_mountains") ||
         projectUsesEffect(project, "sky_stars") ||
         projectUsesEffect(project, "sky_nebula");
@@ -1177,9 +1202,50 @@ static const float4x4 BO3BeginnerPsxDither = float4x4(
     15.0,  7.0, 13.0,  5.0);
 )HLSL");
     }
+    if(projectUsesEffect(project, "sky_realistic_clouds"))
+    {
+        out += QStringLiteral(R"HLSL(
+// BO3_BEGINNER_CLOUD_TEXTURES: iChannel0=RGBA Noise Medium; iChannel1=Blue Noise
+Texture2D<float4> iChannel0 : register(t2);
+Texture2D<float4> iChannel1 : register(t3);
+SamplerState glslSampler0 : register(s2);
+SamplerState glslSampler1 : register(s3);
+
+float BO3BeginnerCloudNoise3(float3 p)
+{
+    // Original texture-backed pseudo-3D noise. The Z coordinate continuously
+    // shears the 2D lookup and blends independent RGBA channels, avoiding a
+    // flat projected cloud sheet while keeping the sample count predictable.
+    float2 uv = p.xy * 0.0078125 + float2(p.z * 0.0173, p.z * 0.0117);
+    float4 n = iChannel0.SampleLevel(glslSampler0, frac(uv), 0.0);
+    float z0 = frac(p.z * 0.137 + 0.19);
+    float z1 = frac(p.z * 0.071 + 0.63);
+    float a = lerp(n.r, n.g, z0);
+    float b = lerp(n.b, n.a, z1);
+    return lerp(a, b, 0.38 + 0.24 * sin(p.z * 0.31));
+}
+
+float BO3BeginnerCloudDensity(float3 p, float layerBase, float layerThickness,
+                              float formationScale, float coverage, float detailAmount,
+                              float edgeSoftness)
+{
+    float h = saturate((p.z - layerBase) / max(layerThickness, 0.001));
+    float vertical = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.68, 1.0, h));
+    float3 q = p * float3(formationScale * 0.34, formationScale * 0.34, formationScale * 0.58);
+    float broad = BO3BeginnerCloudNoise3(q * 0.72 + float3(7.3, -2.1, 4.7));
+    float detail = BO3BeginnerCloudNoise3(q * 1.83 + float3(-3.9, 8.2, 1.6));
+    float micro = BO3BeginnerCloudNoise3(q * 3.27 + float3(11.4, 5.6, -6.8));
+    float field = broad * 0.70 + detail * 0.36 - (1.0 - micro) * (0.08 + 0.24 * detailAmount);
+    float threshold = lerp(0.79, 0.33, saturate(coverage));
+    float softness = max(0.015, edgeSoftness);
+    float density = smoothstep(threshold - softness, threshold + softness, field);
+    return density * vertical;
+}
+)HLSL");
+    }
+
     const bool needsSkyNoise =
         projectUsesEffect(project, "sky_clouds") ||
-        projectUsesEffect(project, "sky_realistic_clouds") ||
         projectUsesEffect(project, "sky_mountains") ||
         projectUsesEffect(project, "sky_nebula");
     if(needsSkyNoise)
@@ -1774,17 +1840,24 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("softness", "Softness", "Feathering around cloud edges.", 0.02, 0.35, 0.01, 0.14),
                    FloatParam("direction", "Wind Direction", "Direction the cloud field travels, in degrees around the horizon.", 0.0, 360.0, 1.0, 25.0),
                    FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts. Negative values reverse it.", -3.0, 3.0, 0.01, 0.22)}),
-        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Build a soft perspective cloud deck with broad formations, detail erosion, directional wind and sunlight without visible slice bands.", "Sky & Environment",
+        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Raymarch a true texture-backed 3D cloud volume with formation erosion, blue-noise jitter, directional sunlight and controllable quality.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color inside the darker cloud cavities.", "#54606D"),
                    ColorParam("light_color", "Light Color", "Color on the brighter parts of the cloud volume.", "#F2F4F6"),
                    FloatParam("brightness", "Brightness", "Cloud brightness before atmospheric blending.", 0.15, 2.0, 0.01, 0.92),
                    FloatParam("opacity", "Density", "Overall cloud-volume density.", 0.0, 1.0, 0.01, 0.62),
-                   FloatParam("height", "Cloud Height", "Raise or lower the volumetric layer relative to the horizon.", -0.35, 0.75, 0.01, 0.16),
-                   FloatParam("scale", "Formation Scale", "Scale of the cloud formations.", 0.5, 5.0, 0.05, 1.10),
+                   FloatParam("height", "Cloud Height", "Raise or lower the bottom of the volumetric cloud layer.", -0.35, 0.75, 0.01, 0.16),
+                   FloatParam("thickness", "Cloud Thickness", "Vertical thickness of the raymarched cloud layer.", 0.20, 2.50, 0.05, 0.95),
+                   FloatParam("scale", "Formation Scale", "Scale of the major 3D cloud formations.", 0.5, 5.0, 0.05, 1.10),
                    FloatParam("coverage", "Coverage", "Higher values fill more of the sky with cloud.", 0.0, 1.0, 0.01, 0.48),
+                   FloatParam("detail", "Detail", "Amount of smaller texture detail used to erode the broad cloud shapes.", 0.0, 1.0, 0.01, 0.65),
+                   FloatParam("softness", "Edge Softness", "Softens cloud boundaries and wispy transitions.", 0.02, 0.30, 0.01, 0.10),
                    FloatParam("direction", "Wind Direction", "Direction the cloud volume moves, in degrees around the horizon.", 0.0, 360.0, 1.0, 35.0),
-                   FloatParam("speed", "Wind Speed", "How quickly the cloud volume evolves and drifts. Negative values reverse it.", -2.0, 2.0, 0.01, 0.10)}),
+                   FloatParam("speed", "Wind Speed", "How quickly the 3D cloud field drifts. Negative values reverse it.", -2.0, 2.0, 0.01, 0.10),
+                   FloatParam("sun_strength", "Sun Lighting", "Strength of directional light passing through cloud density.", 0.0, 2.0, 0.01, 0.85),
+                   FloatParam("silver_lining", "Silver Lining", "Extra forward-scattered brightness on thin cloud edges near the sun.", 0.0, 2.0, 0.01, 0.60),
+                   FloatParam("horizon_fade", "Distance Haze", "Blend distant clouds back into the sky near the horizon.", 0.0, 1.0, 0.01, 0.45),
+                   FloatParam("quality", "Raymarch Quality", "Number of volumetric samples per view ray. Higher is smoother but more expensive.", 16.0, 64.0, 4.0, 40.0)}),
         EffectDef("sky_water", "Still Water Reflection", "Turn the lower hemisphere into a still-water reflection of the complete procedural sky, with subtle animated ripples and tint.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("tint", "Water Tint", "Color mixed into the reflected lower hemisphere.", "#183344"),

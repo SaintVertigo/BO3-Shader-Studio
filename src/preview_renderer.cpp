@@ -1555,17 +1555,14 @@ public:
             float vanishX;
             float sideStrength;
             float farDistance;
-            float weaponX;
-            float weaponY;
-            float weaponScale;
         };
 
         static const DepthPreviewScene scenes[] = {
-            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", 0.49f, 0.51f, 0.72f, 4200.0f, 0.60f, 0.80f, 1.00f},
-            {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", 0.50f, 0.50f, 0.58f, 5200.0f, 0.57f, 0.84f, 1.05f},
-            {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", 0.48f, 0.53f, 0.34f, 4800.0f, 0.68f, 0.79f, 1.12f},
-            {"the_giant", ":/preview/bo3_depth_the_giant.jpg", 0.52f, 0.53f, 0.76f, 2400.0f, 0.57f, 0.84f, 0.95f},
-            {"zetsubou", ":/preview/bo3_depth_zetsubou.jpg", 0.53f, 0.50f, 0.84f, 1700.0f, 0.61f, 0.85f, 1.08f}
+            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", 0.49f, 0.51f, 0.72f, 4200.0f},
+            {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", 0.50f, 0.50f, 0.58f, 5200.0f},
+            {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", 0.48f, 0.53f, 0.34f, 4800.0f},
+            {"the_giant", ":/preview/bo3_depth_the_giant.jpg", 0.52f, 0.53f, 0.76f, 2400.0f},
+            {"zetsubou", ":/preview/bo3_depth_zetsubou.jpg", 0.53f, 0.50f, 0.84f, 1700.0f}
         };
 
         const QString sceneId = requestedSceneId.trimmed().toLower();
@@ -1580,11 +1577,12 @@ public:
         }
 
         // These are real Black Ops III screenshots supplied by the user. The
-        // paired depth is intentionally a smooth perspective approximation, not
-        // a fake collection of hard rectangular object masks. This avoids the
-        // obvious box-shaped AO/outlines from the old preview while still giving
-        // Beginner depth effects coherent near/mid/far geometry. Export always
-        // binds BO3's real live floatZ instead.
+        // paired depth is intentionally a smooth perspective approximation of
+        // WORLD geometry only. Do not synthesize first-person weapon/arm depth:
+        // invented viewmodel silhouettes become enormous false outlines/AO arcs
+        // because there is no real per-pixel depth for the screenshot. Visible
+        // weapon detail can still contribute image-detail ink, while BO3 export
+        // uses the game's real Float-Z and rejects its depth-hack viewmodel range.
         QImage sourceImage(QString::fromLatin1(scene->resource));
         if(sourceImage.isNull())
         {
@@ -1605,7 +1603,6 @@ public:
 
         std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
         std::vector<float> worldDepth(static_cast<size_t>(w) * h, scene->farDistance);
-        std::vector<uint8_t> depthHackMask(static_cast<size_t>(w) * h, 0u);
 
         auto encodeWorldRawDepth = [&](float distance)
         {
@@ -1613,23 +1610,10 @@ public:
             const float processed = std::clamp(zNear / safeDistance, 0.0000001f, 0.999f);
             return std::min(processed * depthHackSplit, depthHackSplit - 0.000001f);
         };
-        auto encodeDepthHackedRawDepth = [&](float distance)
-        {
-            const float safeDistance = std::max(distance, zNear + 0.001f);
-            const float processed = std::clamp(zNear / safeDistance, 0.0000001f, 0.999f);
-            return std::clamp((processed + 63.0f) / 64.0f,
-                              depthHackSplit + 0.000001f, 0.999999f);
-        };
         auto smooth01 = [](float value)
         {
             value = std::clamp(value, 0.0f, 1.0f);
             return value * value * (3.0f - 2.0f * value);
-        };
-        auto ellipse = [](float x, float y, float cx, float cy, float rx, float ry)
-        {
-            const float dx = (x - cx) / std::max(rx, 0.0001f);
-            const float dy = (y - cy) / std::max(ry, 0.0001f);
-            return dx * dx + dy * dy;
         };
 
         for(UINT y = 0; y < h; ++y)
@@ -1661,19 +1645,6 @@ public:
                 const float sideDepth = 7.0f + 520.0f * std::pow(1.0f - sidePerspective, 1.8f) + 110.0f * std::abs(fy - scene->horizon);
                 distance = distance * (1.0f - sideMask) + std::min(distance, sideDepth) * sideMask;
 
-                // Approximate the first-person weapon/arms with smooth ellipses so
-                // the depth-hack mask follows the visible lower-frame silhouette
-                // without introducing rectangular outlines.
-                const float s = scene->weaponScale;
-                const bool viewmodel =
-                    ellipse(fx, fy, scene->weaponX, scene->weaponY, 0.105f * s, 0.115f * s) < 1.0f ||
-                    ellipse(fx, fy, scene->weaponX + 0.055f * s, scene->weaponY + 0.105f * s, 0.20f * s, 0.10f * s) < 1.0f ||
-                    ellipse(fx, fy, scene->weaponX - 0.035f * s, scene->weaponY - 0.115f * s, 0.038f * s, 0.16f * s) < 1.0f;
-                if(viewmodel)
-                {
-                    depthHackMask[pidx] = 1u;
-                    distance = 0.68f;
-                }
 
                 worldDepth[pidx] = std::max(distance, 0.11f);
             }
@@ -1681,9 +1652,7 @@ public:
 
         for(size_t pidx = 0; pidx < worldDepth.size(); ++pidx)
         {
-            const float raw = depthHackMask[pidx]
-                ? encodeDepthHackedRawDepth(worldDepth[pidx])
-                : encodeWorldRawDepth(worldDepth[pidx]);
+            const float raw = encodeWorldRawDepth(worldDepth[pidx]);
             const size_t i = pidx * 4u;
             rawDepth[i + 0] = raw;
             rawDepth[i + 1] = raw;

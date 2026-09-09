@@ -1494,8 +1494,9 @@ public:
                !postHlsl.contains("BO3BeginnerGrainLayer") ||
                !postHlsl.contains("BO3BeginnerPsxDither") ||
                !postHlsl.contains("BO3BeginnerSampleRawDepthPoint") ||
+               !postHlsl.contains("BO3BeginnerSampleWorldDepth") ||
                !postHlsl.contains("BO3BeginnerSSAOPair") ||
-               !postHlsl.contains("point-sampled Float-Z silhouettes") ||
+               !postHlsl.contains("viewmodel/depth-hack rejection") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth modules are missing from generated BO3 coverage HLSL.";
 
@@ -1542,12 +1543,53 @@ public:
                !skyHlsl.contains("BO3BeginnerNebulaField") ||
                !skyHlsl.contains("beginnerTimeOfDay") ||
                !skyHlsl.contains("beginnerSunDir") ||
-               !skyHlsl.contains("continuous volumetric-look cloud deck without visible raymarch slices") ||
+               !skyHlsl.contains("BO3_BEGINNER_CLOUD_TEXTURES") ||
+               !skyHlsl.contains("Texture2D<float4> iChannel0 : register(t2);") ||
+               !skyHlsl.contains("Texture2D<float4> iChannel1 : register(t3);") ||
+               !skyHlsl.contains("SamplerState glslSampler0 : register(s2);") ||
+               !skyHlsl.contains("SamplerState glslSampler1 : register(s3);") ||
+               !skyHlsl.contains("BO3BeginnerCloudDensity") ||
+               !skyHlsl.contains("texture-backed 3D volumetric raymarch using RGBA noise + blue-noise jitter") ||
+               !skyHlsl.contains("iChannel1.SampleLevel") ||
                !skyHlsl.contains("windAngle") ||
                !skyHlsl.contains("beginnerWaterMask") ||
                !skyHlsl.contains("beginnerReflectedDirection") ||
                !skyHlsl.contains("cloudColor"))
                 return "Beginner Sky atmosphere/cloud/water modules are missing from generated BO3 coverage HLSL.";
+
+            const QImage rgbaNoise(QStringLiteral(":/beginner/rgba_noise_medium.png"));
+            const QImage blueNoise(QStringLiteral(":/beginner/blue_noise.png"));
+            if(rgbaNoise.isNull() || rgbaNoise.size() != QSize(256,256) ||
+               blueNoise.isNull() || blueNoise.size() != QSize(1024,1024))
+                return "Beginner Volumetric Cloud texture resources are missing or have unexpected dimensions.";
+
+            const QString cloudTechset = makeSkyTechset(
+                "geometry/beginner_cloud_regression.hlsl", {}, skyHlsl);
+            if(!cloudTechset.contains("Sampler( \"glslSampler0\" )") ||
+               !cloudTechset.contains("Sampler( \"glslSampler1\" )") ||
+               !cloudTechset.contains("Texture( \"iChannel0\" )") ||
+               !cloudTechset.contains("Texture( \"iChannel1\" )") ||
+               !cloudTechset.contains("Image( <colorMap00, $white_diffuse> )") ||
+               !cloudTechset.contains("Image( <colorMap01, $white_diffuse> )"))
+                return "Beginner Volumetric Cloud runtime techset is missing texture/sampler bindings.";
+
+            const QMap<QString,QString> cloudMaterialImages{
+                {"colorMap00", "i_beginner_rgba_noise"},
+                {"colorMap01", "i_beginner_blue_noise"}
+            };
+            const QString cloudMaterial = createSkyMaterialGdtAsset(
+                "mtl_beginner_cloud_test", "beginner_cloud_type", "i_beginner_reflection", cloudMaterialImages);
+            if(!cloudMaterial.contains("\"colorMap00\" \"i_beginner_rgba_noise\"") ||
+               !cloudMaterial.contains("\"colorMap01\" \"i_beginner_blue_noise\""))
+                return "Beginner Volumetric Cloud sky material is missing colorMap00/colorMap01 image assignments.";
+
+            const QString cloudImage = createSkyCloudNoiseImageGdtAsset(
+                "i_beginner_cloud_noise_test", "source_data/_custom/images/cloud_noise.png");
+            if(!cloudImage.contains("\"coreSemantic\" \"Linear4ch\"") ||
+               !cloudImage.contains("\"noMipMaps\" \"1\"") ||
+               !cloudImage.contains("\"noPicMip\" \"1\""))
+                return "Beginner Volumetric Cloud BO3 image asset is not using the linear/no-mipmap noise contract.";
+
             if(skyHlsl.contains("return float4(saturate(color)") ||
                !skyHlsl.contains("65024.0"))
                 return "Beginner Sky final output is still clipping procedural HDR effects to 0..1.";
@@ -4510,6 +4552,18 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         QMap<QString, QString> overrides;
         if(mode != PreviewMode::HLSL)
             overrides = temporaryPreviewMappings_.value(adapterTargetKey(mode));
+
+        // Beginner Volumetric Clouds own two packaged 2D noise images. They are
+        // not scene/cubemap inputs, so the generated Sky package can safely map
+        // them without opening the guided-resource dialog every time a slider moves.
+        if(mode == PreviewMode::Sky &&
+           source.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
+        {
+            if(!overrides.contains("iChannel0")) overrides["iChannel0"] = "materialImage";
+            if(!overrides.contains("iChannel1")) overrides["iChannel1"] = "materialImage";
+            return overrides;
+        }
+
         if(mode != PreviewMode::PostFX || !preview_) return overrides;
 
         const bool convertedShadertoy = looksLikeConvertedShadertoyHlsl(source);
@@ -5926,6 +5980,25 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         if(from.isEmpty()||!QFileInfo::exists(from)) return false; QDir().mkpath(QFileInfo(to).absolutePath()); QFile::remove(to); if(!QFile::copy(from,to)){error=QString("Could not copy %1 to %2").arg(from,to);return false;} return true;
     }
 
+    bool copyQtResourceToFile(const QString& resourcePath, const QString& to, QString& error) const
+    {
+        QFile input(resourcePath);
+        if(!input.open(QIODevice::ReadOnly))
+        {
+            error = QString("Could not read embedded resource: %1").arg(resourcePath);
+            return false;
+        }
+        const QByteArray bytes = input.readAll();
+        QDir().mkpath(QFileInfo(to).absolutePath());
+        QSaveFile output(to);
+        if(!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
+        {
+            error = QString("Could not write embedded resource to %1").arg(to);
+            return false;
+        }
+        return true;
+    }
+
     QString createImageGdtAsset(const QString& assetName, const QString& baseImage, const QString& semantic="diffuseMap") const
     {
         QString b=readRuntimeTextFile("export_templates/image.gdtblock"); if(b.isEmpty()) return {};
@@ -6381,13 +6454,34 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         return b;
     }
 
-    QString createSkyMaterialGdtAsset(const QString& assetName, const QString& materialType, const QString& reflectionImage) const
+    QString createSkyCloudNoiseImageGdtAsset(const QString& assetName, const QString& baseImage) const
+    {
+        QString b = createImageGdtAsset(assetName, baseImage, "2d");
+        if(b.isEmpty()) return {};
+        // Cloud density/noise data must stay linear and unfiltered by APE's sRGB
+        // conversion. The source textures tile, so clamp remains disabled.
+        b=patchGdtField(b,"coreSemantic","Linear4ch");
+        b=patchGdtField(b,"compressionMethod","uncompressed");
+        b=patchGdtField(b,"colorSRGB","0");
+        b=patchGdtField(b,"noMipMaps","1");
+        b=patchGdtField(b,"noPicMip","1");
+        b=patchGdtField(b,"streamable","0");
+        b=patchGdtField(b,"clampU","0");
+        b=patchGdtField(b,"clampV","0");
+        return b;
+    }
+
+    QString createSkyMaterialGdtAsset(const QString& assetName, const QString& materialType,
+                                      const QString& reflectionImage,
+                                      const QMap<QString,QString>& auxiliaryImages = {}) const
     {
         QString b=readRuntimeTextFile("export_templates/sky_material.gdtblock"); if(b.isEmpty()) return {};
         b=renameGdtAsset(b,assetName);
         b=patchGdtField(b,"materialCategory","Geometry");
         b=patchGdtField(b,"materialType",materialType);
         b=patchGdtField(b,"colorMap",reflectionImage);
+        for(auto it = auxiliaryImages.constBegin(); it != auxiliaryImages.constEnd(); ++it)
+            b=patchGdtField(b,it.key(),it.value());
         return b;
     }
 
@@ -6879,15 +6973,59 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
         return source;
     }
 
-    QString makeSkyTechset(const QString& shaderRel, const QVector<ExportParamBinding>& bindings) const
+    QString makeSkyTechset(const QString& shaderRel, const QVector<ExportParamBinding>& bindings,
+                           const QString& shaderSource = QString()) const
     {
         Q_UNUSED(bindings);
-        // This is intentionally the exact runtime techset structure from the
-        // working Aurora Borealis package. The only substitution is the custom
-        // procedural pixel-shader path.
+        // Start from the proven Aurora runtime layout, then add only the explicit
+        // texture parameters required by the generated Beginner cloud shader.
         QString out = readRuntimeTextFile("export_templates/sky_aurora_runtime.techsetdef");
         if (out.isEmpty()) return {};
         out.replace("geometry/sky_procedural_aurora_borealis_ps.hlsl", shaderRel);
+
+        if(shaderSource.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
+        {
+            const QString cloudParameters = QStringLiteral(R"TECH(
+Sampler( "glslSampler0" )
+{
+    tile = "tile both"
+    filter = "linear (mip linear)"
+}
+Sampler( "glslSampler1" )
+{
+    tile = "tile both"
+    filter = "linear (mip linear)"
+}
+Texture( "iChannel0" )
+{
+    ref = true
+    image = Image( <colorMap00, $white_diffuse> )
+    semantic = "2d"
+    tweak = Tweak()
+    {
+        category  = "Clouds"
+        title     = "RGBA Noise Medium"
+        sortindex = "100"
+    }
+}
+Texture( "iChannel1" )
+{
+    ref = true
+    image = Image( <colorMap01, $white_diffuse> )
+    semantic = "2d"
+    tweak = Tweak()
+    {
+        category  = "Clouds"
+        title     = "Blue Noise"
+        sortindex = "105"
+    }
+}
+
+)TECH");
+            const int globalsPos = out.indexOf(QStringLiteral("Globals()"));
+            if(globalsPos >= 0) out.insert(globalsPos, cloudParameters);
+            else out += cloudParameters;
+        }
         return out;
     }
 
@@ -11888,7 +12026,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     void exportToBO3()
     {
-        const QString runtimeIssue = bo3RuntimeCompatibilityIssue(editor_->toPlainText());
+        const bool beginnerExport = beginnerUiMode_ && beginnerProjectActive_;
+        const QString activeExportSource = beginnerExport
+            ? beginner::generateHlsl(beginnerProject_)
+            : editor_->toPlainText();
+        const QString runtimeIssue = bo3RuntimeCompatibilityIssue(activeExportSource);
         if (!runtimeIssue.isEmpty())
         {
             QMessageBox::warning(
@@ -11905,7 +12047,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!preview_) return;
 
         QDialog dlg(this);
-        const bool beginnerExport = beginnerUiMode_ && beginnerProjectActive_;
         dlg.setWindowTitle(beginnerExport ? "Export Beginner Shader to Black Ops III" : "Export to Black Ops III");
         dlg.resize(beginnerExport ? 650 : 800, beginnerExport ? 470 : 830);
         auto* root = new QVBoxLayout(&dlg);
@@ -12386,7 +12527,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // The optional texture/POM example remains texture-driven.
         if(exportType != 1 || customHlslMaterial)
         {
-            if(editor_->toPlainText().trimmed().isEmpty())
+            if(activeExportSource.trimmed().isEmpty())
             {
                 QMessageBox::warning(this,"BO3 Export",customHlslMaterial ?
                     "Custom HLSL Material requires a shader with float4 ps_main in the editor." :
@@ -12398,7 +12539,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(customHlslMaterial)
             {
                 QString adapterDescription, adapterError;
-                const QString adapted=makeBo3CustomMaterialShader(editor_->toPlainText(),adapterDescription,adapterError,customMaterialSurface);
+                const QString adapted=makeBo3CustomMaterialShader(activeExportSource,adapterDescription,adapterError,customMaterialSurface);
                 if(adapted.isEmpty())
                 {
                     QMessageBox::warning(this,"BO3 Custom Material Export",adapterError);
@@ -12491,7 +12632,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
             const QString shaderOut=QDir(shaderDir).filePath(bn+".hlsl");
             QString shaderOutTools;
-            const QString editorSource = editor_->toPlainText();
+            const QString editorSource = activeExportSource;
             QString exportedShaderSource = editorSource;
             QString customAdapterDescription;
             if(exportType == 0)
@@ -13109,7 +13250,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QFile::remove(QDir(rootPath).filePath("share/raw/techsetdefs_stable/geometry/"+ns+"/"+tech+".techsetdef"));
             QFile::remove(QDir(rootPath).filePath("share/raw/techsetdefs_stable_toolsgfx/geometry/"+ns+"/"+tech+".techsetdef"));
 
-            const QString techText=makeSkyTechset(shaderRel,bindings);
+            const QString techText=makeSkyTechset(shaderRel,bindings,exportedShaderSourceForPackage);
             const QString techTextTools=makeSkyToolsgfxTechset();
             if(techText.isEmpty() || techTextTools.isEmpty())
             {
@@ -13179,7 +13320,52 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(ssiAnalysis.evMin,0,'f',1)
                 .arg(ssiAnalysis.evMax,0,'f',1);
             gdt+=createSkyImageGdtAsset(reflectionAsset,gdtTexturePath)+"\n";
-            gdt+=createSkyMaterialGdtAsset(mat,tech,reflectionAsset)+"\n";
+
+            QMap<QString,QString> skyAuxiliaryImages;
+            if(exportedShaderSourceForPackage.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
+            {
+                const QString imageDir = QDir(sourceData).filePath("images");
+                QDir().mkpath(imageDir);
+                struct CloudImageExport
+                {
+                    const char* resource;
+                    const char* suffix;
+                    const char* materialField;
+                };
+                const CloudImageExport cloudImages[] = {
+                    {":/beginner/rgba_noise_medium.png", "cloud_rgba_noise_medium", "colorMap00"},
+                    {":/beginner/blue_noise.png", "cloud_blue_noise", "colorMap01"}
+                };
+                for(const CloudImageExport& cloudImage : cloudImages)
+                {
+                    const QString suffix = QString::fromLatin1(cloudImage.suffix);
+                    const QString asset = sanitizeBo3Name(joinedPrefix + "_" + suffix);
+                    const QString fileName = bn + "_" + suffix + ".png";
+                    const QString destination = QDir(imageDir).filePath(fileName);
+                    if(!copyQtResourceToFile(QString::fromLatin1(cloudImage.resource), destination, err))
+                    {
+                        QApplication::restoreOverrideCursor();
+                        QMessageBox::critical(this, "BO3 Sky Cloud Export", err);
+                        return;
+                    }
+                    const QString relativeImage = "source_data/" + ns + "/images/" + fileName;
+                    const QString imageGdt = createSkyCloudNoiseImageGdtAsset(asset, relativeImage);
+                    if(imageGdt.isEmpty())
+                    {
+                        QApplication::restoreOverrideCursor();
+                        QMessageBox::critical(this, "BO3 Sky Cloud Export",
+                            "Could not generate the BO3 image asset for " + suffix + ".");
+                        return;
+                    }
+                    gdt += imageGdt + "\n";
+                    skyAuxiliaryImages[QString::fromLatin1(cloudImage.materialField)] = asset;
+                    generated << destination;
+                }
+                packageExportNotes.append(
+                    "Beginner Volumetric Clouds exported RGBA Noise Medium to colorMap00/iChannel0 and Blue Noise to colorMap01/iChannel1.");
+            }
+
+            gdt+=createSkyMaterialGdtAsset(mat,tech,reflectionAsset,skyAuxiliaryImages)+"\n";
             gdt+=createSkySsiGdtAsset(skyAsset,skyAsset,ssiAnalysis)+"\n";
             gdt+=createSkyXmodelGdtAsset(skyAsset,mat)+"\n";
 
@@ -14049,6 +14235,129 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return false;
     }
 
+    bool beginnerProjectUsesVolumetricClouds() const
+    {
+        if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::Sky)
+            return false;
+        for(const beginner::Effect& effect : beginnerProject_.effects)
+            if(effect.enabled && effect.typeId == "sky_realistic_clouds") return true;
+        return false;
+    }
+
+    QString materializeBeginnerResource(const QString& resourcePath, const QString& fileName,
+                                        QString& error) const
+    {
+        QFile input(resourcePath);
+        if(!input.open(QIODevice::ReadOnly))
+        {
+            error = "Could not open embedded Beginner texture: " + resourcePath;
+            return {};
+        }
+        const QByteArray bytes = input.readAll();
+        QString root = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        if(root.isEmpty()) root = QDir::tempPath() + "/BO3ShaderStudio";
+        const QString dir = QDir(root).filePath("beginner_assets");
+        if(!QDir().mkpath(dir))
+        {
+            error = "Could not create Beginner texture cache: " + dir;
+            return {};
+        }
+        const QString path = QDir(dir).filePath(fileName);
+        QFile existing(path);
+        if(existing.open(QIODevice::ReadOnly))
+        {
+            const bool identical = existing.readAll() == bytes;
+            existing.close();
+            if(identical) return QFileInfo(path).absoluteFilePath();
+        }
+
+        QSaveFile output(path);
+        if(!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
+        {
+            error = "Could not materialize Beginner texture: " + path;
+            return {};
+        }
+        return QFileInfo(path).absoluteFilePath();
+    }
+
+    void syncBeginnerCloudTextures()
+    {
+        if(!preview_) return;
+        const bool wanted = beginnerProjectUsesVolumetricClouds();
+        if(wanted == beginnerCloudTexturesActive_) return;
+
+        QString initError;
+        if(!preview_->ensureInitialized(initError))
+        {
+            if(!initError.isEmpty()) statusBar()->showMessage(initError, 5000);
+            return;
+        }
+
+        auto restorePrevious = [this]()
+        {
+            for(int channel = 0; channel < 2; ++channel)
+            {
+                const size_t index = static_cast<size_t>(channel);
+                preview_->renderer().SetShadertoyChannelRepeat(channel, beginnerCloudPreviousRepeat_[index]);
+                const QString path = beginnerCloudPreviousPaths_[index];
+                if(path.isEmpty() || !QFileInfo::exists(path))
+                {
+                    preview_->renderer().ClearShadertoyChannelTexture(channel);
+                    continue;
+                }
+                std::wstring restoreError;
+                if(!preview_->renderer().LoadShadertoyChannelTexture(
+                       channel, fs::path(path.toStdWString()), beginnerCloudPreviousFlipY_[index], restoreError))
+                    preview_->renderer().ClearShadertoyChannelTexture(channel);
+            }
+        };
+
+        if(!wanted)
+        {
+            restorePrevious();
+            beginnerCloudTexturesActive_ = false;
+            refreshShadertoyChannelUi();
+            return;
+        }
+
+        for(int channel = 0; channel < 2; ++channel)
+        {
+            const size_t index = static_cast<size_t>(channel);
+            beginnerCloudPreviousPaths_[index] = ToQString(preview_->renderer().GetShadertoyChannelPath(channel));
+            beginnerCloudPreviousRepeat_[index] = preview_->renderer().GetShadertoyChannelRepeat(channel);
+            beginnerCloudPreviousFlipY_[index] = preview_->renderer().GetShadertoyChannelFlipY(channel);
+        }
+
+        QString error;
+        const QString rgbaNoise = materializeBeginnerResource(
+            ":/beginner/rgba_noise_medium.png", "rgba_noise_medium.png", error);
+        const QString blueNoise = materializeBeginnerResource(
+            ":/beginner/blue_noise.png", "blue_noise.png", error);
+        if(rgbaNoise.isEmpty() || blueNoise.isEmpty())
+        {
+            restorePrevious();
+            statusBar()->showMessage("Volumetric cloud textures could not be prepared: " + error, 6000);
+            return;
+        }
+
+        const std::array<QString,2> paths{{rgbaNoise, blueNoise}};
+        for(int channel = 0; channel < 2; ++channel)
+        {
+            preview_->renderer().SetShadertoyChannelRepeat(channel, true);
+            std::wstring loadError;
+            if(!preview_->renderer().LoadShadertoyChannelTexture(
+                   channel, fs::path(paths[static_cast<size_t>(channel)].toStdWString()), false, loadError))
+            {
+                restorePrevious();
+                statusBar()->showMessage("Volumetric cloud texture load failed: " + ToQString(loadError), 6000);
+                refreshShadertoyChannelUi();
+                return;
+            }
+        }
+        beginnerCloudTexturesActive_ = true;
+        refreshShadertoyChannelUi();
+    }
+
     static QString beginnerDepthPreviewSceneName(const QString& sceneId)
     {
         const QString id = sceneId.trimmed().toLower();
@@ -14443,7 +14752,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 beginnerSliderDragging_ = true;
                 beginnerHeavyPreviewEffect_ =
                     previewEffectType == "sky_aurora" ||
-                    previewEffectType == "sky_nebula";
+                    previewEffectType == "sky_nebula" ||
+                    previewEffectType == "sky_realistic_clouds";
             });
             connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin, previewEffectType](int position)
             {
@@ -14458,7 +14768,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
                 beginnerHeavyPreviewEffect_ =
                     previewEffectType == "sky_aurora" ||
-                    previewEffectType == "sky_nebula";
+                    previewEffectType == "sky_nebula" ||
+                    previewEffectType == "sky_realistic_clouds";
                 markBeginnerProjectModified();
                 queueBeginnerParameterPreview();
             });
@@ -14613,6 +14924,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateTitle();
 
         if(!preview_) return;
+        syncBeginnerCloudTextures();
         if(immediateCompile)
         {
             liveCompileTimer_.stop();
@@ -17781,6 +18093,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updatePreviewModeInspector();
         updateGBufferUi();
         refreshPostFxRuntimeUi();
+        syncBeginnerCloudTextures();
         if(beginner)
             QTimer::singleShot(0, this, [this]{ updateBeginnerResponsiveLayout(); });
         updateTitle();
@@ -18299,6 +18612,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerProjectModified_ = false;
         beginnerProjectPath_.clear();
         beginnerGeneratedHlsl_.clear();
+        syncBeginnerCloudTextures();
         if(beginnerUiMode_) setUiExperienceMode(false);
         loadingText_ = true;
         editor_->setPlainText(QString::fromUtf8(file.readAll()));
@@ -19954,6 +20268,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     bool onlineUpdateCheckInProgress_ = false;
     QString currentTheme_ = "BO3 Dark";
     QString beginnerDepthPreviewSceneId_ = "shadows_of_evil";
+    bool beginnerCloudTexturesActive_ = false;
+    std::array<QString,2> beginnerCloudPreviousPaths_{{QString(), QString()}};
+    std::array<bool,2> beginnerCloudPreviousRepeat_{{true, true}};
+    std::array<bool,2> beginnerCloudPreviousFlipY_{{false, false}};
     bool modified_ = false, loadingText_ = false, refreshingVectors_ = false, lastWriteTimeValid_ = false;
     bool beginnerUiMode_ = true;
     PreviewMode detectedPreviewMode_ = PreviewMode::HLSL;
