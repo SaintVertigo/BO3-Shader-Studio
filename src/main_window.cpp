@@ -212,6 +212,25 @@ protected:
     }
 };
 
+class BeginnerEffectCard final : public QFrame
+{
+public:
+    using QFrame::QFrame;
+    std::function<void()> activated;
+
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        if(event && event->button() == Qt::LeftButton && activated)
+        {
+            activated();
+            event->accept();
+            return;
+        }
+        QFrame::mouseDoubleClickEvent(event);
+    }
+};
+
 inline const char* MaterialTextureSlotName(int index)
 {
     static const char* names[kMaterialTextureSlotCount] = {
@@ -15321,6 +15340,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         dlg.resize(980, 690);
         dlg.setMinimumSize(720, 520);
 
+        const int browserStateIndex = qBound(0, static_cast<int>(beginnerProject_.target), 2);
+        const QString savedCategory = beginnerEffectBrowserCategory_[browserStateIndex].isEmpty()
+            ? QStringLiteral("All Effects")
+            : beginnerEffectBrowserCategory_[browserStateIndex];
+        const QString savedSearch = beginnerEffectBrowserSearch_[browserStateIndex];
+        const int savedScrollY = qMax(0, beginnerEffectBrowserScrollY_[browserStateIndex]);
+
         auto* root = new QVBoxLayout(&dlg);
         root->setContentsMargins(16, 14, 16, 14);
         root->setSpacing(8);
@@ -15338,6 +15364,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* search = new QLineEdit();
         search->setPlaceholderText("Search effects... e.g. glow, grain, ripple, color");
         search->setClearButtonEnabled(true);
+        search->setText(savedSearch);
         root->addWidget(search);
 
         auto* body = new QHBoxLayout();
@@ -15352,7 +15379,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             if(!categories.contains(definition.category)) categories << definition.category;
         for(const QString& category : categories) categoryList->addItem(category);
-        categoryList->setCurrentRow(0);
+        int savedCategoryRow = 0;
+        for(int row = 0; row < categoryList->count(); ++row)
+        {
+            if(categoryList->item(row)->text() == savedCategory)
+            {
+                savedCategoryRow = row;
+                break;
+            }
+        }
+        categoryList->setCurrentRow(savedCategoryRow);
         body->addWidget(categoryList);
 
         auto* scroll = new QScrollArea();
@@ -15368,9 +15404,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         root->addLayout(body, 1);
 
         int currentColumns = 2;
-        std::function<void()> rebuildCards;
-        rebuildCards = [&]()
+        std::function<void(bool)> rebuildCards;
+        rebuildCards = [&](bool preserveScroll)
         {
+            const int previousScrollY = preserveScroll ? scroll->verticalScrollBar()->value() : 0;
             while(QLayoutItem* item = cardGrid->takeAt(0))
             {
                 if(QWidget* widget = item->widget()) widget->deleteLater();
@@ -15408,11 +15445,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 const beginner::EffectDefinition& definition = *definitionPtr;
                 const bool supported = beginner::supportsTarget(definition, beginnerProject_.target);
 
-                auto* card = new QFrame();
+                auto* card = new BeginnerEffectCard();
                 card->setObjectName("BeginnerEffectCard");
                 card->setProperty("supported", supported);
                 card->setMinimumHeight(currentColumns == 1 ? 186 : 218);
                 card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+                if(supported)
+                {
+                    card->setCursor(Qt::PointingHandCursor);
+                    card->setToolTip("Double-click anywhere on this card to add the effect.");
+                    card->activated = [this, &dlg, id = definition.id]
+                    {
+                        addBeginnerEffect(id);
+                        dlg.accept();
+                    };
+                }
 
                 auto* layout = new QVBoxLayout(card);
                 layout->setContentsMargins(12, 10, 12, 10);
@@ -15422,13 +15469,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 visual->setPixmap(beginnerEffectPreviewPixmap(definition, supported));
                 visual->setFixedHeight(58);
                 visual->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+                visual->setAttribute(Qt::WA_TransparentForMouseEvents);
                 layout->addWidget(visual);
 
                 auto* headingRow = new QHBoxLayout();
                 auto* name = new QLabel(definition.name);
                 name->setObjectName(supported ? "EffectCardTitle" : "EffectCardTitleDisabled");
+                name->setAttribute(Qt::WA_TransparentForMouseEvents);
                 auto* category = new QLabel(definition.category.toUpper());
                 category->setObjectName(supported ? "EffectCardCategory" : "EffectCardCategoryDisabled");
+                category->setAttribute(Qt::WA_TransparentForMouseEvents);
                 headingRow->addWidget(name, 1);
                 headingRow->addWidget(category, 0, Qt::AlignRight);
                 layout->addLayout(headingRow);
@@ -15437,6 +15487,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 description->setWordWrap(true);
                 description->setObjectName("CompactHelp");
                 description->setEnabled(supported);
+                description->setAttribute(Qt::WA_TransparentForMouseEvents);
                 layout->addWidget(description);
                 layout->addStretch(1);
 
@@ -15458,6 +15509,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     availability->setText("Works with: " + beginnerEffectAvailability(definition));
                     availability->setObjectName("EffectAvailabilityWarn");
                 }
+                availability->setAttribute(Qt::WA_TransparentForMouseEvents);
                 layout->addWidget(availability);
 
                 auto* add = new QPushButton(supported ? "+ Add Effect" : "Not available for this shader");
@@ -15489,24 +15541,44 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             for(int column = 0; column < 2; ++column)
                 cardGrid->setColumnStretch(column, column < currentColumns ? 1 : 0);
             cardHost->adjustSize();
+
+            if(preserveScroll)
+            {
+                QTimer::singleShot(0, &dlg, [scroll, previousScrollY]
+                {
+                    QScrollBar* bar = scroll->verticalScrollBar();
+                    if(bar) bar->setValue(qBound(0, previousScrollY, bar->maximum()));
+                });
+            }
         };
 
-        connect(search, &QLineEdit::textChanged, &dlg, [&](const QString&){ rebuildCards(); });
-        connect(categoryList, &QListWidget::currentRowChanged, &dlg, [&](int){ rebuildCards(); });
+        connect(search, &QLineEdit::textChanged, &dlg, [&](const QString&){ rebuildCards(false); });
+        connect(categoryList, &QListWidget::currentRowChanged, &dlg, [&](int){ rebuildCards(false); });
         dlg.resized = [&]()
         {
             const int wantedColumns = dlg.width() < 820 ? 1 : 2;
             if(wantedColumns != currentColumns)
-                rebuildCards();
+                rebuildCards(true);
         };
 
-        rebuildCards();
+        rebuildCards(false);
+        QTimer::singleShot(0, &dlg, [scroll, savedScrollY]
+        {
+            QScrollBar* bar = scroll->verticalScrollBar();
+            if(bar) bar->setValue(qBound(0, savedScrollY, bar->maximum()));
+        });
 
         auto* close = new QDialogButtonBox(QDialogButtonBox::Close);
         connect(close, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
         connect(close, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
         root->addWidget(close);
         dlg.exec();
+
+        beginnerEffectBrowserCategory_[browserStateIndex] = categoryList->currentItem()
+            ? categoryList->currentItem()->text()
+            : QStringLiteral("All Effects");
+        beginnerEffectBrowserSearch_[browserStateIndex] = search->text();
+        beginnerEffectBrowserScrollY_[browserStateIndex] = qMax(0, scroll->verticalScrollBar()->value());
     }
 
     void showAddBeginnerEffectMenu(QPushButton* anchor)
@@ -20373,6 +20445,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QPushButton* beginnerRemoveEffectButton_ = nullptr;
     QPushButton* beginnerMoveEffectUpButton_ = nullptr;
     QPushButton* beginnerMoveEffectDownButton_ = nullptr;
+    QString beginnerEffectBrowserCategory_[3];
+    QString beginnerEffectBrowserSearch_[3];
+    int beginnerEffectBrowserScrollY_[3]{};
     QGroupBox* beginnerBaseAppearanceGroup_ = nullptr;
     QGroupBox* beginnerEffectsGroup_ = nullptr;
     QGroupBox* beginnerParamsGroup_ = nullptr;
