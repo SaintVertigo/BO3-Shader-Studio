@@ -1583,6 +1583,8 @@ public:
                !postHlsl.contains("Screen-Space Reflections") ||
                !postHlsl.contains("Wet Ground Reflections") ||
                !postHlsl.contains("BO3BeginnerSSRTrace") ||
+               !postHlsl.contains("BO3_BEGINNER_RAIN_DROPS") ||
+               !postHlsl.contains("Rain Drops") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
@@ -1651,6 +1653,11 @@ public:
                !materialHlsl.contains("surfaceViewDir") ||
                !materialHlsl.contains("clip("))
                 return "Beginner Material glow/dissolve modules are missing their BO3 runtime inputs.";
+            if(!materialHlsl.contains("material pixels sample BO3 resolvedScene + Float-Z in screen space") ||
+               !materialHlsl.contains("Texture2D<float4> frameBuffer : register(t0);") ||
+               !materialHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               !materialHlsl.contains("BO3_BEGINNER_SSR"))
+                return "Beginner Material screen-space reflection module is missing its resolvedScene/Float-Z contract.";
 
             // The package adapter validates the authored Material contract above,
             // but Beginner export ultimately passes through the Custom Material
@@ -1667,6 +1674,13 @@ public:
             QString exportedMaterialDiagnostics;
             if(!compileGlslValidationHlsl(exportedMaterial, exportedMaterialDiagnostics, true))
                 return "Beginner Material exported runtime HLSL failed FXC validation: " + exportedMaterialDiagnostics;
+
+            const QString materialSsrTechset = makeMaterialTechset(
+                exportedMaterial, QStringLiteral("shaders\\beginner_material_ssr.hlsl"), {}, 1,
+                bo3::PackageConfiguration::Runtime);
+            if(!materialSsrTechset.contains("frameBuffer = CodeTexture( \"resolvedScene\" )") ||
+               !materialSsrTechset.contains("DepthSampler = CodeTexture( \"floatZ\" )"))
+                return "Beginner Material SSR runtime techset did not bind resolvedScene + floatZ CodeTextures.";
 
             const beginner::Project sky = projects[2].first;
             const QString skyHlsl = beginner::generateHlsl(sky);
@@ -5857,6 +5871,31 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             return technique;
         };
 
+        // A custom material can opt into the same engine CodeTextures used by
+        // PostFX. This is intentionally explicit and only activates when the
+        // authored Beginner material declares frameBuffer/DepthSampler. TOOLSGFX
+        // keeps the normal image fallbacks, while Runtime binds the live scene.
+        auto bindRuntimeSceneCodeTextures = [&](bo3::TechniqueModel& technique)
+        {
+            if(configuration != bo3::PackageConfiguration::Runtime) return;
+            for(const auto& texture : textures)
+            {
+                const QString lower = texture.name.toLower();
+                QString codeTexture;
+                if(lower == "framebuffer" || lower == "resolvedscene" || lower == "scenetexture")
+                    codeTexture = "resolvedScene";
+                else if(lower == "depthsampler" || lower == "floatz" || lower == "scenedepth" || lower == "depthtexture")
+                    codeTexture = "floatZ";
+                if(codeTexture.isEmpty()) continue;
+
+                bo3::StageResourceBindingModel resource;
+                resource.parameterName = texture.name;
+                resource.valueKind = bo3::BindingValueKind::CodeTexture;
+                resource.valueName = codeTexture;
+                technique.pixelShader.resourceBindings << resource;
+            }
+        };
+
         if(deferred)
         {
             model.techniques << inheritedTechnique("build shadowmap depth", "build shadowmap depth base");
@@ -5896,7 +5935,9 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             unlit.pixelShader.resourceBindings << unlitColorMap;
             model.techniques << unlit;
 
-            model.techniques << genericTechnique("gbuffer", "gbuffer opaque", shaderRel);
+            bo3::TechniqueModel gbufferTechnique = genericTechnique("gbuffer", "gbuffer opaque", shaderRel);
+            bindRuntimeSceneCodeTextures(gbufferTechnique);
+            model.techniques << gbufferTechnique;
             bo3::TechniqueModel motion = inheritedTechnique("gbuffer motion vector", "gbuffer");
             motion.definesAppend = {"GENERATE_MOTION_VECTOR"};
             model.techniques << motion;
@@ -5912,8 +5953,12 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 motion.definesAppend = {"GENERATE_MOTION_VECTOR"};
                 model.techniques << motion;
             }
-            model.techniques << genericTechnique("unlit", state, shaderRel);
-            model.techniques << genericTechnique("lit", state, shaderRel);
+            bo3::TechniqueModel customUnlit = genericTechnique("unlit", state, shaderRel);
+            bo3::TechniqueModel customLit = genericTechnique("lit", state, shaderRel);
+            bindRuntimeSceneCodeTextures(customUnlit);
+            bindRuntimeSceneCodeTextures(customLit);
+            model.techniques << customUnlit;
+            model.techniques << customLit;
             model.techniques << debugTechnique(state);
         }
         return model;
@@ -13952,7 +13997,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                id == "depth_desaturation" || id == "distance_darkening" || id == "depth_pixelation" ||
                id == "depth_chromatic_aberration" || id == "depth_contours" || id == "depth_heatmap" ||
                id == "depth_isolation" || id == "contact_shadows" ||
-               id == "screen_space_reflections" || id == "wet_ground_reflections";
+               id == "screen_space_reflections" || id == "wet_ground_reflections" ||
+               id == "material_screen_space_reflections";
     }
 
     static QString beginnerPresetDescription(beginner::Target target, const QString& presetId)
@@ -14224,7 +14270,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             painter.setBrush(QColor(20,24,28,155));
             painter.drawEllipse(QRectF(inner.center().x()-5, inner.center().y()+7, 78, 15));
         }
-        else if(id == "screen_space_reflections")
+        else if(id == "screen_space_reflections" || id == "material_screen_space_reflections")
         {
             painter.fillRect(inner, QColor("#111820"));
             QLinearGradient g(inner.topLeft(), inner.bottomLeft());
@@ -14303,14 +14349,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else if(id == "red_paint_splatter")
         {
-            painter.fillRect(inner, QColor("#140C10"));
+            // Rain Drops - translucent cool droplets with long glass streaks.
+            QLinearGradient rainBg(inner.topLeft(), inner.bottomRight());
+            rainBg.setColorAt(0.0, QColor("#1B2D39"));
+            rainBg.setColorAt(1.0, QColor("#527486"));
+            painter.fillRect(inner, rainBg);
+            painter.setPen(QPen(QColor(220, 242, 255, 190), 1.2));
+            painter.setBrush(QColor(205, 235, 250, 70));
+            painter.drawEllipse(QRectF(inner.left() + 26, inner.top() + 9, 16, 25));
+            painter.drawEllipse(QRectF(inner.center().x() - 8, inner.top() + 17, 20, 30));
+            painter.drawEllipse(QRectF(inner.right() - 42, inner.top() + 8, 14, 21));
+            painter.setPen(QPen(QColor(210, 238, 252, 165), 2.0));
+            painter.drawLine(QPointF(inner.left() + 34, inner.top() + 30), QPointF(inner.left() + 35, inner.bottom() - 5));
+            painter.drawLine(QPointF(inner.center().x() + 2, inner.top() + 42), QPointF(inner.center().x() + 1, inner.bottom() - 3));
+            painter.drawLine(QPointF(inner.right() - 35, inner.top() + 26), QPointF(inner.right() - 36, inner.bottom() - 9));
+            painter.setBrush(QColor(230, 248, 255, 150));
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor("#B61E2C"));
-            painter.drawEllipse(QRectF(inner.left() + 18, inner.top() + 18, 42, 28));
-            painter.drawEllipse(QRectF(inner.center().x() - 12, inner.center().y() - 18, 58, 36));
-            painter.drawEllipse(QRectF(inner.right() - 54, inner.top() + 28, 24, 20));
-            painter.drawRect(QRectF(inner.center().x() + 5, inner.center().y() + 8, 6, 26));
-            painter.drawRect(QRectF(inner.left() + 40, inner.center().y(), 5, 20));
+            for(int i = 0; i < 10; ++i)
+            {
+                const double x = inner.left() + 12 + ((i * 37) % qMax(1, static_cast<int>(inner.width() - 24)));
+                const double y = inner.top() + 7 + ((i * 19) % qMax(1, static_cast<int>(inner.height() - 14)));
+                const double r = 1.5 + (i % 3);
+                painter.drawEllipse(QPointF(x, y), r, r * 1.35);
+            }
         }
         else if(id == "water_distortion")
         {

@@ -3500,6 +3500,8 @@ private:
     void BuildMaterialShaderResources(std::array<ID3D11ShaderResourceView*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT>& srvs)
     {
         srvs.fill(nullptr);
+        bool reservesSceneSlot0 = false;
+        bool reservesDepthSlot1 = false;
         for (const auto& resource : resources_)
         {
             ID3D11ShaderResourceView* fallback = NeutralForDimension(resource.dimension);
@@ -3509,8 +3511,19 @@ private:
                 if (slot >= srvs.size()) break;
                 srvs[slot] = fallback;
             }
-            if (resource.slot == 0 && Is2DLike(resource.dimension)) srvs[0] = sourceSRV_.Get();
-            if (resource.slot == 1 && Is2DLike(resource.dimension)) srvs[1] = ActivePreviewDepthSRV();
+            if (resource.name == "frameBuffer" && resource.slot == 0 && Is2DLike(resource.dimension))
+            {
+                srvs[0] = sourceSRV_.Get();
+                reservesSceneSlot0 = true;
+            }
+            else if (resource.slot == 0 && Is2DLike(resource.dimension)) srvs[0] = sourceSRV_.Get();
+
+            if (resource.name == "DepthSampler" && resource.slot == 1 && Is2DLike(resource.dimension))
+            {
+                srvs[1] = ActivePreviewDepthSRV();
+                reservesDepthSlot1 = true;
+            }
+            else if (resource.slot == 1 && Is2DLike(resource.dimension)) srvs[1] = ActivePreviewDepthSRV();
         }
         if (!srvs[0]) srvs[0] = sourceSRV_.Get();
         if (!srvs[1]) srvs[1] = ActivePreviewDepthSRV();
@@ -3528,6 +3541,12 @@ private:
             ID3D11ShaderResourceView* srv = materialTextureSRVs_[static_cast<size_t>(i)].Get();
             if (!srv) continue;
             const UINT bindSlot = materialTextureBindings_[static_cast<size_t>(i)];
+            // Material SSR owns t0/t1 as live scene/depth inputs. Do not let an
+            // unrelated material-image assignment silently replace those preview
+            // resources while the reflection effect is active.
+            if ((bindSlot == 0 && reservesSceneSlot0) ||
+                (bindSlot == 1 && reservesDepthSlot1))
+                continue;
             if (bindSlot < srvs.size())
                 srvs[bindSlot] = srv;
         }

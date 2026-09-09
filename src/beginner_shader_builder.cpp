@@ -736,6 +736,31 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, %2_ssrTrace.rgb, %2_ssrBlend);\n")
                 .arg(definition->name, tag, targetScope, strength, maxDistance, steps, thickness, roughness, fresnel, perspective, distanceFade);
         }
+        else if(effect.typeId == "material_screen_space_reflections" && project.target == Target::Material && hasUv)
+        {
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString maxDistance = parameterExpr(project, effect, *definition, "max_distance");
+            const QString steps = parameterExpr(project, effect, *definition, "steps");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString fresnel = parameterExpr(project, effect, *definition, "fresnel");
+            const QString perspective = parameterExpr(project, effect, *definition, "perspective");
+            const QColor tint = parameterColor(effect, *definition, "tint");
+            out += QString("    // %1 - material pixels sample BO3 resolvedScene + Float-Z in screen space\n"
+                           "    float2 %2_screenUv = saturate(input.position.xy * PostFx_GetRenderTargetSize().zw);\n"
+                           "    float %2_raw = BO3BeginnerSampleRawDepthPoint(%2_screenUv);\n"
+                           "    float3 %2_depthNormal = BO3BeginnerSSRNormal(%2_screenUv, %2_raw, %9);\n"
+                           "    float3 %2_viewPos = BO3BeginnerSSRViewPosition(%2_screenUv, BO3BeginnerLinearDepth(%2_raw), %9);\n"
+                           "    float3 %2_view = normalize(-%2_viewPos);\n"
+                           "    float %2_depthFresnel = pow(1.0 - saturate(dot(%2_depthNormal, %2_view)), lerp(5.0, 1.0, saturate(%8)));\n"
+                           "    float %2_surfaceFresnel = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), lerp(5.0, 1.0, saturate(%8)));\n"
+                           "    float4 %2_trace = BO3BeginnerSSRTrace(%2_screenUv, %2_raw, %4, %6, %5, %9, %7, 0.0, 1.0, t);\n"
+                           "    float %2_f = max(%2_depthFresnel, %2_surfaceFresnel);\n"
+                           "    float %2_blend = saturate(%2_trace.a * %3 * lerp(0.35, 1.0, %2_f));\n"
+                           "    float3 %2_reflection = %2_trace.rgb * %10;\n"
+                           "    color = lerp(color, %2_reflection, %2_blend);\n")
+                .arg(definition->name, tag, strength, maxDistance, steps, thickness, roughness, fresnel, perspective, colorLiteral(tint));
+        }
         else if(effect.typeId == "wet_ground_reflections" && project.target == Target::PostFx && hasUv)
         {
             const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
@@ -889,91 +914,49 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, %2_paint, %4);\n")
                 .arg(definition->name, tag, scale, strength, smear, bend, detail);
         }
-        else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv)
+        else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QColor splatColor = parameterColor(effect, *definition, "color");
+            const QColor rainColor = parameterColor(effect, *definition, "color");
             const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString count = parameterExpr(project, effect, *definition, "scale");
-            const QString size = parameterExpr(project, effect, *definition, "size");
-            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
-            const QString droplets = parameterExpr(project, effect, *definition, "droplets");
-            const QString drips = parameterExpr(project, effect, *definition, "drips");
-            const QString dripLength = parameterExpr(project, effect, *definition, "drip_length");
-            out += QString("    // %1 - sparse irregular impacts, directional satellites and gravity drips\n"
+            const QString rainAmount = parameterExpr(project, effect, *definition, "rain_amount");
+            const QString staticDrops = parameterExpr(project, effect, *definition, "static_drops");
+            const QString largeStreaks = parameterExpr(project, effect, *definition, "large_streaks");
+            const QString smallStreaks = parameterExpr(project, effect, *definition, "small_streaks");
+            const QString distortion = parameterExpr(project, effect, *definition, "distortion");
+            const QString blur = parameterExpr(project, effect, *definition, "blur");
+            const QString trailStrength = parameterExpr(project, effect, *definition, "trail_strength");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            out += QString("    // %1 - layered animated droplets and gravity trails on stable glass; no camera zoom or lightning\n"
                            "    float2 %2_rt = max(PostFx_GetRenderTargetSize().xy, float2(1.0,1.0));\n"
-                           "    float %2_aspect = %2_rt.x / %2_rt.y;\n"
-                           "    float2 %2_uv = float2((uv.x - 0.5) * %2_aspect, uv.y - 0.5);\n"
-                           "    float %2_mask = 0.0;\n"
-                           "    float %2_core = 0.0;\n"
-                           "    float %2_gloss = 0.0;\n"
-                           "    [loop] for(int %2_i = 0; %2_i < 10; ++%2_i)\n"
-                           "    {\n"
-                           "        float %2_fi = (float)%2_i;\n"
-                           "        if(%2_fi + 0.5 > %3) break;\n"
-                           "        float2 %2_seed = float2(%2_fi * 7.13 + 1.71, %2_fi * 13.37 + 5.29);\n"
-                           "        float2 %2_center01 = float2(BO3BeginnerHash21(%2_seed), BO3BeginnerHash21(%2_seed + 17.9));\n"
-                           "        float2 %2_center = float2((%2_center01.x - 0.5) * %2_aspect, %2_center01.y - 0.5);\n"
-                           "        float %2_rnd = BO3BeginnerHash21(%2_seed + 31.4);\n"
-                           "        float %2_radius = %4 * lerp(0.72, 1.38, %2_rnd);\n"
-                           "        float2 %2_d = %2_uv - %2_center;\n"
-                           "        float %2_mainDist = length(%2_d);\n"
-                           "        float %2_main = 1.0 - smoothstep(%2_radius * 0.90, %2_radius, %2_mainDist);\n"
-                           "        float %2_localMask = %2_main;\n"
-                           "        float %2_localCore = 1.0 - smoothstep(%2_radius * 0.60, %2_radius * 0.82, %2_mainDist);\n"
-                           "        // Break the perfect circle with several uneven lobes around the impact.\n"
-                           "        [unroll] for(int %2_l = 0; %2_l < 4; ++%2_l)\n"
-                           "        {\n"
-                           "            float %2_fl = (float)%2_l;\n"
-                           "            float2 %2_lobeDir = float2(BO3BeginnerHash21(%2_seed + 41.0 + %2_fl * 2.91), BO3BeginnerHash21(%2_seed + 53.0 + %2_fl * 4.17)) - 0.5;\n"
-                           "            %2_lobeDir = normalize(%2_lobeDir + float2(0.0001,0.0));\n"
-                           "            float %2_lobeRand = BO3BeginnerHash21(%2_seed + 47.0 + %2_fl * 3.1);\n"
-                           "            float %2_lobeDist = %2_radius * lerp(0.48, 0.92, %2_lobeRand);\n"
-                           "            float2 %2_lobePos = %2_center + %2_lobeDir * %2_lobeDist;\n"
-                           "            float %2_lobeR = %2_radius * lerp(0.18, 0.46, BO3BeginnerHash21(%2_seed + 61.0 + %2_fl * 5.7)) * lerp(0.32, 1.0, %5);\n"
-                           "            float %2_lobe = 1.0 - smoothstep(%2_lobeR * 0.78, %2_lobeR, length(%2_uv - %2_lobePos));\n"
-                           "            %2_localMask = max(%2_localMask, %2_lobe);\n"
-                           "        }\n"
-                           "        // Directional satellite droplets make the impact read as a splash instead of a tiled pattern.\n"
-                           "        [unroll] for(int %2_s = 0; %2_s < 5; ++%2_s)\n"
-                           "        {\n"
-                           "            float %2_fs = (float)%2_s;\n"
-                           "            float2 %2_sdir = float2(BO3BeginnerHash21(%2_seed + 83.0 + %2_fs * 4.33), BO3BeginnerHash21(%2_seed + 91.0 + %2_fs * 6.11)) - 0.5;\n"
-                           "            %2_sdir = normalize(%2_sdir + float2(0.0001,0.0));\n"
-                           "            float %2_travel = %2_radius * lerp(1.05, 3.4, BO3BeginnerHash21(%2_seed + 96.0 + %2_fs * 7.17));\n"
-                           "            float2 %2_sp = %2_center + %2_sdir * %2_travel;\n"
-                           "            float %2_sr = %2_radius * lerp(0.035, 0.13, BO3BeginnerHash21(%2_seed + 114.0 + %2_fs * 2.47));\n"
-                           "            float %2_drop = (1.0 - smoothstep(%2_sr * 0.72, %2_sr, length(%2_uv - %2_sp))) * %6;\n"
-                           "            %2_localMask = max(%2_localMask, %2_drop);\n"
-                           "        }\n"
-                           "        // A few impacts pull downward into tapered gravity runs attached to the main body.\n"
-                           "        float %2_dripGate = step(1.0 - %7, BO3BeginnerHash21(%2_seed + 141.0));\n"
-                           "        float %2_dripX = %2_center.x + (BO3BeginnerHash21(%2_seed + 153.0) - 0.5) * %2_radius * 0.85;\n"
-                           "        float %2_dripStart = %2_center.y + %2_radius * lerp(0.28,0.72,BO3BeginnerHash21(%2_seed + 167.0));\n"
-                           "        float %2_len = %2_radius * lerp(0.8, 4.8, BO3BeginnerHash21(%2_seed + 181.0)) * %8;\n"
-                           "        float %2_yAlong = %2_uv.y - %2_dripStart;\n"
-                           "        float %2_t = saturate(%2_yAlong / max(%2_len, 0.0001));\n"
-                           "        float %2_w = %2_radius * lerp(0.055, 0.13, BO3BeginnerHash21(%2_seed + 193.0)) * lerp(1.0, 0.48, %2_t);\n"
-                           "        float %2_inY = step(0.0, %2_yAlong) * step(%2_yAlong, %2_len);\n"
-                           "        float %2_dripBody = (1.0 - smoothstep(%2_w * 0.72, %2_w, abs(%2_uv.x - %2_dripX))) * %2_inY;\n"
-                           "        float2 %2_tipPos = float2(%2_dripX, %2_dripStart + %2_len);\n"
-                           "        float %2_tip = 1.0 - smoothstep(%2_w * 0.8, %2_w * 1.35, length(%2_uv - %2_tipPos));\n"
-                           "        %2_localMask = max(%2_localMask, max(%2_dripBody, %2_tip) * %2_dripGate);\n"
-                           "        %2_mask = max(%2_mask, %2_localMask);\n"
-                           "        %2_core = max(%2_core, %2_localCore);\n"
-                           "        // Tiny offset highlight, restrained so it still looks like thick paint rather than neon blobs.\n"
-                           "        float2 %2_hiPos = %2_center - normalize(float2(0.7,1.0)) * %2_radius * 0.22;\n"
-                           "        float %2_hi = 1.0 - smoothstep(%2_radius * 0.08, %2_radius * 0.28, length(%2_uv - %2_hiPos));\n"
-                           "        %2_gloss = max(%2_gloss, %2_hi * %2_localCore);\n"
-                           "    }\n"
-                           "    %2_mask = saturate(%2_mask);\n"
-                           "    float %2_rim = saturate(%2_mask - %2_core * 0.76);\n"
-                           "    float3 %2_basePaint = %9 * lerp(0.58, 0.94, %2_core);\n"
-                           "    %2_basePaint = lerp(%2_basePaint, %9 * 0.42, %2_rim * 0.42);\n"
-                           "    %2_basePaint += %2_gloss * lerp(%9, float3(1.0,0.92,0.90), 0.55) * 0.20;\n"
-                           "    float %2_alpha = saturate(%2_mask * %10);\n"
-                           "    color = lerp(color, %2_basePaint, %2_alpha);\n")
-                .arg(definition->name, tag, count, size, roughness, droplets, drips, dripLength, colorLiteral(splatColor))
-                .arg(strength);
+                           "    float2 %2_rainUv = (uv * %2_rt - 0.5 * %2_rt) / %2_rt.y;\n"
+                           "    float %2_time = t * 0.20 * %11;\n"
+                           "    float %2_amount = saturate(%4);\n"
+                           "    float %2_static = %5 * smoothstep(0.0, 0.70, %2_amount) * 2.0;\n"
+                           "    float %2_large = %6 * smoothstep(0.15, 0.82, %2_amount);\n"
+                           "    float %2_small = %7 * smoothstep(0.0, 0.58, %2_amount);\n"
+                           "    float2 %2_drops = BO3BeginnerRainDrops(%2_rainUv, %2_time, %2_static, %2_large, %2_small);\n"
+                           "    float %2_e = 1.25 / %2_rt.y;\n"
+                           "    float %2_dx = BO3BeginnerRainDrops(%2_rainUv + float2(%2_e,0.0), %2_time, %2_static, %2_large, %2_small).x;\n"
+                           "    float %2_dy = BO3BeginnerRainDrops(%2_rainUv + float2(0.0,%2_e), %2_time, %2_static, %2_large, %2_small).x;\n"
+                           "    float2 %2_normal = float2(%2_dx - %2_drops.x, %2_dy - %2_drops.x);\n"
+                           "    float2 %2_refractUv = saturate(uv + %2_normal * (%8 * 0.085));\n"
+                           "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
+                           "    float %2_blurPx = %9 * lerp(0.45, 0.16, saturate(%2_drops.x));\n"
+                           "    float2 %2_bx = float2(%2_texel.x * %2_blurPx, 0.0);\n"
+                           "    float2 %2_by = float2(0.0, %2_texel.y * %2_blurPx);\n"
+                           "    float3 %2_wet = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, %2_refractUv).rgb) * 0.44;\n"
+                           "    %2_wet += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_refractUv + %2_bx)).rgb) * 0.14;\n"
+                           "    %2_wet += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_refractUv - %2_bx)).rgb) * 0.14;\n"
+                           "    %2_wet += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_refractUv + %2_by)).rgb) * 0.14;\n"
+                           "    %2_wet += PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(%2_refractUv - %2_by)).rgb) * 0.14;\n"
+                           "    float %2_trail = saturate(%2_drops.y * %10);\n"
+                           "    float %2_dropMask = saturate(max(%2_drops.x, %2_trail * 0.72));\n"
+                           "    float3 %2_tinted = lerp(%2_wet, %2_wet * %3, %2_dropMask * 0.42);\n"
+                           "    %2_tinted += %2_dropMask * float3(0.018,0.022,0.026);\n"
+                           "    float %2_mix = saturate(%2_amount * %12 * (0.34 + %2_dropMask * 0.66));\n"
+                           "    color = lerp(color, %2_tinted, %2_mix);\n")
+                .arg(definition->name, tag, colorLiteral(rainColor), rainAmount, staticDrops, largeStreaks, smallStreaks,
+                     distortion, blur, trailStrength, speed, strength);
         }
         else if(effect.typeId == "water_distortion" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -1490,6 +1473,8 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
 
 bool projectRequiresSceneDepth(const Project& project)
 {
+    if(project.target == Target::Material)
+        return projectUsesEffect(project, QStringLiteral("material_screen_space_reflections"));
     if(project.target != Target::PostFx) return false;
     for(const Effect& effect : project.effects)
     {
@@ -1529,6 +1514,98 @@ float BO3BeginnerHash21(float2 p)
     p = frac(p * float2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return frac(p.x * p.y);
+}
+)HLSL");
+    }
+
+    if(projectUsesEffect(project, "red_paint_splatter"))
+    {
+        out += QStringLiteral(R"HLSL(
+// BO3_BEGINNER_RAIN_DROPS: stable rain-on-glass droplets adapted from the
+// user-supplied GLSL. Cinematic zoom, blinking/lightning and story/heart
+// animation are intentionally omitted.
+float BO3BeginnerRainSmooth(float a, float b, float x)
+{
+    if(a <= b) return smoothstep(a, b, x);
+    return 1.0 - smoothstep(b, a, x);
+}
+
+float BO3BeginnerRainSaw(float b, float x)
+{
+    return BO3BeginnerRainSmooth(0.0, b, x) * BO3BeginnerRainSmooth(1.0, b, x);
+}
+
+float3 BO3BeginnerRainN13(float p)
+{
+    float3 p3 = frac(float3(p,p,p) * float3(0.1031,0.11369,0.13787));
+    p3 += dot(p3, p3.yzx + 19.19);
+    return frac(float3((p3.x + p3.y) * p3.z,
+                       (p3.x + p3.z) * p3.y,
+                       (p3.y + p3.z) * p3.x));
+}
+
+float BO3BeginnerRainN(float x)
+{
+    return frac(sin(x * 12345.564) * 7658.76);
+}
+
+float2 BO3BeginnerRainDropLayer(float2 uv, float timeValue)
+{
+    float2 baseUv = uv;
+    uv.y += timeValue * 0.75;
+    const float2 axis = float2(6.0, 1.0);
+    const float2 grid = axis * 2.0;
+    float2 id = floor(uv * grid);
+    uv.y += BO3BeginnerRainN(id.x);
+    id = floor(uv * grid);
+    float3 n = BO3BeginnerRainN13(id.x * 35.2 + id.y * 2376.1);
+    float2 st = frac(uv * grid) - float2(0.5, 0.0);
+
+    float x = n.x - 0.5;
+    float yWave = baseUv.y * 20.0;
+    float wiggle = sin(yWave + sin(yWave));
+    x += wiggle * (0.5 - abs(x)) * (n.z - 0.5);
+    x *= 0.7;
+
+    float ti = frac(timeValue + n.z);
+    float y = (BO3BeginnerRainSaw(0.85, ti) - 0.5) * 0.9 + 0.5;
+    float2 p = float2(x, y);
+    float d = length((st - p) * axis.yx);
+    float mainDrop = BO3BeginnerRainSmooth(0.4, 0.0, d);
+
+    float r = sqrt(max(BO3BeginnerRainSmooth(1.0, y, st.y), 0.0));
+    float cd = abs(st.x - x);
+    float trail = BO3BeginnerRainSmooth(0.23 * r, 0.15 * r * r, cd);
+    float trailFront = BO3BeginnerRainSmooth(-0.02, 0.02, st.y - y);
+    trail *= trailFront * r * r;
+
+    float trail2 = BO3BeginnerRainSmooth(0.2 * r, 0.0, cd);
+    float dropY = frac(baseUv.y * 10.0) + (st.y - 0.5);
+    float dd = length(st - float2(x, dropY));
+    float droplets = BO3BeginnerRainSmooth(0.3, 0.0, dd) * trail2 * trailFront * n.z;
+    float mask = mainDrop + droplets * r;
+    return float2(mask, trail);
+}
+
+float BO3BeginnerRainStaticDrops(float2 uv, float timeValue)
+{
+    uv *= 40.0;
+    float2 id = floor(uv);
+    uv = frac(uv) - 0.5;
+    float3 n = BO3BeginnerRainN13(id.x * 107.45 + id.y * 3543.654);
+    float2 p = (n.xy - 0.5) * 0.7;
+    float d = length(uv - p);
+    float fade = BO3BeginnerRainSaw(0.025, frac(timeValue + n.z));
+    return BO3BeginnerRainSmooth(0.3, 0.0, d) * frac(n.z * 10.0) * fade;
+}
+
+float2 BO3BeginnerRainDrops(float2 uv, float timeValue, float staticAmount, float largeAmount, float smallAmount)
+{
+    float s = BO3BeginnerRainStaticDrops(uv, timeValue) * staticAmount;
+    float2 m1 = BO3BeginnerRainDropLayer(uv, timeValue) * largeAmount;
+    float2 m2 = BO3BeginnerRainDropLayer(uv * 1.85, timeValue) * smallAmount;
+    float combined = BO3BeginnerRainSmooth(0.3, 1.0, s + m1.x + m2.x);
+    return float2(combined, max(m1.y, m2.y));
 }
 )HLSL");
     }
@@ -1719,10 +1796,12 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
 )HLSL");
     }
 
-    if(projectUsesEffect(project, "screen_space_reflections") || projectUsesEffect(project, "wet_ground_reflections"))
+    if(projectUsesEffect(project, "screen_space_reflections") ||
+       projectUsesEffect(project, "wet_ground_reflections") ||
+       projectUsesEffect(project, "material_screen_space_reflections"))
     {
         out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX.
+// BO3_BEGINNER_SSR: depth-derived screen-space reflections for BO3 PostFX and custom materials.
 // Uses resolvedScene + Float-Z only; the view-space reconstruction is an
 // intentionally portable approximation so it remains valid in runtime and
 // TOOLSGFX package validation without relying on an unavailable G-buffer.
@@ -2181,8 +2260,32 @@ float4 ps_main(PS_INPUT input) : SV_Target
 QString generateMaterial(const Project& project)
 {
     const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
+    const bool usesSceneReflections = projectUsesEffect(project, "material_screen_space_reflections");
     const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
+    const QString screenIncludes = usesSceneReflections ? QStringLiteral("#include \"lib/floatz.hlsl\"\n") : QString();
+    const QString screenResources = usesSceneReflections
+        ? QStringLiteral(R"HLSL(Texture2D<float4> frameBuffer : register(t0);
+Texture2D<float4> DepthSampler : register(t1);
+SamplerState bilinearClampler : register(s1);
+
+// Material SSR needs the PostFX color-domain and render-target helpers, but
+// does not need the fullscreen-vertex baggage from postfx_common.h.
+float4 PostFx_GetRenderTargetSize()
+{
+    return GetRenderTargetSize();
+}
+
+float3 PostFx_NormalizeColor(float3 value)
+{
+#if TOOLSGFX
+    return value;
+#else
+    return value / 32768.0;
+#endif
+}
+)HLSL")
+        : QString();
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
 // BO3_BEGINNER_TARGET: MATERIAL
@@ -2195,7 +2298,7 @@ QString generateMaterial(const Project& project)
 #include "lib/vertdecl_vertex_tangentspace.hlsl"
 #include "lib/gpu_skin.hlsl"
 #include "lib/gbuffer.hlsl"
-
+%5%6
 struct BeginnerMaterialInput
 {
     float4 position      : SV_POSITION;
@@ -2241,7 +2344,7 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
     // accepts them and the preview tone mapper can show the resulting glow.
     return float4(max(color, 0.0), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects);
+)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects, screenIncludes, screenResources);
 }
 
 QString generateSky(const Project& project)
@@ -2581,6 +2684,16 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("ripple", "Ripple Distortion", "Screen-space distortion applied to reflected color.", 0.0, 10.0, 0.1, 1.2),
                    FloatParam("ripple_scale", "Ripple Scale", "Spatial frequency of the water ripple distortion.", 0.5, 20.0, 0.1, 5.0),
                    FloatParam("perspective", "Perspective Match", "Approximate projection scale used for depth-derived view-space reconstruction.", 0.65, 2.25, 0.01, 1.30)}),
+        EffectDef("material_screen_space_reflections", "Screen-Space Reflections", "Give a custom material a live screen-space reflection finish by sampling BO3 resolvedScene and Float-Z at the material's screen position.", "Reflections & Surface",
+                  {Target::Material},
+                  {ColorParam("tint", "Reflection Tint", "Tint applied to the reflected scene. White keeps the original reflected colors.", "#FFFFFF"),
+                   FloatParam("strength", "Strength", "Overall reflection blend on the material.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("max_distance", "Max Distance", "Maximum view-space distance traced by each reflection ray.", 25.0, 2400.0, 25.0, 700.0),
+                   FloatParam("steps", "Ray Steps", "Maximum Float-Z samples per reflection ray.", 6.0, 32.0, 1.0, 18.0),
+                   FloatParam("thickness", "Hit Thickness", "Depth tolerance used when the reflected ray intersects visible geometry.", 0.1, 24.0, 0.1, 3.5),
+                   FloatParam("roughness", "Roughness", "Blur the reflected scene to imitate rough glossy materials.", 0.0, 1.0, 0.01, 0.18),
+                   FloatParam("fresnel", "Fresnel", "Increase reflections at grazing angles.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("perspective", "Perspective Match", "Approximate projection scale used for Float-Z screen-space reconstruction.", 0.65, 2.25, 0.01, 1.30)}),
         EffectDef("luminance_tint", "Luminance Tint", "Color shadows and highlights differently based on scene brightness.", "Depth & Scene",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color used in darker areas.", "#4F65B4"),
@@ -2664,16 +2777,20 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("smear", "Paint Smear", "How far color is pulled along each brush direction.", 0.0, 2.0, 0.01, 0.85),
                    FloatParam("bend", "Stroke Bend", "Curve the brush shape instead of keeping every stroke straight.", -1.0, 1.0, 0.01, 0.22),
                    FloatParam("detail", "Edge Detail", "Use a wider local gradient to orient strokes around larger forms.", 0.0, 1.0, 0.01, 0.45)}),
-        EffectDef("red_paint_splatter", "Red Paint Splatter", "Overlay sparse irregular paint impacts with satellite droplets and gravity-driven drips instead of repeated oval stamps.", "Stylized Screen",
+        // Keep the legacy id so existing projects that used Red Paint Splatter
+        // transparently upgrade to the new Rain Drops implementation.
+        EffectDef("red_paint_splatter", "Rain Drops", "Layer animated rain droplets, gravity streaks, glass refraction and soft wet blur over the scene. The cinematic zoom/lightning from the reference shader is intentionally omitted.", "Water & Weather",
                   {Target::PostFx},
-                  {ColorParam("color", "Paint Color", "Color of the splatter overlay.", "#9E1424"),
-                   FloatParam("strength", "Strength", "Overall opacity of the paint on the screen.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("scale", "Splash Count", "Number of major paint impacts. Lower values create a cleaner composition.", 1.0, 10.0, 1.0, 4.0),
-                   FloatParam("size", "Splash Size", "Average size of the major impacts.", 0.035, 0.22, 0.005, 0.105),
-                   FloatParam("roughness", "Edge Roughness", "Break up the impact edges with asymmetric lobes and directional spray.", 0.0, 1.0, 0.01, 0.72),
-                   FloatParam("droplets", "Satellite Droplets", "Amount of small droplets thrown away from the main impacts.", 0.0, 1.0, 0.01, 0.70),
-                   FloatParam("drips", "Drip Amount", "How often impacts form gravity-driven runs.", 0.0, 1.0, 0.01, 0.48),
-                   FloatParam("drip_length", "Drip Length", "Maximum length of the vertical paint runs.", 0.0, 1.0, 0.01, 0.52)}),
+                  {ColorParam("color", "Rain Color", "Tint of the water droplets. The default is a clear/colorless rain-water color.", "#FFFFFF"),
+                   FloatParam("strength", "Strength", "Overall blend amount of the wet-glass effect.", 0.0, 1.0, 0.01, 0.82),
+                   FloatParam("rain_amount", "Rain Amount", "Overall density of static droplets and moving streaks.", 0.0, 1.0, 0.01, 0.72),
+                   FloatParam("static_drops", "Static Droplets", "Amount of small droplets that cling to the glass.", 0.0, 1.5, 0.01, 1.0),
+                   FloatParam("large_streaks", "Large Streaks", "Strength of the main falling drop layer.", 0.0, 1.5, 0.01, 1.0),
+                   FloatParam("small_streaks", "Small Streaks", "Strength of the finer secondary drop layer.", 0.0, 1.5, 0.01, 0.72),
+                   FloatParam("distortion", "Distortion", "How strongly droplet normals refract the scene behind the glass.", 0.0, 3.0, 0.01, 0.85),
+                   FloatParam("blur", "Wet Blur", "Soft blur seen through the rain-covered glass.", 0.0, 10.0, 0.1, 2.2),
+                   FloatParam("trail_strength", "Trail Strength", "Visibility of the thin wet trails left behind moving drops.", 0.0, 1.5, 0.01, 0.85),
+                   FloatParam("speed", "Animation Speed", "How quickly the drops move down the glass.", 0.0, 3.0, 0.01, 1.0)}),
         EffectDef("water_distortion", "Water Distortion", "Refract the screen like a watery surface or wet camera lens.", "Water & Weather",
                   {Target::PostFx},
                   {FloatParam("amount", "Distortion", "How far the refraction bends the image.", 0.0, 3.0, 0.01, 0.75),
