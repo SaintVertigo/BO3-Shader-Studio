@@ -1550,19 +1550,18 @@ public:
         struct DepthPreviewScene
         {
             const char* id;
-            const char* resource;
-            float horizon;
-            float vanishX;
-            float sideStrength;
+            const char* colorResource;
+            const char* depthResource;
+            const char* viewmodelResource;
             float farDistance;
         };
 
         static const DepthPreviewScene scenes[] = {
-            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", 0.49f, 0.51f, 0.72f, 4200.0f},
-            {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", 0.50f, 0.50f, 0.58f, 5200.0f},
-            {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", 0.48f, 0.53f, 0.34f, 4800.0f},
-            {"the_giant", ":/preview/bo3_depth_the_giant.jpg", 0.52f, 0.53f, 0.76f, 2400.0f},
-            {"zetsubou", ":/preview/bo3_depth_zetsubou.jpg", 0.53f, 0.50f, 0.84f, 1700.0f}
+            {"shadows_of_evil", ":/preview/bo3_depth_shadows_of_evil.jpg", ":/preview/bo3_depth_shadows_of_evil_depth.png", ":/preview/bo3_depth_shadows_of_evil_viewmodel.png", 4200.0f},
+            {"der_eisendrache", ":/preview/bo3_depth_der_eisendrache.jpg", ":/preview/bo3_depth_der_eisendrache_depth.png", ":/preview/bo3_depth_der_eisendrache_viewmodel.png", 5200.0f},
+            {"gorod_krovi", ":/preview/bo3_depth_gorod_krovi.jpg", ":/preview/bo3_depth_gorod_krovi_depth.png", ":/preview/bo3_depth_gorod_krovi_viewmodel.png", 4800.0f},
+            {"the_giant", ":/preview/bo3_depth_the_giant.jpg", ":/preview/bo3_depth_the_giant_depth.png", ":/preview/bo3_depth_the_giant_viewmodel.png", 2400.0f},
+            {"zetsubou", ":/preview/bo3_depth_zetsubou.jpg", ":/preview/bo3_depth_zetsubou_depth.png", ":/preview/bo3_depth_zetsubou_viewmodel.png", 1700.0f}
         };
 
         const QString sceneId = requestedSceneId.trimmed().toLower();
@@ -1576,33 +1575,41 @@ public:
             }
         }
 
-        // These are real Black Ops III screenshots supplied by the user. The
-        // paired depth is intentionally a smooth perspective approximation of
-        // WORLD geometry only. Do not synthesize first-person weapon/arm depth:
-        // invented viewmodel silhouettes become enormous false outlines/AO arcs
-        // because there is no real per-pixel depth for the screenshot. Visible
-        // weapon detail can still contribute image-detail ink, while BO3 export
-        // uses the game's real Float-Z and rejects its depth-hack viewmodel range.
-        QImage sourceImage(QString::fromLatin1(scene->resource));
-        if(sourceImage.isNull())
+        // Built-in Game Depth Preview scenes use paired, image-aligned authored
+        // assets. The 16-bit PNG stores a logarithmic world-distance proxy and
+        // the 8-bit mask identifies the first-person weapon/arms. Packing that
+        // mask into BO3's Float-Z depth-hack range makes World Only / Viewmodel
+        // Only exercise the same classification path as the exported HLSL.
+        QImage sourceImage(QString::fromLatin1(scene->colorResource));
+        QImage depthImage(QString::fromLatin1(scene->depthResource));
+        QImage viewmodelImage(QString::fromLatin1(scene->viewmodelResource));
+        if(sourceImage.isNull() || depthImage.isNull() || viewmodelImage.isNull())
         {
-            error = L"Could not load the selected BO3 Game Depth Preview screenshot resource.";
+            error = L"Could not load the selected BO3 Game Depth Preview color/depth/viewmodel resources.";
             return false;
         }
 
         sourceImage = sourceImage.convertToFormat(QImage::Format_RGBA8888);
+        depthImage = depthImage.convertToFormat(QImage::Format_Grayscale16);
+        viewmodelImage = viewmodelImage.convertToFormat(QImage::Format_Grayscale8);
+
         constexpr UINT w = 1280;
         constexpr UINT h = 720;
         if(sourceImage.width() != static_cast<int>(w) || sourceImage.height() != static_cast<int>(h))
             sourceImage = sourceImage.scaled(static_cast<int>(w), static_cast<int>(h), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        if(depthImage.width() != static_cast<int>(w) || depthImage.height() != static_cast<int>(h))
+            depthImage = depthImage.scaled(static_cast<int>(w), static_cast<int>(h), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        if(viewmodelImage.width() != static_cast<int>(w) || viewmodelImage.height() != static_cast<int>(h))
+            viewmodelImage = viewmodelImage.scaled(static_cast<int>(w), static_cast<int>(h), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 
         constexpr float zNear = 0.1f;
         constexpr float depthHackSplit = 63.0f / 64.0f;
+        const float logNear = std::log2(2.0f);
+        const float logFar = std::log2(std::max(scene->farDistance, 2.001f));
+
         std::vector<uint8_t> color(static_cast<size_t>(w) * h * 4u, 255u);
         std::memcpy(color.data(), sourceImage.constBits(), color.size());
-
         std::vector<float> rawDepth(static_cast<size_t>(w) * h * 4u, 0.0f);
-        std::vector<float> worldDepth(static_cast<size_t>(w) * h, scene->farDistance);
 
         auto encodeWorldRawDepth = [&](float distance)
         {
@@ -1610,54 +1617,29 @@ public:
             const float processed = std::clamp(zNear / safeDistance, 0.0000001f, 0.999f);
             return std::min(processed * depthHackSplit, depthHackSplit - 0.000001f);
         };
-        auto smooth01 = [](float value)
-        {
-            value = std::clamp(value, 0.0f, 1.0f);
-            return value * value * (3.0f - 2.0f * value);
-        };
 
         for(UINT y = 0; y < h; ++y)
         {
-            const float fy = static_cast<float>(y) / static_cast<float>(h - 1);
+            const auto* depthRow = reinterpret_cast<const quint16*>(depthImage.constScanLine(static_cast<int>(y)));
+            const uchar* viewmodelRow = viewmodelImage.constScanLine(static_cast<int>(y));
             for(UINT x = 0; x < w; ++x)
             {
-                const float fx = static_cast<float>(x) / static_cast<float>(w - 1);
-                const size_t pidx = static_cast<size_t>(y) * w + x;
+                const float normalizedDistance = static_cast<float>(depthRow[x]) / 65535.0f;
+                const float distance = std::exp2(logNear + (logFar - logNear) * normalizedDistance);
+                float raw = encodeWorldRawDepth(distance);
 
-                // Ground distance follows a continuous perspective curve from the
-                // bottom of the frame toward the selected scene's vanishing line.
-                const float groundProgress = std::clamp((fy - scene->horizon) / std::max(1.0f - scene->horizon, 0.001f), 0.0f, 1.0f);
-                const float groundDepth = 4.0f + 1500.0f * std::pow(1.0f - groundProgress, 2.35f);
+                // Values above 63/64 are BO3's special depth-hack/viewmodel
+                // category. Use a stable interior value instead of 1.0 so debug
+                // views and point samples stay unambiguous at mask boundaries.
+                if(viewmodelRow[x] >= 128)
+                    raw = depthHackSplit + 0.008f;
 
-                // Upper frame is treated as distant architecture/sky. Keep the
-                // transition around the horizon smooth so depth effects do not
-                // invent a horizontal seam.
-                const float above = std::clamp((scene->horizon - fy) / std::max(scene->horizon, 0.001f), 0.0f, 1.0f);
-                const float verticalDepth = 520.0f + scene->farDistance * (0.42f + 0.58f * above);
-                const float groundBlend = smooth01(std::clamp((fy - scene->horizon + 0.035f) / 0.09f, 0.0f, 1.0f));
-                float distance = verticalDepth * (1.0f - groundBlend) + groundDepth * groundBlend;
-
-                // Smoothly pull side geometry toward the camera. Unlike the old
-                // preview, this is continuous and never creates rectangular masks.
-                const float edgeDistance = std::min(fx, 1.0f - fx);
-                const float sideMask = scene->sideStrength * (1.0f - smooth01(std::clamp(edgeDistance / 0.34f, 0.0f, 1.0f)));
-                const float sidePerspective = std::clamp(std::abs(fx - scene->vanishX) / 0.55f, 0.0f, 1.0f);
-                const float sideDepth = 7.0f + 520.0f * std::pow(1.0f - sidePerspective, 1.8f) + 110.0f * std::abs(fy - scene->horizon);
-                distance = distance * (1.0f - sideMask) + std::min(distance, sideDepth) * sideMask;
-
-
-                worldDepth[pidx] = std::max(distance, 0.11f);
+                const size_t i = (static_cast<size_t>(y) * w + x) * 4u;
+                rawDepth[i + 0] = raw;
+                rawDepth[i + 1] = raw;
+                rawDepth[i + 2] = raw;
+                rawDepth[i + 3] = 1.0f;
             }
-        }
-
-        for(size_t pidx = 0; pidx < worldDepth.size(); ++pidx)
-        {
-            const float raw = encodeWorldRawDepth(worldDepth[pidx]);
-            const size_t i = pidx * 4u;
-            rawDepth[i + 0] = raw;
-            rawDepth[i + 1] = raw;
-            rawDepth[i + 2] = raw;
-            rawDepth[i + 3] = 1.0f;
         }
 
         ComPtr<ID3D11ShaderResourceView> colorSrv;

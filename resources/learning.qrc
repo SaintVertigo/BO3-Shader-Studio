@@ -15,10 +15,6 @@
         <file alias="12_learning_projects.md">../docs/learning/12_learning_projects.md</file>
         <file alias="13_community_resources.md">../docs/learning/13_community_resources.md</file>
     </qresource>
-    <qresource prefix="/beginner">
-        <file alias="rgba_noise_medium.png">beginner/rgba_noise_medium.png</file>
-        <file alias="blue_noise.png">beginner/blue_noise.png</file>
-    </qresource>
     <qresource prefix="/preview">
         <file alias="beginner_depth_game_scene.jpg">preview/beginner_depth_game_scene.jpg</file>
         <file alias="bo3_depth_shadows_of_evil.jpg">preview/bo3_depth_shadows_of_evil.jpg</file>
@@ -26,5 +22,15 @@
         <file alias="bo3_depth_gorod_krovi.jpg">preview/bo3_depth_gorod_krovi.jpg</file>
         <file alias="bo3_depth_the_giant.jpg">preview/bo3_depth_the_giant.jpg</file>
         <file alias="bo3_depth_zetsubou.jpg">preview/bo3_depth_zetsubou.jpg</file>
+        <file alias="bo3_depth_shadows_of_evil_depth.png">preview/bo3_depth_shadows_of_evil_depth.png</file>
+        <file alias="bo3_depth_shadows_of_evil_viewmodel.png">preview/bo3_depth_shadows_of_evil_viewmodel.png</file>
+        <file alias="bo3_depth_der_eisendrache_depth.png">preview/bo3_depth_der_eisendrache_depth.png</file>
+        <file alias="bo3_depth_der_eisendrache_viewmodel.png">preview/bo3_depth_der_eisendrache_viewmodel.png</file>
+        <file alias="bo3_depth_gorod_krovi_depth.png">preview/bo3_depth_gorod_krovi_depth.png</file>
+        <file alias="bo3_depth_gorod_krovi_viewmodel.png">preview/bo3_depth_gorod_krovi_viewmodel.png</file>
+        <file alias="bo3_depth_the_giant_depth.png">preview/bo3_depth_the_giant_depth.png</file>
+        <file alias="bo3_depth_the_giant_viewmodel.png">preview/bo3_depth_the_giant_viewmodel.png</file>
+        <file alias="bo3_depth_zetsubou_depth.png">preview/bo3_depth_zetsubou_depth.png</file>
+        <file alias="bo3_depth_zetsubou_viewmodel.png">preview/bo3_depth_zetsubou_viewmodel.png</file>
     </qresource>
 </RCC>

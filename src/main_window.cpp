@@ -798,6 +798,22 @@ public:
         sceneChangedCallback_ = std::move(callback);
     }
 
+    void setSkyEditorSunInteractionEnabled(bool enabled)
+    {
+        skyEditorSunInteractionEnabled_ = enabled;
+        if(!enabled && sunDragging_)
+        {
+            sunDragging_ = false;
+            releaseMouse();
+            unsetCursor();
+        }
+    }
+
+    void setSunPositionCallback(std::function<void(const QPointF&, bool)> callback)
+    {
+        sunPositionCallback_ = std::move(callback);
+    }
+
 protected:
     void showEvent(QShowEvent* event) override
     {
@@ -819,6 +835,16 @@ protected:
 
     void mousePressEvent(QMouseEvent* event) override
     {
+        if(skyEditorSunInteractionEnabled_ && event->button() == Qt::LeftButton && event->modifiers() == Qt::NoModifier)
+        {
+            sunDragging_ = true;
+            setCursor(Qt::CrossCursor);
+            setFocus(Qt::MouseFocusReason);
+            grabMouse();
+            if(sunPositionCallback_) sunPositionCallback_(event->position(), false);
+            event->accept();
+            return;
+        }
         if (cameraInteractionEnabled_ && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton || event->button() == Qt::RightButton))
         {
             const bool shiftLeft = (event->button() == Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
@@ -837,6 +863,12 @@ protected:
 
     void mouseMoveEvent(QMouseEvent* event) override
     {
+        if(skyEditorSunInteractionEnabled_ && sunDragging_)
+        {
+            if(sunPositionCallback_) sunPositionCallback_(event->position(), false);
+            event->accept();
+            return;
+        }
         if (cameraInteractionEnabled_ && cameraDragging_)
         {
             const QPointF delta = event->position() - lastCameraMouse_;
@@ -865,6 +897,15 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override
     {
+        if(sunDragging_ && event->button() == Qt::LeftButton)
+        {
+            sunDragging_ = false;
+            if(sunPositionCallback_) sunPositionCallback_(event->position(), true);
+            releaseMouse();
+            unsetCursor();
+            event->accept();
+            return;
+        }
         if (cameraDragging_ && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton || event->button() == Qt::RightButton))
         {
             cameraDragging_ = false;
@@ -934,9 +975,12 @@ private:
     bool cameraDragging_ = false;
     bool cameraPanning_ = false;
     bool lightDragging_ = false;
+    bool skyEditorSunInteractionEnabled_ = false;
+    bool sunDragging_ = false;
     QPointF lastCameraMouse_{};
     std::function<void()> cameraChangedCallback_;
     std::function<void()> sceneChangedCallback_;
+    std::function<void(const QPointF&, bool)> sunPositionCallback_;
 };
 
 // Prevent accidental option changes while the user is simply scrolling a
@@ -1025,16 +1069,6 @@ public:
         liveCompileTimer_.setInterval(550);
         connect(&liveCompileTimer_, &QTimer::timeout, this, [this]
         {
-            if(beginnerUiMode_ && beginnerProjectActive_ && beginnerParameterPreviewDirty_)
-            {
-                // Generate only from the newest slider state. Do NOT rebuild the
-                // hidden Advanced QTextDocument on every tick; compileEditor()
-                // reads beginnerGeneratedHlsl_ directly while Beginner mode is
-                // active. This removes a surprisingly large UI-thread cost.
-                beginnerGeneratedHlsl_ = beginner::generateHlsl(beginnerProject_);
-                beginnerPendingHlsl_.clear();
-                beginnerParameterPreviewDirty_ = false;
-            }
             compileEditor();
         });
 
@@ -1495,10 +1529,51 @@ public:
                !postHlsl.contains("BO3BeginnerPsxDither") ||
                !postHlsl.contains("BO3BeginnerSampleRawDepthPoint") ||
                !postHlsl.contains("BO3BeginnerSampleWorldDepth") ||
+               !postHlsl.contains("BO3BeginnerViewmodelMask") ||
+               !postHlsl.contains("BO3BeginnerTargetMask") ||
                !postHlsl.contains("BO3BeginnerSSAOPair") ||
-               !postHlsl.contains("viewmodel/depth-hack rejection") ||
+               !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
-                return "Beginner PostFX quality/depth modules are missing from generated BO3 coverage HLSL.";
+                return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
+            const QString postDepthDebugHlsl = beginner::generatePreviewHlsl(post, 7);
+            if(!postDepthDebugHlsl.contains("#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG 7") ||
+               !postDepthDebugHlsl.contains("BO3BeginnerTargetMask"))
+                return "Beginner PostFX depth diagnostic preview generation is missing the Effect Mask path.";
+
+            // Non-depth effects left on Everything must not acquire an unnecessary
+            // Float-Z dependency. World/Viewmodel targeting is structural and adds
+            // the depth contract only when it is actually selected; diagnostic depth
+            // views can still force the preview-only depth helpers on demand.
+            beginner::Project tintOnly = beginner::makeDefaultProject(beginner::Target::PostFx);
+            tintOnly.effects.clear();
+            beginner::Effect scopedTint = beginner::makeDefaultEffect("tint");
+            tintOnly.effects.push_back(scopedTint);
+            const QString tintEverythingHlsl = beginner::generateHlsl(tintOnly);
+            if(tintEverythingHlsl.contains("DepthSampler") ||
+               tintEverythingHlsl.contains("BO3BeginnerSampleRawDepthPoint"))
+                return "Beginner PostFX Everything targeting still forces an unnecessary Float-Z dependency.";
+            tintOnly.effects[0].parameters[QStringLiteral("target_scope")] = 1;
+            const QString tintWorldOnlyHlsl = beginner::generateHlsl(tintOnly);
+            if(!tintWorldOnlyHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               !tintWorldOnlyHlsl.contains("BO3BeginnerTargetMask") ||
+               !tintWorldOnlyHlsl.contains("scopeMask"))
+                return "Beginner PostFX World/Viewmodel targeting did not enable the Float-Z target-mask path.";
+            tintOnly.effects[0].parameters[QStringLiteral("target_scope")] = 0;
+            const QString tintDepthDebugHlsl = beginner::generatePreviewHlsl(tintOnly, 2, tintOnly.effects[0].instanceId);
+            if(!tintDepthDebugHlsl.contains("Texture2D<float4> DepthSampler : register(t1);") ||
+               !tintDepthDebugHlsl.contains("BO3BeginnerSampleRawDepthPoint"))
+                return "Beginner depth diagnostics did not force the preview-only Float-Z helpers.";
+
+            const QStringList depthSceneIds = {
+                "shadows_of_evil", "der_eisendrache", "gorod_krovi", "the_giant", "zetsubou"};
+            for(const QString& sceneId : depthSceneIds)
+            {
+                const QImage depth(QString(":/preview/bo3_depth_%1_depth.png").arg(sceneId));
+                const QImage viewmodel(QString(":/preview/bo3_depth_%1_viewmodel.png").arg(sceneId));
+                if(depth.isNull() || depth.size() != QSize(1280,720) ||
+                   viewmodel.isNull() || viewmodel.size() != QSize(1280,720))
+                    return "Beginner Game Depth Preview paired depth/viewmodel resources are missing for " + sceneId + ".";
+            }
 
             const beginner::Project material = projects[1].first;
             const QString materialHlsl = beginner::generateHlsl(material);
@@ -1542,53 +1617,74 @@ public:
                !skyHlsl.contains("BO3BeginnerFbm3") ||
                !skyHlsl.contains("BO3BeginnerNebulaField") ||
                !skyHlsl.contains("beginnerTimeOfDay") ||
+               !skyHlsl.contains("beginnerAutoSunDir") ||
+               !skyHlsl.contains("beginnerManualSunDir") ||
                !skyHlsl.contains("beginnerSunDir") ||
-               !skyHlsl.contains("BO3_BEGINNER_CLOUD_TEXTURES") ||
-               !skyHlsl.contains("Texture2D<float4> iChannel0 : register(t2);") ||
-               !skyHlsl.contains("Texture2D<float4> iChannel1 : register(t3);") ||
-               !skyHlsl.contains("SamplerState glslSampler0 : register(s2);") ||
-               !skyHlsl.contains("SamplerState glslSampler1 : register(s3);") ||
+               !skyHlsl.contains("BO3_BEGINNER_VOLUMETRIC_CLOUDS") ||
+               !skyHlsl.contains("BO3BeginnerCloudValueNoise") ||
+               !skyHlsl.contains("BO3BeginnerCloudFBM") ||
                !skyHlsl.contains("BO3BeginnerCloudDensity") ||
-               !skyHlsl.contains("texture-backed 3D volumetric raymarch using RGBA noise + blue-noise jitter") ||
-               !skyHlsl.contains("iChannel1.SampleLevel") ||
+               !skyHlsl.contains("procedural 3D volumetric raymarch with density-aware stepping") ||
+               !skyHlsl.contains("adaptive") ||
                !skyHlsl.contains("windAngle") ||
                !skyHlsl.contains("beginnerWaterMask") ||
                !skyHlsl.contains("beginnerReflectedDirection") ||
                !skyHlsl.contains("cloudColor"))
-                return "Beginner Sky atmosphere/cloud/water modules are missing from generated BO3 coverage HLSL.";
+                return "Beginner Sky atmosphere/procedural-volume/sun/water modules are missing from generated BO3 coverage HLSL.";
+            if(skyHlsl.contains("BO3_BEGINNER_CLOUD_TEXTURES") ||
+               skyHlsl.contains("Texture2D<float4> iChannel0 : register(t2);") ||
+               skyHlsl.contains("Texture2D<float4> iChannel1 : register(t3);"))
+                return "Beginner Volumetric Clouds unexpectedly depend on Shadertoy texture channels.";
 
-            const QImage rgbaNoise(QStringLiteral(":/beginner/rgba_noise_medium.png"));
-            const QImage blueNoise(QStringLiteral(":/beginner/blue_noise.png"));
-            if(rgbaNoise.isNull() || rgbaNoise.size() != QSize(256,256) ||
-               blueNoise.isNull() || blueNoise.size() != QSize(1024,1024))
-                return "Beginner Volumetric Cloud texture resources are missing or have unexpected dimensions.";
+            // Numeric Beginner controls are emitted as reflected loose globals so
+            // the preview can update them without FXC and BO3 export can expose
+            // the same values as runtime techset float parameters.
+            if(!skyHlsl.contains("bb_sky_sun_") || !skyHlsl.contains("_time_of_day") ||
+               !skyHlsl.contains("bb_sky_realistic_clouds_") || !skyHlsl.contains("_coverage"))
+                return "Beginner Sky live runtime parameter globals are missing from generated HLSL.";
 
-            const QString cloudTechset = makeSkyTechset(
-                "geometry/beginner_cloud_regression.hlsl", {}, skyHlsl);
-            if(!cloudTechset.contains("Sampler( \"glslSampler0\" )") ||
-               !cloudTechset.contains("Sampler( \"glslSampler1\" )") ||
-               !cloudTechset.contains("Texture( \"iChannel0\" )") ||
-               !cloudTechset.contains("Texture( \"iChannel1\" )") ||
-               !cloudTechset.contains("Image( <colorMap00, $white_diffuse> )") ||
-               !cloudTechset.contains("Image( <colorMap01, $white_diffuse> )"))
-                return "Beginner Volumetric Cloud runtime techset is missing texture/sampler bindings.";
+            // Runtime sky techsets must declare every loose bb_* global and the
+            // material GDT must initialize the same packed backing field. This
+            // is what makes live Beginner values survive the BO3 package path,
+            // not just the DirectX preview.
+            QVector<ExportParamBinding> skyBindingFixture;
+            ExportParamBinding skyFloatBinding;
+            skyFloatBinding.name = "bb_sky_sun_fixture_time_of_day";
+            skyFloatBinding.value = 18.5f;
+            skyFloatBinding.storage = "cg00_y";
+            skyBindingFixture << skyFloatBinding;
+            ExportParamBinding skyBoolBinding;
+            skyBoolBinding.name = "bb_sky_fixture_enabled";
+            skyBoolBinding.isBool = true;
+            skyBoolBinding.value = 1.0f;
+            skyBoolBinding.storage = "gCheckBox00";
+            skyBindingFixture << skyBoolBinding;
 
-            const QMap<QString,QString> cloudMaterialImages{
-                {"colorMap00", "i_beginner_rgba_noise"},
-                {"colorMap01", "i_beginner_blue_noise"}
-            };
-            const QString cloudMaterial = createSkyMaterialGdtAsset(
-                "mtl_beginner_cloud_test", "beginner_cloud_type", "i_beginner_reflection", cloudMaterialImages);
-            if(!cloudMaterial.contains("\"colorMap00\" \"i_beginner_rgba_noise\"") ||
-               !cloudMaterial.contains("\"colorMap01\" \"i_beginner_blue_noise\""))
-                return "Beginner Volumetric Cloud sky material is missing colorMap00/colorMap01 image assignments.";
-
-            const QString cloudImage = createSkyCloudNoiseImageGdtAsset(
-                "i_beginner_cloud_noise_test", "source_data/_custom/images/cloud_noise.png");
-            if(!cloudImage.contains("\"coreSemantic\" \"Linear4ch\"") ||
-               !cloudImage.contains("\"noMipMaps\" \"1\"") ||
-               !cloudImage.contains("\"noPicMip\" \"1\""))
-                return "Beginner Volumetric Cloud BO3 image asset is not using the linear/no-mipmap noise contract.";
+            const QString skyRuntimeTechset = makeSkyTechset(
+                "geometry/beginner_sky_binding_fixture.hlsl", skyBindingFixture, skyHlsl);
+            if(skyRuntimeTechset.isEmpty())
+                return "Beginner Sky runtime techset could not be generated with reflected parameters.";
+            bo3::TechsetParseOptions skyRuntimeOptions;
+            skyRuntimeOptions.configuration = bo3::PackageConfiguration::Runtime;
+            const bo3::TechsetParseResult skyRuntimeParsed = bo3::parseTechset(
+                skyRuntimeTechset, "beginner_sky_binding_fixture.techsetdef", skyRuntimeOptions);
+            if(skyRuntimeParsed.validation.hasErrors()) return skyRuntimeParsed.validation.toText();
+            const bo3::ParameterModel* skyFloatParameter =
+                skyRuntimeParsed.model.findParameter(skyFloatBinding.name);
+            const bo3::ParameterModel* skyBoolParameter =
+                skyRuntimeParsed.model.findParameter(skyBoolBinding.name);
+            if(!skyFloatParameter || skyFloatParameter->kind != bo3::ParameterKind::Float1 ||
+               skyFloatParameter->properties.value("x") != "<cg00_y>")
+                return "Beginner Sky runtime techset did not bind its float parameter to cg00_y.";
+            if(!skyBoolParameter || skyBoolParameter->kind != bo3::ParameterKind::Bool ||
+               skyBoolParameter->properties.value("value") != "<gCheckBox00>")
+                return "Beginner Sky runtime techset did not bind its bool parameter to gCheckBox00.";
+            const QString skyMaterialFixture = createSkyMaterialGdtAsset(
+                "mtl_beginner_sky_binding_fixture", "mtltype_beginner_sky_binding_fixture",
+                "i_beginner_sky_binding_fixture", skyBindingFixture);
+            if(!skyMaterialFixture.contains("\"cg00_y\" \"18.5\"") ||
+               !skyMaterialFixture.contains("\"gCheckBox00\" \"1\""))
+                return "Beginner Sky material GDT did not preserve reflected runtime parameter defaults.";
 
             if(skyHlsl.contains("return float4(saturate(color)") ||
                !skyHlsl.contains("65024.0"))
@@ -3417,6 +3513,43 @@ private:
     void updateCameraUi()
     {
         if (!preview_ || !camera3D_ || !cameraInfo_) return;
+
+        const bool beginnerSkyEditor = beginnerUiMode_ && beginnerProjectActive_ &&
+            beginnerProject_.target == beginner::Target::Sky;
+        bool beginnerSkyHasSun = false;
+        if(beginnerSkyEditor)
+        {
+            for(const beginner::Effect& effect : beginnerProject_.effects)
+            {
+                if(effect.enabled && effect.typeId == QStringLiteral("sky_sun"))
+                {
+                    beginnerSkyHasSun = true;
+                    break;
+                }
+            }
+        }
+
+        // Beginner Sky deliberately uses a fixed full-frame 2D editor. The sky
+        // direction is generated by the shader, so orbiting the preview camera
+        // only obscures the authoring model. Plain left-drag instead moves the
+        // shader's sun directly and updates its runtime constants every frame.
+        preview_->setSkyEditorSunInteractionEnabled(beginnerSkyEditor && beginnerSkyHasSun);
+        if(beginnerSkyEditor)
+        {
+            {
+                QSignalBlocker blocker(camera3D_);
+                camera3D_->setChecked(false);
+            }
+            camera3D_->setText("Sky Editor");
+            camera3D_->setEnabled(false);
+            preview_->setCameraInteractionEnabled(false);
+            cameraInfo_->setText(beginnerSkyHasSun
+                ? "Full sky editor  |  Left-drag to position sun  |  sliders update live"
+                : "Full sky editor  |  Add Sun & Time to drag the sun directly");
+            return;
+        }
+
+        camera3D_->setEnabled(true);
         const bool enabled = camera3D_->isChecked();
         camera3D_->setText(enabled ? "Perspective" : "2D Preview");
         const bool geometryMode = (preview_->renderer().GetPreviewMode() == PreviewMode::ForwardMaterial ||
@@ -3612,6 +3745,29 @@ finally {
         s.replace(QRegularExpression("([a-z0-9])([A-Z])"), "\\1 \\2");
         if (!s.isEmpty()) s[0] = s[0].toUpper();
         return s;
+    }
+
+    bool beginnerRuntimeTweakMetadata(const QString& runtimeName, QString& title,
+                                      double& minimum, double& maximum, double& step) const
+    {
+        if(!beginnerProjectActive_) return false;
+        for(const beginner::Effect& effect : beginnerProject_.effects)
+        {
+            const beginner::EffectDefinition* definition = beginner::effectDefinition(effect.typeId);
+            if(!definition || !beginner::supportsTarget(*definition, beginnerProject_.target)) continue;
+            for(const beginner::ParameterDefinition& parameter : definition->parameters)
+            {
+                if(parameter.kind == beginner::ParameterKind::Color) continue;
+                if(parameter.key == QStringLiteral("target_scope") && beginnerProject_.target != beginner::Target::PostFx) continue;
+                if(beginner::runtimeParameterNameFor(beginnerProject_, effect.instanceId, parameter.key) != runtimeName) continue;
+                title = QString("%1 — %2").arg(definition->name, parameter.name);
+                minimum = parameter.minimum;
+                maximum = parameter.maximum;
+                step = parameter.kind == beginner::ParameterKind::Choice ? 1.0 : parameter.step;
+                return true;
+            }
+        }
+        return false;
     }
 
     struct SourceTweakValue
@@ -3967,6 +4123,29 @@ finally {
                 "engine/techset runtime path supplies it.");
         }
         return QString();
+    }
+
+    QVector<ExportParamBinding> buildBeginnerExportParamBindings(const QString& source) const
+    {
+        QVector<ExportParamBinding> out;
+        int floatIndex = 0;
+        for(const beginner::RuntimeParameter& runtime : beginner::runtimeFloatParameters(beginnerProject_))
+        {
+            const QRegularExpression identifier(
+                QString("\\b%1\\b").arg(QRegularExpression::escape(runtime.name)));
+            if(!source.contains(identifier)) continue;
+
+            ExportParamBinding binding;
+            binding.name = runtime.name;
+            binding.value = static_cast<float>(runtime.value);
+            static const char* comps[] = {"x", "y", "z", "w"};
+            const int group = floatIndex / 4;
+            const int comp = floatIndex % 4;
+            binding.storage = QString("cg%1_%2").arg(group, 2, 10, QChar('0')).arg(comps[comp]);
+            ++floatIndex;
+            out.push_back(binding);
+        }
+        return out;
     }
 
     QVector<ExportParamBinding> buildExportParamBindings(const QString& source) const
@@ -4553,17 +4732,6 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
         if(mode != PreviewMode::HLSL)
             overrides = temporaryPreviewMappings_.value(adapterTargetKey(mode));
 
-        // Beginner Volumetric Clouds own two packaged 2D noise images. They are
-        // not scene/cubemap inputs, so the generated Sky package can safely map
-        // them without opening the guided-resource dialog every time a slider moves.
-        if(mode == PreviewMode::Sky &&
-           source.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
-        {
-            if(!overrides.contains("iChannel0")) overrides["iChannel0"] = "materialImage";
-            if(!overrides.contains("iChannel1")) overrides["iChannel1"] = "materialImage";
-            return overrides;
-        }
-
         if(mode != PreviewMode::PostFX || !preview_) return overrides;
 
         const bool convertedShadertoy = looksLikeConvertedShadertoyHlsl(source);
@@ -5149,17 +5317,30 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             }
             parameter.hasTweak = true;
             parameter.tweak.category = "Shader Parameters";
-            parameter.tweak.title = humanizeShaderName(binding.name);
+            QString beginnerTitle;
+            double beginnerMinimum = 0.0, beginnerMaximum = 0.0, beginnerStep = 0.0;
+            const bool beginnerMetadata = beginnerRuntimeTweakMetadata(
+                binding.name, beginnerTitle, beginnerMinimum, beginnerMaximum, beginnerStep);
+            parameter.tweak.title = beginnerMetadata ? beginnerTitle : humanizeShaderName(binding.name);
             parameter.tweak.order = QString::number(sort);
             if(!binding.isBool)
             {
                 float minimum = -10.0f, maximum = 10.0f, step = 0.01f;
-                const QString lower = binding.name.toLower();
-                if(lower.contains("downsample")) { minimum = 1; maximum = 8; step = 1; }
-                else if(lower.contains("sample") || lower.contains("layer") || lower.contains("step")) { minimum = 1; maximum = 128; step = 1; }
-                else if(lower.contains("threshold") || lower.contains("opacity") || lower.contains("fraction") || lower.contains("weight") || lower.contains("mix")) { minimum = 0; maximum = 1; }
-                else if(lower.contains("radius") || lower.contains("density")) { minimum = 0; maximum = 5; }
-                else if(lower.contains("intensity") || lower.contains("strength") || lower.contains("amount") || lower.contains("scale")) { minimum = 0; maximum = 4; }
+                if(beginnerMetadata)
+                {
+                    minimum = static_cast<float>(beginnerMinimum);
+                    maximum = static_cast<float>(beginnerMaximum);
+                    step = static_cast<float>(beginnerStep);
+                }
+                else
+                {
+                    const QString lower = binding.name.toLower();
+                    if(lower.contains("downsample")) { minimum = 1; maximum = 8; step = 1; }
+                    else if(lower.contains("sample") || lower.contains("layer") || lower.contains("step")) { minimum = 1; maximum = 128; step = 1; }
+                    else if(lower.contains("threshold") || lower.contains("opacity") || lower.contains("fraction") || lower.contains("weight") || lower.contains("mix")) { minimum = 0; maximum = 1; }
+                    else if(lower.contains("radius") || lower.contains("density")) { minimum = 0; maximum = 5; }
+                    else if(lower.contains("intensity") || lower.contains("strength") || lower.contains("amount") || lower.contains("scale")) { minimum = 0; maximum = 4; }
+                }
                 parameter.tweak.properties["default"] = QString("\"%1\"").arg(binding.value, 0, 'g', 6);
                 parameter.tweak.properties["range"] = QString("\"%1\", \"%2\", \"%3\"")
                     .arg(minimum, 0, 'g', 6).arg(maximum, 0, 'g', 6).arg(step, 0, 'g', 6);
@@ -5516,17 +5697,30 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
             }
             parameter.hasTweak = true;
             parameter.tweak.category = "Shader Parameters";
-            parameter.tweak.title = humanizeShaderName(binding.name);
+            QString beginnerTitle;
+            double beginnerMinimum = 0.0, beginnerMaximum = 0.0, beginnerStep = 0.0;
+            const bool beginnerMetadata = beginnerRuntimeTweakMetadata(
+                binding.name, beginnerTitle, beginnerMinimum, beginnerMaximum, beginnerStep);
+            parameter.tweak.title = beginnerMetadata ? beginnerTitle : humanizeShaderName(binding.name);
             parameter.tweak.order = QString::number(sort);
             if(!binding.isBool)
             {
                 float minimum = -10.0f, maximum = 10.0f, step = 0.01f;
-                const QString lower = binding.name.toLower();
-                if(lower.contains("downsample")) { minimum = 1; maximum = 8; step = 1; }
-                else if(lower.contains("sample") || lower.contains("layer") || lower.contains("step")) { minimum = 1; maximum = 128; step = 1; }
-                else if(lower.contains("threshold") || lower.contains("opacity") || lower.contains("fraction") || lower.contains("weight") || lower.contains("mix")) { minimum = 0; maximum = 1; }
-                else if(lower.contains("radius") || lower.contains("density")) { minimum = 0; maximum = 5; }
-                else if(lower.contains("intensity") || lower.contains("strength") || lower.contains("amount") || lower.contains("scale")) { minimum = 0; maximum = 4; }
+                if(beginnerMetadata)
+                {
+                    minimum = static_cast<float>(beginnerMinimum);
+                    maximum = static_cast<float>(beginnerMaximum);
+                    step = static_cast<float>(beginnerStep);
+                }
+                else
+                {
+                    const QString lower = binding.name.toLower();
+                    if(lower.contains("downsample")) { minimum = 1; maximum = 8; step = 1; }
+                    else if(lower.contains("sample") || lower.contains("layer") || lower.contains("step")) { minimum = 1; maximum = 128; step = 1; }
+                    else if(lower.contains("threshold") || lower.contains("opacity") || lower.contains("fraction") || lower.contains("weight") || lower.contains("mix")) { minimum = 0; maximum = 1; }
+                    else if(lower.contains("radius") || lower.contains("density")) { minimum = 0; maximum = 5; }
+                    else if(lower.contains("intensity") || lower.contains("strength") || lower.contains("amount") || lower.contains("scale")) { minimum = 0; maximum = 4; }
+                }
                 parameter.tweak.properties["default"] = QString("\"%1\"").arg(binding.value, 0, 'g', 6);
                 parameter.tweak.properties["range"] = QString("\"%1\", \"%2\", \"%3\"")
                     .arg(minimum, 0, 'g', 6).arg(maximum, 0, 'g', 6).arg(step, 0, 'g', 6);
@@ -6454,34 +6648,20 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         return b;
     }
 
-    QString createSkyCloudNoiseImageGdtAsset(const QString& assetName, const QString& baseImage) const
-    {
-        QString b = createImageGdtAsset(assetName, baseImage, "2d");
-        if(b.isEmpty()) return {};
-        // Cloud density/noise data must stay linear and unfiltered by APE's sRGB
-        // conversion. The source textures tile, so clamp remains disabled.
-        b=patchGdtField(b,"coreSemantic","Linear4ch");
-        b=patchGdtField(b,"compressionMethod","uncompressed");
-        b=patchGdtField(b,"colorSRGB","0");
-        b=patchGdtField(b,"noMipMaps","1");
-        b=patchGdtField(b,"noPicMip","1");
-        b=patchGdtField(b,"streamable","0");
-        b=patchGdtField(b,"clampU","0");
-        b=patchGdtField(b,"clampV","0");
-        return b;
-    }
-
     QString createSkyMaterialGdtAsset(const QString& assetName, const QString& materialType,
                                       const QString& reflectionImage,
-                                      const QMap<QString,QString>& auxiliaryImages = {}) const
+                                      const QVector<ExportParamBinding>& bindings = {}) const
     {
         QString b=readRuntimeTextFile("export_templates/sky_material.gdtblock"); if(b.isEmpty()) return {};
         b=renameGdtAsset(b,assetName);
         b=patchGdtField(b,"materialCategory","Geometry");
         b=patchGdtField(b,"materialType",materialType);
         b=patchGdtField(b,"colorMap",reflectionImage);
-        for(auto it = auxiliaryImages.constBegin(); it != auxiliaryImages.constEnd(); ++it)
-            b=patchGdtField(b,it.key(),it.value());
+        // Runtime sky parameters use the same packed material fields as PostFX
+        // and Custom Material export. Without these initial values BO3/APE has a
+        // techset parameter but no material-side cgXX/gCheckBoxXX backing value.
+        for(const ExportParamBinding& binding : bindings)
+            b=patchGdtField(b,binding.storage,QString::number(binding.value,'g',7));
         return b;
     }
 
@@ -6976,57 +7156,72 @@ PixelShaderInput vs_main(const BO3ExportSkyVertexInput vertex, const uint instan
     QString makeSkyTechset(const QString& shaderRel, const QVector<ExportParamBinding>& bindings,
                            const QString& shaderSource = QString()) const
     {
-        Q_UNUSED(bindings);
-        // Start from the proven Aurora runtime layout, then add only the explicit
-        // texture parameters required by the generated Beginner cloud shader.
-        QString out = readRuntimeTextFile("export_templates/sky_aurora_runtime.techsetdef");
-        if (out.isEmpty()) return {};
-        out.replace("geometry/sky_procedural_aurora_borealis_ps.hlsl", shaderRel);
+        Q_UNUSED(shaderSource);
+        QString source = readRuntimeTextFile("export_templates/sky_aurora_runtime.techsetdef");
+        if (source.isEmpty()) return {};
+        source.replace("geometry/sky_procedural_aurora_borealis_ps.hlsl", shaderRel);
 
-        if(shaderSource.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
+        // Preserve the proven stock sky structure, but add the reflected Beginner
+        // globals as real BO3 material parameters. The generated HLSL contains
+        // loose globals (bb_*); they must be declared by the runtime techset or
+        // BO3 links them as undefined shader parameters. TOOLSGFX intentionally
+        // stays on the untouched stock ps_sky path and therefore does not receive
+        // these custom parameters.
+        bo3::TechsetParseOptions options;
+        options.configuration = bo3::PackageConfiguration::Runtime;
+        bo3::TechsetParseResult parsed = bo3::parseTechset(
+            source, "generated_sky_runtime.techsetdef", options);
+        if(parsed.validation.hasErrors()) return {};
+
+        int sort = 10;
+        for(const ExportParamBinding& binding : bindings)
         {
-            const QString cloudParameters = QStringLiteral(R"TECH(
-Sampler( "glslSampler0" )
-{
-    tile = "tile both"
-    filter = "linear (mip linear)"
-}
-Sampler( "glslSampler1" )
-{
-    tile = "tile both"
-    filter = "linear (mip linear)"
-}
-Texture( "iChannel0" )
-{
-    ref = true
-    image = Image( <colorMap00, $white_diffuse> )
-    semantic = "2d"
-    tweak = Tweak()
-    {
-        category  = "Clouds"
-        title     = "RGBA Noise Medium"
-        sortindex = "100"
-    }
-}
-Texture( "iChannel1" )
-{
-    ref = true
-    image = Image( <colorMap01, $white_diffuse> )
-    semantic = "2d"
-    tweak = Tweak()
-    {
-        category  = "Clouds"
-        title     = "Blue Noise"
-        sortindex = "105"
-    }
-}
+            bo3::ParameterModel parameter;
+            parameter.kind = binding.isBool ? bo3::ParameterKind::Bool : bo3::ParameterKind::Float1;
+            parameter.name = binding.name;
+            if(binding.isBool)
+                parameter.properties["value"] = QString("<%1>").arg(binding.storage);
+            else
+            {
+                const QString component = binding.storage.right(1);
+                const QString cg = binding.storage.left(binding.storage.size() - 2);
+                parameter.properties["x"] = QString("<%1_%2>").arg(cg, component);
+            }
 
-)TECH");
-            const int globalsPos = out.indexOf(QStringLiteral("Globals()"));
-            if(globalsPos >= 0) out.insert(globalsPos, cloudParameters);
-            else out += cloudParameters;
+            parameter.hasTweak = true;
+            parameter.tweak.category = "Shader Parameters";
+            QString beginnerTitle;
+            double beginnerMinimum = 0.0, beginnerMaximum = 0.0, beginnerStep = 0.0;
+            const bool beginnerMetadata = beginnerRuntimeTweakMetadata(
+                binding.name, beginnerTitle, beginnerMinimum, beginnerMaximum, beginnerStep);
+            parameter.tweak.title = beginnerMetadata ? beginnerTitle : humanizeShaderName(binding.name);
+            parameter.tweak.order = QString::number(sort);
+            if(!binding.isBool)
+            {
+                float minimum = -10.0f, maximum = 10.0f, step = 0.01f;
+                if(beginnerMetadata)
+                {
+                    minimum = static_cast<float>(beginnerMinimum);
+                    maximum = static_cast<float>(beginnerMaximum);
+                    step = static_cast<float>(beginnerStep);
+                }
+                else
+                {
+                    const QString lower = binding.name.toLower();
+                    if(lower.contains("downsample")) { minimum = 1; maximum = 8; step = 1; }
+                    else if(lower.contains("sample") || lower.contains("layer") || lower.contains("step")) { minimum = 1; maximum = 128; step = 1; }
+                    else if(lower.contains("threshold") || lower.contains("opacity") || lower.contains("fraction") || lower.contains("weight") || lower.contains("mix")) { minimum = 0; maximum = 1; }
+                    else if(lower.contains("radius") || lower.contains("density")) { minimum = 0; maximum = 5; }
+                    else if(lower.contains("intensity") || lower.contains("strength") || lower.contains("amount") || lower.contains("scale")) { minimum = 0; maximum = 4; }
+                }
+                parameter.tweak.properties["default"] = QString("\"%1\"").arg(binding.value, 0, 'g', 6);
+                parameter.tweak.properties["range"] = QString("\"%1\", \"%2\", \"%3\"")
+                    .arg(minimum, 0, 'g', 6).arg(maximum, 0, 'g', 6).arg(step, 0, 'g', 6);
+            }
+            parsed.model.parameters << parameter;
+            sort += 5;
         }
-        return out;
+        return bo3::serializeTechset(parsed.model);
     }
 
     QString makeSkyToolsgfxTechset() const
@@ -12749,7 +12944,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             exportedShaderSourceForPackage = exportedShaderSource;
             if(exportType == 0 && exportedToolsgfxShaderSourceForPackage.isEmpty())
                 exportedToolsgfxShaderSourceForPackage = exportedShaderSource;
-            bindings=buildExportParamBindings(exportedShaderSourceForPackage);
+            // Beginner projects already own the authoritative live values. Do
+            // not depend on the renderer having completed a structural recompile
+            // immediately before Export: derive their BO3 bindings directly from
+            // the project and generated HLSL. Advanced shaders keep the reflected
+            // renderer path.
+            bindings = beginnerExport
+                ? buildBeginnerExportParamBindings(exportedShaderSourceForPackage)
+                : buildExportParamBindings(exportedShaderSourceForPackage);
         }
 
         QString gdt="{\n";
@@ -13321,51 +13523,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(ssiAnalysis.evMax,0,'f',1);
             gdt+=createSkyImageGdtAsset(reflectionAsset,gdtTexturePath)+"\n";
 
-            QMap<QString,QString> skyAuxiliaryImages;
-            if(exportedShaderSourceForPackage.contains("BO3_BEGINNER_CLOUD_TEXTURES", Qt::CaseInsensitive))
-            {
-                const QString imageDir = QDir(sourceData).filePath("images");
-                QDir().mkpath(imageDir);
-                struct CloudImageExport
-                {
-                    const char* resource;
-                    const char* suffix;
-                    const char* materialField;
-                };
-                const CloudImageExport cloudImages[] = {
-                    {":/beginner/rgba_noise_medium.png", "cloud_rgba_noise_medium", "colorMap00"},
-                    {":/beginner/blue_noise.png", "cloud_blue_noise", "colorMap01"}
-                };
-                for(const CloudImageExport& cloudImage : cloudImages)
-                {
-                    const QString suffix = QString::fromLatin1(cloudImage.suffix);
-                    const QString asset = sanitizeBo3Name(joinedPrefix + "_" + suffix);
-                    const QString fileName = bn + "_" + suffix + ".png";
-                    const QString destination = QDir(imageDir).filePath(fileName);
-                    if(!copyQtResourceToFile(QString::fromLatin1(cloudImage.resource), destination, err))
-                    {
-                        QApplication::restoreOverrideCursor();
-                        QMessageBox::critical(this, "BO3 Sky Cloud Export", err);
-                        return;
-                    }
-                    const QString relativeImage = "source_data/" + ns + "/images/" + fileName;
-                    const QString imageGdt = createSkyCloudNoiseImageGdtAsset(asset, relativeImage);
-                    if(imageGdt.isEmpty())
-                    {
-                        QApplication::restoreOverrideCursor();
-                        QMessageBox::critical(this, "BO3 Sky Cloud Export",
-                            "Could not generate the BO3 image asset for " + suffix + ".");
-                        return;
-                    }
-                    gdt += imageGdt + "\n";
-                    skyAuxiliaryImages[QString::fromLatin1(cloudImage.materialField)] = asset;
-                    generated << destination;
-                }
-                packageExportNotes.append(
-                    "Beginner Volumetric Clouds exported RGBA Noise Medium to colorMap00/iChannel0 and Blue Noise to colorMap01/iChannel1.");
-            }
-
-            gdt+=createSkyMaterialGdtAsset(mat,tech,reflectionAsset,skyAuxiliaryImages)+"\n";
+            gdt+=createSkyMaterialGdtAsset(mat,tech,reflectionAsset,bindings)+"\n";
             gdt+=createSkySsiGdtAsset(skyAsset,skyAsset,ssiAnalysis)+"\n";
             gdt+=createSkyXmodelGdtAsset(skyAsset,mat)+"\n";
 
@@ -14184,6 +14342,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return -1;
     }
 
+    QString selectedBeginnerEffectInstanceId() const
+    {
+        if(!beginnerEffectList_) return {};
+        const QListWidgetItem* item = beginnerEffectList_->currentItem();
+        return item ? item->data(Qt::UserRole).toString() : QString();
+    }
+
     void updateBeginnerResponsiveLayout()
     {
         if(!beginnerBuilderPanel_) return;
@@ -14231,131 +14396,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::PostFx)
             return false;
         for(const beginner::Effect& effect : beginnerProject_.effects)
-            if(effect.enabled && beginnerEffectUsesSceneDepth(effect.typeId)) return true;
+        {
+            if(!effect.enabled) continue;
+            if(beginnerEffectUsesSceneDepth(effect.typeId)) return true;
+            if(effect.parameters.value(QStringLiteral("target_scope")).toInt(0) != 0) return true;
+        }
         return false;
-    }
-
-    bool beginnerProjectUsesVolumetricClouds() const
-    {
-        if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::Sky)
-            return false;
-        for(const beginner::Effect& effect : beginnerProject_.effects)
-            if(effect.enabled && effect.typeId == "sky_realistic_clouds") return true;
-        return false;
-    }
-
-    QString materializeBeginnerResource(const QString& resourcePath, const QString& fileName,
-                                        QString& error) const
-    {
-        QFile input(resourcePath);
-        if(!input.open(QIODevice::ReadOnly))
-        {
-            error = "Could not open embedded Beginner texture: " + resourcePath;
-            return {};
-        }
-        const QByteArray bytes = input.readAll();
-        QString root = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-        if(root.isEmpty()) root = QDir::tempPath() + "/BO3ShaderStudio";
-        const QString dir = QDir(root).filePath("beginner_assets");
-        if(!QDir().mkpath(dir))
-        {
-            error = "Could not create Beginner texture cache: " + dir;
-            return {};
-        }
-        const QString path = QDir(dir).filePath(fileName);
-        QFile existing(path);
-        if(existing.open(QIODevice::ReadOnly))
-        {
-            const bool identical = existing.readAll() == bytes;
-            existing.close();
-            if(identical) return QFileInfo(path).absoluteFilePath();
-        }
-
-        QSaveFile output(path);
-        if(!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit())
-        {
-            error = "Could not materialize Beginner texture: " + path;
-            return {};
-        }
-        return QFileInfo(path).absoluteFilePath();
-    }
-
-    void syncBeginnerCloudTextures()
-    {
-        if(!preview_) return;
-        const bool wanted = beginnerProjectUsesVolumetricClouds();
-        if(wanted == beginnerCloudTexturesActive_) return;
-
-        QString initError;
-        if(!preview_->ensureInitialized(initError))
-        {
-            if(!initError.isEmpty()) statusBar()->showMessage(initError, 5000);
-            return;
-        }
-
-        auto restorePrevious = [this]()
-        {
-            for(int channel = 0; channel < 2; ++channel)
-            {
-                const size_t index = static_cast<size_t>(channel);
-                preview_->renderer().SetShadertoyChannelRepeat(channel, beginnerCloudPreviousRepeat_[index]);
-                const QString path = beginnerCloudPreviousPaths_[index];
-                if(path.isEmpty() || !QFileInfo::exists(path))
-                {
-                    preview_->renderer().ClearShadertoyChannelTexture(channel);
-                    continue;
-                }
-                std::wstring restoreError;
-                if(!preview_->renderer().LoadShadertoyChannelTexture(
-                       channel, fs::path(path.toStdWString()), beginnerCloudPreviousFlipY_[index], restoreError))
-                    preview_->renderer().ClearShadertoyChannelTexture(channel);
-            }
-        };
-
-        if(!wanted)
-        {
-            restorePrevious();
-            beginnerCloudTexturesActive_ = false;
-            refreshShadertoyChannelUi();
-            return;
-        }
-
-        for(int channel = 0; channel < 2; ++channel)
-        {
-            const size_t index = static_cast<size_t>(channel);
-            beginnerCloudPreviousPaths_[index] = ToQString(preview_->renderer().GetShadertoyChannelPath(channel));
-            beginnerCloudPreviousRepeat_[index] = preview_->renderer().GetShadertoyChannelRepeat(channel);
-            beginnerCloudPreviousFlipY_[index] = preview_->renderer().GetShadertoyChannelFlipY(channel);
-        }
-
-        QString error;
-        const QString rgbaNoise = materializeBeginnerResource(
-            ":/beginner/rgba_noise_medium.png", "rgba_noise_medium.png", error);
-        const QString blueNoise = materializeBeginnerResource(
-            ":/beginner/blue_noise.png", "blue_noise.png", error);
-        if(rgbaNoise.isEmpty() || blueNoise.isEmpty())
-        {
-            restorePrevious();
-            statusBar()->showMessage("Volumetric cloud textures could not be prepared: " + error, 6000);
-            return;
-        }
-
-        const std::array<QString,2> paths{{rgbaNoise, blueNoise}};
-        for(int channel = 0; channel < 2; ++channel)
-        {
-            preview_->renderer().SetShadertoyChannelRepeat(channel, true);
-            std::wstring loadError;
-            if(!preview_->renderer().LoadShadertoyChannelTexture(
-                   channel, fs::path(paths[static_cast<size_t>(channel)].toStdWString()), false, loadError))
-            {
-                restorePrevious();
-                statusBar()->showMessage("Volumetric cloud texture load failed: " + ToQString(loadError), 6000);
-                refreshShadertoyChannelUi();
-                return;
-            }
-        }
-        beginnerCloudTexturesActive_ = true;
-        refreshShadertoyChannelUi();
     }
 
     static QString beginnerDepthPreviewSceneName(const QString& sceneId)
@@ -14394,7 +14440,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateBeginnerBuilderSummary();
         if(showMessage)
             statusBar()->showMessage(
-                QString("Using BO3 Game Depth Preview — %1 with smooth approximate preview Float-Z. BO3 export uses live floatZ.")
+                QString("Using BO3 Game Depth Preview — %1 with paired image-aligned preview depth + viewmodel data. BO3 export uses live floatZ.")
                     .arg(beginnerDepthPreviewSceneName(sceneId)),
                 4600);
     }
@@ -14642,19 +14688,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerEffectParamsLayout_->addWidget(help);
 
         const bool selectedUsesDepth = beginnerProject_.target == beginner::Target::PostFx &&
-            beginnerEffectUsesSceneDepth(effect.typeId);
+            (beginnerEffectUsesSceneDepth(effect.typeId) ||
+             effect.parameters.value(QStringLiteral("target_scope")).toInt(0) != 0);
         if(selectedUsesDepth)
         {
             const bool hasDepth = preview_ && preview_->renderer().HasPreviewDepthTexture();
             const bool builtInDepth = preview_ && preview_->renderer().BuiltInDepthSceneActive();
             auto* depthNotice = new QLabel();
             if(builtInDepth)
-                depthNotice->setText(QString("BO3 Game Depth Preview active: %1. The screenshot is real BO3; preview depth is a smooth perspective approximation. Export uses BO3's live Float-Z.")
+                depthNotice->setText(QString("BO3 Game Depth Preview active: %1. The screenshot is real BO3 and uses a paired depth/viewmodel preview asset. Export uses BO3's live Float-Z.")
                     .arg(beginnerDepthPreviewSceneName(beginnerDepthPreviewSceneId_)));
             else if(hasDepth)
                 depthNotice->setText("Matching custom depth is loaded for this preview image. BO3 supplies live Float-Z automatically after export.");
             else
-                depthNotice->setText("This effect needs scene depth. Pick a BO3 Game Depth Preview scene below; Shader Studio supplies approximate preview depth automatically.");
+                depthNotice->setText("This effect needs scene depth. Pick a BO3 Game Depth Preview scene below; Shader Studio loads its paired depth/viewmodel preview data automatically.");
             depthNotice->setWordWrap(true);
             depthNotice->setObjectName(hasDepth ? "DepthStatusGood" : "DepthStatusWarn");
             beginnerEffectParamsLayout_->addWidget(depthNotice);
@@ -14684,9 +14731,34 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 activateBuiltInDepthPreview(false, depthScenePicker->currentData().toString());
             });
 
+            auto* depthDebugRow = new QWidget();
+            auto* depthDebugLayout = new QHBoxLayout(depthDebugRow);
+            depthDebugLayout->setContentsMargins(0, 0, 0, 0);
+            depthDebugLayout->setSpacing(6);
+            auto* depthDebugLabel = new QLabel("Debug View");
+            auto* depthDebugPicker = new QComboBox();
+            const QStringList depthDebugNames = {
+                "Final Effect", "Color Scene", "Raw Depth", "Linear Depth",
+                "Depth Edges", "Viewmodel Mask", "World Mask", "Effect Mask"};
+            for(int i = 0; i < depthDebugNames.size(); ++i) depthDebugPicker->addItem(depthDebugNames[i], i);
+            depthDebugPicker->setCurrentIndex(qBound(0, beginnerDepthDebugView_, depthDebugNames.size() - 1));
+            depthDebugPicker->setToolTip("Inspect each stage of the depth pipeline. White mask pixels are affected; black pixels are excluded.");
+            depthDebugLayout->addWidget(depthDebugLabel);
+            depthDebugLayout->addWidget(depthDebugPicker, 1);
+            beginnerEffectParamsLayout_->addWidget(depthDebugRow);
+            connect(depthDebugPicker, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, depthDebugPicker](int)
+            {
+                beginnerDepthDebugView_ = depthDebugPicker->currentData().toInt();
+                beginnerPreviewHlsl_ = beginner::generatePreviewHlsl(beginnerProject_, beginnerDepthDebugView_, selectedBeginnerEffectInstanceId());
+                syncBeginnerRuntimePreviewParameters();
+                liveCompileTimer_.stop();
+                liveCompileTimer_.setInterval(1);
+                liveCompileTimer_.start();
+            });
+
             auto* depthScene = new QPushButton(builtInDepth ? "Refresh Game Depth Preview" : "Use Game Depth Preview");
             depthScene->setObjectName(builtInDepth ? "" : "PrimaryAction");
-            depthScene->setToolTip("Use a real BO3 screenshot with Shader Studio's smooth approximate preview depth. No external depth map is required.");
+            depthScene->setToolTip("Use a real BO3 screenshot with a paired preview depth map and first-person viewmodel mask. BO3 export still uses the live Float-Z surface.");
             beginnerEffectParamsLayout_->addWidget(depthScene);
             connect(depthScene, &QPushButton::clicked, this, [this]{ activateBuiltInDepthPreview(); });
 
@@ -14700,6 +14772,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         for(const beginner::ParameterDefinition& parameter : definition->parameters)
         {
+            if(parameter.key == QStringLiteral("target_scope") && beginnerProject_.target != beginner::Target::PostFx)
+                continue;
             if(parameter.kind == beginner::ParameterKind::Color)
             {
                 QColor value(effect.parameters.value(parameter.key).toString());
@@ -14725,6 +14799,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 continue;
             }
 
+            if(parameter.kind == beginner::ParameterKind::Choice)
+            {
+                auto* combo = new QComboBox();
+                combo->setToolTip(parameter.description);
+                for(int choiceIndex = 0; choiceIndex < parameter.choices.size(); ++choiceIndex)
+                    combo->addItem(parameter.choices[choiceIndex], choiceIndex);
+                const int value = qBound(0, effect.parameters.value(parameter.key).toInt(parameter.defaultChoice),
+                                         qMax(0, static_cast<int>(parameter.choices.size()) - 1));
+                combo->setCurrentIndex(value);
+                form->addRow(parameter.name, combo);
+                connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, instanceId, parameter, combo](int)
+                {
+                    const int index = beginnerEffectIndexById(instanceId);
+                    if(index < 0) return;
+                    const int value = combo->currentData().toInt();
+                    beginnerProject_.effects[index].parameters[parameter.key] = value;
+                    markBeginnerProjectModified();
+                    if(parameter.key == QStringLiteral("target_scope"))
+                    {
+                        // Target scope is structural: Everything does not need Float-Z,
+                        // while World/Viewmodel modes do. Rebuild only for this combo
+                        // change; numeric sliders remain true runtime updates.
+                        if(value != 0 && preview_ && sourceImagePath_.isEmpty() && !preview_->renderer().HasPreviewDepthTexture())
+                            activateBuiltInDepthPreview(false);
+                        applyBeginnerProjectToEditor(true);
+                        QTimer::singleShot(0, this, [this]{ rebuildBeginnerEffectParameters(); });
+                    }
+                    else
+                    {
+                        syncBeginnerRuntimePreviewParameter(instanceId, parameter.key, value);
+                        if(preview_) preview_->renderNow();
+                    }
+                });
+                continue;
+            }
+
             const double value = effect.parameters.value(parameter.key).toDouble(parameter.defaultValue);
             auto* row = new QWidget();
             auto* layout = new QHBoxLayout(row);
@@ -14746,16 +14856,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             layout->addWidget(spin);
             form->addRow(parameter.name, row);
 
-            const QString previewEffectType = effect.typeId;
-            connect(slider, &QSlider::sliderPressed, this, [this, previewEffectType]
-            {
-                beginnerSliderDragging_ = true;
-                beginnerHeavyPreviewEffect_ =
-                    previewEffectType == "sky_aurora" ||
-                    previewEffectType == "sky_nebula" ||
-                    previewEffectType == "sky_realistic_clouds";
-            });
-            connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin, previewEffectType](int position)
+            connect(slider, &QSlider::valueChanged, this, [this, instanceId, parameter, spin](int position)
             {
                 const int index = beginnerEffectIndexById(instanceId);
                 if(index < 0) return;
@@ -14766,21 +14867,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     spin->setValue(value);
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
-                beginnerHeavyPreviewEffect_ =
-                    previewEffectType == "sky_aurora" ||
-                    previewEffectType == "sky_nebula" ||
-                    previewEffectType == "sky_realistic_clouds";
                 markBeginnerProjectModified();
-                queueBeginnerParameterPreview();
-            });
-            connect(slider, &QSlider::sliderReleased, this, [this]
-            {
-                beginnerSliderDragging_ = false;
-                beginnerHeavyPreviewEffect_ = false;
-                beginnerParameterPreviewDirty_ = true;
-                liveCompileTimer_.stop();
-                liveCompileTimer_.setInterval(1);
-                liveCompileTimer_.start();
+                queueBeginnerParameterPreview(instanceId, parameter.key, value);
             });
             connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, instanceId, parameter, slider](double value)
             {
@@ -14794,7 +14882,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 }
                 beginnerProject_.effects[index].parameters[parameter.key] = value;
                 markBeginnerProjectModified();
-                queueBeginnerParameterPreview();
+                queueBeginnerParameterPreview(instanceId, parameter.key, value);
             });
         }
         beginnerEffectParamsLayout_->addWidget(formHost);
@@ -14852,34 +14940,105 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateTemporaryPreviewActions();
     }
 
-    void queueBeginnerParameterPreview()
+    void updateBeginnerSunFromPreview(const QPointF& position, bool finalUpdate)
     {
-        if(!beginnerProjectActive_) return;
-        beginnerParameterPreviewDirty_ = true;
+        if(!preview_ || !beginnerProjectActive_ || beginnerProject_.target != beginner::Target::Sky)
+            return;
+
+        beginner::Effect* sunEffect = nullptr;
+        for(beginner::Effect& effect : beginnerProject_.effects)
+        {
+            if(effect.enabled && effect.typeId == QStringLiteral("sky_sun"))
+            {
+                sunEffect = &effect;
+                break;
+            }
+        }
+        if(!sunEffect) return;
+
+        const double width = std::max(1, preview_->width());
+        const double height = std::max(1, preview_->height());
+        const double nx = std::clamp(position.x() / width, 0.0, 1.0);
+        const double ny = std::clamp(position.y() / height, 0.0, 1.0);
+
+        // The Sky Editor locks the preview camera at yaw/pitch zero. Convert the
+        // mouse pixel through that same perspective ray used by the built-in sky
+        // vertex shader, so the generated sun disk lands under the cursor rather
+        // than using an unrelated 0..1 screen-space approximation.
+        const double ndcX = nx * 2.0 - 1.0;
+        const double ndcY = 1.0 - ny * 2.0;
+        const double aspect = width / height;
+        const double tanHalfFov = std::tan(preview_->renderer().CameraFovDegrees() * 0.5 * 3.14159265358979323846 / 180.0);
+        double rayX = 1.0;
+        double rayY = ndcX * aspect * tanHalfFov;
+        double rayZ = ndcY * tanHalfFov;
+        const double rayLength = std::max(1e-8, std::sqrt(rayX*rayX + rayY*rayY + rayZ*rayZ));
+        rayX /= rayLength; rayY /= rayLength; rayZ /= rayLength;
+        double manualAzimuth = std::atan2(rayY, rayX) / (2.0 * 3.14159265358979323846);
+        if(manualAzimuth < 0.0) manualAzimuth += 1.0;
+        const double manualElevation = std::clamp(rayZ, -0.999, 0.999);
+
+        sunEffect->parameters[QStringLiteral("control_mode")] = 1.0;
+        sunEffect->parameters[QStringLiteral("manual_azimuth")] = manualAzimuth;
+        sunEffect->parameters[QStringLiteral("manual_elevation")] = manualElevation;
+
+        syncBeginnerRuntimePreviewParameter(sunEffect->instanceId, QStringLiteral("control_mode"), 1.0);
+        syncBeginnerRuntimePreviewParameter(sunEffect->instanceId, QStringLiteral("manual_azimuth"), manualAzimuth);
+        syncBeginnerRuntimePreviewParameter(sunEffect->instanceId, QStringLiteral("manual_elevation"), manualElevation);
         modified_ = false;
         updateTitle();
-        if(!preview_) return;
-        if(!liveCompileTimer_.isActive())
+        if(preview_) preview_->renderNow();
+
+        // Rebuilding the parameter panel while dragging would destroy/recreate
+        // the sliders under the mouse. Refresh only once on release.
+        if(finalUpdate)
         {
-            // FXC compilation is synchronous. Compiling a large volumetric sky
-            // every 40 ms starved Qt's input loop and made the slider itself feel
-            // sticky. Keep ordinary effects responsive, but pace expensive cloud
-            // stacks more gently while the mouse is held down. The final value is
-            // compiled immediately on slider release.
-            int interval = beginnerSliderDragging_ ? 58 : 24;
-            if(beginnerSliderDragging_ && beginnerHeavyPreviewEffect_)
-                interval = 120;
-            liveCompileTimer_.setInterval(interval);
-            liveCompileTimer_.start();
+            markBeginnerProjectModified();
+            if(beginnerEffectList_)
+            {
+                const int row = beginnerEffectList_->currentRow();
+                if(row >= 0 && row < beginnerProject_.effects.size() &&
+                   beginnerProject_.effects[row].instanceId == sunEffect->instanceId)
+                    rebuildBeginnerEffectParameters();
+            }
+            updateBeginnerBuilderSummary();
         }
+    }
+
+    void syncBeginnerRuntimePreviewParameters()
+    {
+        if(!preview_ || !beginnerProjectActive_) return;
+        const auto runtime = beginner::runtimeFloatParameters(beginnerProject_);
+        for(const beginner::RuntimeParameter& parameter : runtime)
+            preview_->renderer().SetShaderParameter(parameter.name.toStdString(), static_cast<float>(parameter.value));
+    }
+
+    void syncBeginnerRuntimePreviewParameter(const QString& instanceId, const QString& key, double value)
+    {
+        if(!preview_ || !beginnerProjectActive_) return;
+        const QString name = beginner::runtimeParameterNameFor(beginnerProject_, instanceId, key);
+        if(name.isEmpty()) return;
+        preview_->renderer().SetShaderParameter(name.toStdString(), static_cast<float>(value));
+    }
+
+    void queueBeginnerParameterPreview(const QString& instanceId, const QString& key, double value)
+    {
+        if(!beginnerProjectActive_) return;
+        // Beginner numeric controls are reflected runtime constants. A slider
+        // tick updates only the float that actually changed, then renders the
+        // next frame. No full parameter sweep and no FXC compile are needed.
+        modified_ = false;
+        updateTitle();
+        syncBeginnerRuntimePreviewParameter(instanceId, key, value);
+        if(preview_) preview_->renderNow();
     }
 
     void applyBeginnerProjectToEditor(bool immediateCompile)
     {
         if(!beginnerProjectActive_ || !editor_) return;
-        beginnerParameterPreviewDirty_ = false;
         const QString generated = beginner::generateHlsl(beginnerProject_);
         beginnerGeneratedHlsl_ = generated;
+        beginnerPreviewHlsl_ = beginner::generatePreviewHlsl(beginnerProject_, beginnerDepthDebugView_, selectedBeginnerEffectInstanceId());
 
         // Slider drags should stay responsive. In Beginner mode, defer the
         // expensive editor document replacement until the preview compile tick
@@ -14912,7 +15071,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else if(beginnerProject_.target == beginner::Target::Sky)
         {
-            if(camera3D_) camera3D_->setChecked(true);
+            if(camera3D_) camera3D_->setChecked(false);
+            if(preview_) preview_->renderer().ResetCamera();
         }
         else
         {
@@ -14924,7 +15084,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateTitle();
 
         if(!preview_) return;
-        syncBeginnerCloudTextures();
+        syncBeginnerRuntimePreviewParameters();
         if(immediateCompile)
         {
             liveCompileTimer_.stop();
@@ -15736,6 +15896,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             rebuildBeginnerEffectParameters();
             updateBeginnerEffectActionState();
+            if(beginnerDepthDebugView_ == 7 && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::PostFx)
+            {
+                beginnerPreviewHlsl_ = beginner::generatePreviewHlsl(
+                    beginnerProject_, beginnerDepthDebugView_, selectedBeginnerEffectInstanceId());
+                liveCompileTimer_.stop();
+                liveCompileTimer_.setInterval(1);
+                liveCompileTimer_.start();
+            }
         });
         connect(beginnerEffectList_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item)
         {
@@ -15919,7 +16087,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         beginnerDepthSceneToolbarAction_ = toolbar->addAction("Game Depth Preview");
         beginnerDepthSceneToolbarAction_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-        beginnerDepthSceneToolbarAction_->setToolTip("Use one of the built-in BO3 screenshots with Shader Studio's smooth approximate preview Float-Z. Scene choices appear in the depth-effect inspector; export uses BO3 live floatZ.");
+        beginnerDepthSceneToolbarAction_->setToolTip("Use one of the built-in BO3 screenshots with paired preview depth + viewmodel data. Scene choices appear in the depth-effect inspector; export uses BO3 live floatZ.");
         beginnerDepthSceneToolbarAction_->setVisible(false);
         if(auto* depthSceneButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(beginnerDepthSceneToolbarAction_)))
             depthSceneButton->setObjectName("PrimaryAction");
@@ -16162,6 +16330,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         preview_->setMinimumSize(48, 24);
         preview_->setCameraChangedCallback([this]{ updateCameraUi(); });
         preview_->setSceneChangedCallback([this]{ syncSceneControlsFromRenderer(); });
+        preview_->setSunPositionCallback([this](const QPointF& position, bool finalUpdate)
+        {
+            updateBeginnerSunFromPreview(position, finalUpdate);
+        });
 
         auto* previewContainer = new QWidget();
         auto* previewLayout = new QVBoxLayout(previewContainer);
@@ -18093,7 +18265,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updatePreviewModeInspector();
         updateGBufferUi();
         refreshPostFxRuntimeUi();
-        syncBeginnerCloudTextures();
         if(beginner)
             QTimer::singleShot(0, this, [this]{ updateBeginnerResponsiveLayout(); });
         updateTitle();
@@ -18612,7 +18783,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         beginnerProjectModified_ = false;
         beginnerProjectPath_.clear();
         beginnerGeneratedHlsl_.clear();
-        syncBeginnerCloudTextures();
         if(beginnerUiMode_) setUiExperienceMode(false);
         loadingText_ = true;
         editor_->setPlainText(QString::fromUtf8(file.readAll()));
@@ -18763,8 +18933,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return;
         }
         const QString originalSource =
-            (beginnerUiMode_ && beginnerProjectActive_ && !beginnerGeneratedHlsl_.isEmpty())
-                ? beginnerGeneratedHlsl_
+            (beginnerUiMode_ && beginnerProjectActive_ && !beginnerPreviewHlsl_.isEmpty())
+                ? beginnerPreviewHlsl_
                 : editor_->toPlainText();
         const fs::path nativePath = shaderPath_.isEmpty() ? fs::path() : fs::path(shaderPath_.toStdWString());
         const fs::path nativeRoot = includeRoot_.isEmpty() ? fs::path() : fs::path(includeRoot_.toStdWString());
@@ -20122,10 +20292,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     beginner::Project beginnerProject_;
     QString beginnerProjectPath_;
     QString beginnerGeneratedHlsl_;
+    QString beginnerPreviewHlsl_;
     QString beginnerPendingHlsl_;
-    bool beginnerParameterPreviewDirty_ = false;
-    bool beginnerSliderDragging_ = false;
-    bool beginnerHeavyPreviewEffect_ = false;
     bool beginnerProjectActive_ = false;
     bool beginnerProjectModified_ = false;
     bool beginnerRefreshingUi_ = false;
@@ -20268,10 +20436,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     bool onlineUpdateCheckInProgress_ = false;
     QString currentTheme_ = "BO3 Dark";
     QString beginnerDepthPreviewSceneId_ = "shadows_of_evil";
-    bool beginnerCloudTexturesActive_ = false;
-    std::array<QString,2> beginnerCloudPreviousPaths_{{QString(), QString()}};
-    std::array<bool,2> beginnerCloudPreviousRepeat_{{true, true}};
-    std::array<bool,2> beginnerCloudPreviousFlipY_{{false, false}};
+    int beginnerDepthDebugView_ = 0;
     bool modified_ = false, loadingText_ = false, refreshingVectors_ = false, lastWriteTimeValid_ = false;
     bool beginnerUiMode_ = true;
     PreviewMode detectedPreviewMode_ = PreviewMode::HLSL;

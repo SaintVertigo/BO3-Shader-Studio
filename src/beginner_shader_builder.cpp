@@ -2,6 +2,7 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QUuid>
 #include <QVariant>
 
@@ -40,6 +41,23 @@ ParameterDefinition ColorParam(const char* key, const char* name, const char* de
     return parameter;
 }
 
+ParameterDefinition ChoiceParam(const char* key, const char* name, const char* description,
+                                std::initializer_list<const char*> choices, int defaultChoice)
+{
+    ParameterDefinition parameter;
+    parameter.key = QString::fromLatin1(key);
+    parameter.name = QString::fromLatin1(name);
+    parameter.description = QString::fromLatin1(description);
+    parameter.kind = ParameterKind::Choice;
+    for(const char* choice : choices) parameter.choices.push_back(QString::fromLatin1(choice));
+    parameter.defaultChoice = std::clamp(defaultChoice, 0, std::max(0, static_cast<int>(parameter.choices.size()) - 1));
+    parameter.minimum = 0.0;
+    parameter.maximum = std::max(0, static_cast<int>(parameter.choices.size()) - 1);
+    parameter.step = 1.0;
+    parameter.defaultValue = parameter.defaultChoice;
+    return parameter;
+}
+
 EffectDefinition EffectDef(const char* id, const char* name, const char* description, const char* category,
                            std::initializer_list<Target> targets,
                            std::initializer_list<ParameterDefinition> parameters)
@@ -49,8 +67,25 @@ EffectDefinition EffectDef(const char* id, const char* name, const char* descrip
     definition.name = QString::fromLatin1(name);
     definition.description = QString::fromLatin1(description);
     definition.category = QString::fromLatin1(category);
-    for(Target target : targets) definition.targets.push_back(target);
-    for(const ParameterDefinition& parameter : parameters) definition.parameters.push_back(parameter);
+    bool supportsPostFx = false;
+    for(Target target : targets)
+    {
+        definition.targets.push_back(target);
+        if(target == Target::PostFx) supportsPostFx = true;
+    }
+    bool alreadyHasTargetScope = false;
+    for(const ParameterDefinition& parameter : parameters)
+    {
+        definition.parameters.push_back(parameter);
+        if(parameter.key == QStringLiteral("target_scope")) alreadyHasTargetScope = true;
+    }
+    if(supportsPostFx && !alreadyHasTargetScope)
+    {
+        definition.parameters.prepend(ChoiceParam(
+            "target_scope", "Target",
+            "Choose whether this effect covers the whole screen, leaves the first-person viewmodel untouched, or affects only the viewmodel.",
+            {"Everything", "World Only", "Viewmodel Only"}, 0));
+    }
     return definition;
 }
 
@@ -92,6 +127,58 @@ double parameterFloat(const Effect& effect, const EffectDefinition& definition, 
     return 0.0;
 }
 
+QString floatLiteral(double value);
+
+QString runtimeParameterName(const Project& project, const Effect& effect, const QString& key)
+{
+    int index = 0;
+    for(int i = 0; i < project.effects.size(); ++i)
+    {
+        if(project.effects[i].instanceId == effect.instanceId)
+        {
+            index = i;
+            break;
+        }
+    }
+    QString type = effect.typeId;
+    type.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
+    QString parameter = key;
+    parameter.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
+    return QString("bb_%1_%2_%3").arg(type).arg(index).arg(parameter);
+}
+
+QString parameterExpr(const Project& project, const Effect& effect,
+                      const EffectDefinition& definition, const QString& key)
+{
+    // Target scope changes shader resource requirements (Float-Z is only needed
+    // for World/Viewmodel scoping), so keep it structural instead of exposing a
+    // runtime float that would force every PostFX shader to bind DepthSampler.
+    if(key == QStringLiteral("target_scope"))
+        return floatLiteral(parameterFloat(effect, definition, key));
+    return runtimeParameterName(project, effect, key);
+}
+
+QString runtimeParameterDeclarations(const Project& project)
+{
+    QString out;
+    out += QStringLiteral("\n// BO3_BEGINNER_RUNTIME_PARAMETERS: slider values are runtime constants; BO3 export maps them to techset float controls.\n");
+    for(const Effect& effect : project.effects)
+    {
+        if(!effect.enabled) continue;
+        const EffectDefinition* definition = effectDefinition(effect.typeId);
+        if(!definition || !supportsTarget(*definition, project.target)) continue;
+        for(const ParameterDefinition& parameter : definition->parameters)
+        {
+            if(parameter.kind == ParameterKind::Color) continue;
+            if(parameter.key == QStringLiteral("target_scope")) continue;
+            out += QString("float %1; // default %2\n")
+                .arg(runtimeParameterName(project, effect, parameter.key),
+                     floatLiteral(parameterFloat(effect, *definition, parameter.key)));
+        }
+    }
+    return out;
+}
+
 QString colorLiteral(const QColor& color)
 {
     const QColor valid = color.isValid() ? color : QColor(Qt::white);
@@ -115,34 +202,50 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         const EffectDefinition* definition = effectDefinition(effect.typeId);
         if(!definition || !supportsTarget(*definition, project.target)) continue;
         const QString tag = QString("e%1").arg(effectIndex++);
+        const bool postFxScoped = project.target == Target::PostFx && hasUv;
+        QString postFxTargetScope;
+        if(postFxScoped)
+        {
+            for(const ParameterDefinition& parameter : definition->parameters)
+            {
+                if(parameter.key == QStringLiteral("target_scope"))
+                {
+                    if(parameterFloat(effect, *definition, "target_scope") >= 0.5)
+                        postFxTargetScope = parameterExpr(project, effect, *definition, "target_scope");
+                    break;
+                }
+            }
+        }
+        if(!postFxTargetScope.isEmpty())
+            out += QString("    float3 %1_scopeBefore = color;\n").arg(tag);
 
         if(effect.typeId == "tint")
         {
             const QColor tint = parameterColor(effect, *definition, "color");
-            const double amount = parameterFloat(effect, *definition, "amount");
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
             out += QString("    // %1\n    color = lerp(color, color * %2, %3);\n")
-                .arg(definition->name, colorLiteral(tint), floatLiteral(amount));
+                .arg(definition->name, colorLiteral(tint), amount);
         }
         else if(effect.typeId == "brightness")
         {
             out += QString("    // %1\n    color += %2;\n")
-                .arg(definition->name, floatLiteral(parameterFloat(effect, *definition, "amount")));
+                .arg(definition->name, parameterExpr(project, effect, *definition, "amount"));
         }
         else if(effect.typeId == "contrast")
         {
             out += QString("    // %1\n    color = (color - 0.5) * %2 + 0.5;\n")
-                .arg(definition->name, floatLiteral(parameterFloat(effect, *definition, "amount")));
+                .arg(definition->name, parameterExpr(project, effect, *definition, "amount"));
         }
         else if(effect.typeId == "saturation")
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
             out += QString("    // %1\n    float %2_luma = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
                            "    color = lerp(%2_luma.xxx, color, %3);\n")
                 .arg(definition->name, tag, amount);
         }
         else if(effect.typeId == "grayscale")
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
             out += QString("    // %1\n    float %2_gray = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
                            "    color = lerp(color, %2_gray.xxx, %3);\n")
                 .arg(definition->name, tag, amount);
@@ -150,26 +253,25 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "invert")
         {
             out += QString("    // %1\n    color = lerp(color, 1.0 - color, %2);\n")
-                .arg(definition->name, floatLiteral(parameterFloat(effect, *definition, "amount")));
+                .arg(definition->name, parameterExpr(project, effect, *definition, "amount"));
         }
         else if(effect.typeId == "vignette" && hasUv)
         {
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            const QString size = parameterExpr(project, effect, *definition, "size");
             out += QString("    // %1\n    float2 %2_vp = uv * 2.0 - 1.0;\n"
-                           "    float %2_v = 1.0 - smoothstep(%3, %4, dot(%2_vp, %2_vp));\n"
+                           "    float %2_vStart = max(0.0, 1.0 - %3);\n"
+                           "    float %2_vEnd = max(0.01, %2_vStart + %4);\n"
+                           "    float %2_v = 1.0 - smoothstep(%2_vStart, %2_vEnd, dot(%2_vp, %2_vp));\n"
                            "    color *= lerp(1.0, %2_v, %5);\n")
-                .arg(definition->name, tag,
-                     floatLiteral(std::max(0.0, 1.0 - parameterFloat(effect, *definition, "size"))),
-                     floatLiteral(std::max(0.01, 1.0 - parameterFloat(effect, *definition, "size") + parameterFloat(effect, *definition, "softness"))),
-                     strength);
-            Q_UNUSED(softness);
+                .arg(definition->name, tag, size, softness, strength);
         }
         else if(effect.typeId == "scanlines" && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString density = parameterExpr(project, effect, *definition, "density");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             const QString timeExpr = hasTime ? "t" : "0.0";
             // Material effects use the skinned local 3D position rather than mesh UVs.
             // That keeps procedural lines continuous across duplicated UV seams and
@@ -183,17 +285,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "pulse" && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             out += QString("    // %1\n    float %2_pulse = 0.5 + 0.5 * sin(t * %3 * 6.2831853);\n"
                            "    color *= lerp(1.0 - %4, 1.0 + %4, %2_pulse);\n")
                 .arg(definition->name, tag, speed, amount);
         }
         else if(effect.typeId == "noise" && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             const QString timeExpr = hasTime ? QString("floor(t * %1 * 24.0)").arg(speed) : "0.0";
             if(project.target == Target::Material)
             {
@@ -211,9 +313,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "film_grain" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString grainSize = floatLiteral(parameterFloat(effect, *definition, "grain_size"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString grainSize = parameterExpr(project, effect, *definition, "grain_size");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             out += QString("    // %1 - layered pixel-space grain, modulated like photographed film\n"
                            "    float %2_fine = BO3BeginnerGrainLayer(uv, %3 * 1.00, 0.35, 0.0, %4);\n"
                            "    float %2_medium = BO3BeginnerGrainLayer(uv, %3 * 1.56, 1.91, 7.0, %4);\n"
@@ -230,9 +332,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "uv_scroll" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString speedX = floatLiteral(parameterFloat(effect, *definition, "speed_x"));
-            const QString speedY = floatLiteral(parameterFloat(effect, *definition, "speed_y"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString speedX = parameterExpr(project, effect, *definition, "speed_x");
+            const QString speedY = parameterExpr(project, effect, *definition, "speed_y");
             out += QString("    // %1\n"
                            "    float2 %2_scrollUv = frac(uv + float2(%3, %4) * t);\n"
                            "    float3 %2_scrollBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
@@ -242,9 +344,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "wave_ripple" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString frequency = floatLiteral(parameterFloat(effect, *definition, "frequency"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString frequency = parameterExpr(project, effect, *definition, "frequency");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             out += QString("    // %1\n"
                            "    float2 %2_rippleP = uv - 0.5;\n"
                            "    float %2_rippleD = max(length(%2_rippleP), 0.0001);\n"
@@ -257,8 +359,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "flicker" && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             out += QString("    // %1\n"
                            "    float %2_flicker = BO3BeginnerHash11(floor(t * %3 * 30.0));\n"
                            "    color *= lerp(1.0 - %4, 1.0 + %4, %2_flicker);\n")
@@ -266,8 +368,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "chromatic_aberration" && project.target == Target::PostFx && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n"
                            "    float2 %2_chromaOffset = float2(%3, 0.0);\n"
                            "    float3 %2_chromaBase = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv)).rgb);\n"
@@ -280,8 +382,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "edge_glow" && project.target == Target::Material)
         {
             const QColor glowColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString power = floatLiteral(parameterFloat(effect, *definition, "power"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString power = parameterExpr(project, effect, *definition, "power");
             out += QString("    // %1\n"
                            "    float %2_rim = pow(1.0 - saturate(dot(surfaceNormal, surfaceViewDir)), %3);\n"
                            "    color += %4 * (%2_rim * %5);\n")
@@ -290,16 +392,16 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "emission" && project.target == Target::Material)
         {
             const QColor emissionColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n    color += %2 * %3;\n")
                 .arg(definition->name, colorLiteral(emissionColor), strength);
         }
         else if(effect.typeId == "dissolve" && project.target == Target::Material)
         {
             const QColor edgeColor = parameterColor(effect, *definition, "edge_color");
-            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString edgeWidth = floatLiteral(parameterFloat(effect, *definition, "edge_width"));
+            const QString threshold = parameterExpr(project, effect, *definition, "amount");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString edgeWidth = parameterExpr(project, effect, *definition, "edge_width");
             out += QString("    // %1\n"
                            "    float %2_dissolveNoise = BO3BeginnerHash31(floor(surfacePosition * (0.01 * %3)));\n"
                            "    float %2_dissolveEdge = 1.0 - smoothstep(%4, min(%4 + %5, 1.0), %2_dissolveNoise);\n"
@@ -311,7 +413,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor bottom = parameterColor(effect, *definition, "bottom_color");
             const QColor top = parameterColor(effect, *definition, "top_color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n"
                            "    float3 %2_gradient = lerp(%3, %4, saturate(beginnerVertical));\n"
                            "    color = lerp(color, color * (%2_gradient * 2.0), %5);\n")
@@ -320,28 +422,40 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "cartoon_outlines" && project.target == Target::PostFx && hasUv)
         {
             const QColor outlineColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString thickness = floatLiteral(parameterFloat(effect, *definition, "thickness"));
-            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "depth_threshold"));
-            const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
-            const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail_edges"));
-            const QString celAmount = floatLiteral(parameterFloat(effect, *definition, "cel_amount"));
-            out += QString("    // %1 - Float-Z world silhouettes with viewmodel/depth-hack rejection plus optional image-detail ink\n"
+            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString threshold = parameterExpr(project, effect, *definition, "depth_threshold");
+            const QString levels = parameterExpr(project, effect, *definition, "levels");
+            const QString detail = parameterExpr(project, effect, *definition, "detail_edges");
+            const QString celAmount = parameterExpr(project, effect, *definition, "cel_amount");
+            out += QString("    // %1 - Float-Z world silhouettes + explicit viewmodel/world/everything targeting\n"
+                           "    float3 %2_baseColor = color;\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw * max(%3, 0.5);\n"
                            "    float2 %2_diag = %2_texel * 0.75;\n"
-                           "    float %2_d0 = BO3BeginnerSampleWorldDepth(uv + float2(-%2_diag.x, %2_diag.y));\n"
-                           "    float %2_d1 = BO3BeginnerSampleWorldDepth(uv + float2( %2_diag.x,-%2_diag.y));\n"
-                           "    float %2_d2 = BO3BeginnerSampleWorldDepth(uv + float2( %2_diag.x, %2_diag.y));\n"
-                           "    float %2_d3 = BO3BeginnerSampleWorldDepth(uv + float2(-%2_diag.x,-%2_diag.y));\n"
-                           "    float %2_valid0 = step(0.0001, %2_d0) * step(0.0001, %2_d1);\n"
-                           "    float %2_valid1 = step(0.0001, %2_d2) * step(0.0001, %2_d3);\n"
-                           "    float %2_rel0 = abs(%2_d1 - %2_d0) / max(min(%2_d0, %2_d1), 1.0);\n"
-                           "    float %2_rel1 = abs(%2_d3 - %2_d2) / max(min(%2_d2, %2_d3), 1.0);\n"
-                           "    %2_rel0 *= %2_valid0;\n"
-                           "    %2_rel1 *= %2_valid1;\n"
-                           "    float %2_depthMagnitude = max(%2_rel0, %2_rel1);\n"
-                           "    float %2_depthThreshold = max(0.0025, %4 * 0.004);\n"
-                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.72, %2_depthThreshold * 1.36, %2_depthMagnitude);\n"
+                           "    float %2_centerRaw = BO3BeginnerSampleRawDepthPoint(uv);\n"
+                           "    float %2_targetMask = BO3BeginnerTargetMask(%2_centerRaw, %4);\n"
+                           "    float %2_dC = BO3BeginnerSampleWorldDepth(uv);\n"
+                           "    float %2_dL = BO3BeginnerSampleWorldDepth(uv - float2(%2_diag.x,0.0));\n"
+                           "    float %2_dR = BO3BeginnerSampleWorldDepth(uv + float2(%2_diag.x,0.0));\n"
+                           "    float %2_dU = BO3BeginnerSampleWorldDepth(uv - float2(0.0,%2_diag.y));\n"
+                           "    float %2_dD = BO3BeginnerSampleWorldDepth(uv + float2(0.0,%2_diag.y));\n"
+                           "    float %2_validX = step(0.0001,%2_dC) * step(0.0001,%2_dL) * step(0.0001,%2_dR);\n"
+                           "    float %2_validY = step(0.0001,%2_dC) * step(0.0001,%2_dU) * step(0.0001,%2_dD);\n"
+                           "    float %2_logC = log2(max(%2_dC,1.0));\n"
+                           "    float %2_logL = log2(max(%2_dL,1.0)); float %2_logR = log2(max(%2_dR,1.0));\n"
+                           "    float %2_logU = log2(max(%2_dU,1.0)); float %2_logD = log2(max(%2_dD,1.0));\n"
+                           "    float %2_curveX = abs((%2_logR-%2_logC)-(%2_logC-%2_logL));\n"
+                           "    float %2_curveY = abs((%2_logD-%2_logC)-(%2_logC-%2_logU));\n"
+                           "    float %2_depthMagnitude = max(%2_curveX*%2_validX, %2_curveY*%2_validY);\n"
+                           "    float %2_depthThreshold = max(0.0008, %5 * 0.0008);\n"
+                           "    float %2_depthEdge = smoothstep(%2_depthThreshold * 0.72, %2_depthThreshold * 1.55, %2_depthMagnitude);\n"
+                           "    float %2_vm = BO3BeginnerViewmodelMask(%2_centerRaw);\n"
+                           "    float %2_vmL = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(%2_texel.x,0.0)));\n"
+                           "    float %2_vmR = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(%2_texel.x,0.0)));\n"
+                           "    float %2_vmU = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv - float2(0.0,%2_texel.y)));\n"
+                           "    float %2_vmD = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv + float2(0.0,%2_texel.y)));\n"
+                           "    float %2_vmBoundary = max(max(abs(%2_vm-%2_vmL),abs(%2_vm-%2_vmR)),max(abs(%2_vm-%2_vmU),abs(%2_vm-%2_vmD)));\n"
                            "    float3 %2_sceneL = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneR = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_texel.x,0.0))).rgb);\n"
                            "    float3 %2_sceneU = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv - float2(0.0,%2_texel.y))).rgb);\n"
@@ -349,21 +463,23 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float3 %2_lumaWeights = float3(0.299,0.587,0.114);\n"
                            "    float %2_gx = dot(%2_sceneR-%2_sceneL, %2_lumaWeights);\n"
                            "    float %2_gy = dot(%2_sceneD-%2_sceneU, %2_lumaWeights);\n"
-                           "    float %2_detailEdge = smoothstep(0.045, 0.145, length(float2(%2_gx,%2_gy))) * %5;\n"
-                           "    float %2_edge = saturate(max(%2_depthEdge, %2_detailEdge));\n"
-                           "    float %2_steps = max(2.0, round(%6));\n"
+                           "    float %2_detailEdge = smoothstep(0.045, 0.145, length(float2(%2_gx,%2_gy))) * %6;\n"
+                           "    float %2_edge = saturate(max(max(%2_depthEdge, %2_detailEdge), %2_vmBoundary));\n"
+                           "    float %2_steps = max(2.0, round(%7));\n"
                            "    float %2_luma = max(dot(color, %2_lumaWeights), 0.0001);\n"
                            "    float %2_qLuma = floor(saturate(%2_luma) * (%2_steps - 1.0) + 0.5) / (%2_steps - 1.0);\n"
                            "    float3 %2_toon = color * (%2_qLuma / %2_luma);\n"
-                           "    color = lerp(color, %2_toon, %7);\n"
-                           "    color = lerp(color, %8, saturate(%2_edge * %9));\n")
-                .arg(definition->name, tag, thickness, threshold, detail, levels, celAmount, colorLiteral(outlineColor), strength);
+                           "    float3 %2_effected = lerp(color, %2_toon, %8);\n"
+                           "    %2_effected = lerp(%2_effected, %9, saturate(%2_edge * %10));\n"
+                           "    color = lerp(%2_baseColor, %2_effected, %2_targetMask);\n")
+                .arg(definition->name, tag, thickness, targetScope, threshold, detail, levels,
+                     celAmount, colorLiteral(outlineColor), strength);
         }
         else if(effect.typeId == "ambient_occlusion" && project.target == Target::PostFx && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
-            const QString bias = floatLiteral(parameterFloat(effect, *definition, "bias"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString radius = parameterExpr(project, effect, *definition, "radius");
+            const QString bias = parameterExpr(project, effect, *definition, "bias");
             out += QString("    // %1 - 12-tap opposing-pair Float-Z SSAO/contact shading\n"
                            "    float %2_rawCenter = BO3BeginnerSampleRawDepthPoint(uv);\n"
                            "    float %2_worldMask = %2_rawCenter < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? 1.0 : 0.0;\n"
@@ -400,10 +516,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "depth_fog" && project.target == Target::PostFx && hasUv)
         {
             const QColor fogColor = parameterColor(effect, *definition, "color");
-            const QString startControl = floatLiteral(parameterFloat(effect, *definition, "start"));
-            const QString endControl = floatLiteral(parameterFloat(effect, *definition, "end"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString falloff = floatLiteral(parameterFloat(effect, *definition, "falloff"));
+            const QString startControl = parameterExpr(project, effect, *definition, "start");
+            const QString endControl = parameterExpr(project, effect, *definition, "end");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString falloff = parameterExpr(project, effect, *definition, "falloff");
             out += QString("    // %1 - true linear Float-Z distance fog\n"
                            "    float %2_rawDepth = BO3BeginnerSampleRawDepthPoint(uv);\n"
                            "    float %2_worldDepth = %2_rawDepth < BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT ? BO3BeginnerLinearDepth(%2_rawDepth) : -1.0;\n"
@@ -419,8 +535,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
             const QColor highlightColor = parameterColor(effect, *definition, "highlight_color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString contrast = floatLiteral(parameterFloat(effect, *definition, "contrast"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString contrast = parameterExpr(project, effect, *definition, "contrast");
             out += QString("    // %1\n"
                            "    float %2_luma = saturate(dot(saturate(color), float3(0.2126, 0.7152, 0.0722)));\n"
                            "    float %2_t = saturate((%2_luma - 0.5) * %3 + 0.5);\n"
@@ -430,9 +546,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "luminance_sharpness" && project.target == Target::PostFx && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
-            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "threshold"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString radius = parameterExpr(project, effect, *definition, "radius");
+            const QString threshold = parameterExpr(project, effect, *definition, "threshold");
             out += QString("    // %1 - luminance-only detail enhancement that scales RGB together\n"
                            "    float2 %2_step = PostFx_GetRenderTargetSize().zw * max(%3,0.5);\n"
                            "    float3 %2_n = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,-%2_step.y))).rgb);\n"
@@ -456,8 +572,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "posterize")
         {
-            const QString levels = floatLiteral(parameterFloat(effect, *definition, "levels"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString levels = parameterExpr(project, effect, *definition, "levels");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n"
                            "    float %2_levels = max(2.0, round(%3));\n"
                            "    float3 %2_poster = floor(saturate(color) * (%2_levels - 1.0) + 0.5) / (%2_levels - 1.0);\n"
@@ -466,9 +582,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "fisheye" && project.target == Target::PostFx && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString zoom = floatLiteral(parameterFloat(effect, *definition, "zoom"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString zoom = parameterExpr(project, effect, *definition, "zoom");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1 - signed normalized radial lens curve\n"
                            "    float2 %2_center = float2(0.5,0.5);\n"
                            "    float2 %2_delta = uv - %2_center;\n"
@@ -495,11 +611,11 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "paint_strokes" && project.target == Target::PostFx && hasUv)
         {
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString smear = floatLiteral(parameterFloat(effect, *definition, "smear"));
-            const QString bend = floatLiteral(parameterFloat(effect, *definition, "bend"));
-            const QString detail = floatLiteral(parameterFloat(effect, *definition, "detail"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString smear = parameterExpr(project, effect, *definition, "smear");
+            const QString bend = parameterExpr(project, effect, *definition, "bend");
+            const QString detail = parameterExpr(project, effect, *definition, "detail");
             out += QString("    // %1 - gradient-aligned brush strokes with jittered multi-scale cells\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
@@ -537,8 +653,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv)
         {
             const QColor splatColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
             out += QString("    // %1\n"
                            "    float2 %2_p = uv * %3;\n"
                            "    float2 %2_cell = floor(%2_p);\n"
@@ -562,10 +678,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "water_distortion" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n"
                            "    float2 %2_wave = float2(\n"
                            "        sin((uv.y * %3 + t * %4) * 6.2831853) + cos((uv.y * (%3 * 0.47) - t * %4 * 0.6) * 6.2831853),\n"
@@ -577,8 +693,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "psx_dithering" && project.target == Target::PostFx && hasUv)
         {
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString precision = floatLiteral(parameterFloat(effect, *definition, "color_precision"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString precision = parameterExpr(project, effect, *definition, "color_precision");
             out += QString("    // %1 - ordered 4x4 screen-space dithering\n"
                            "    int %2_dx = ((int)input.position.x) & 3;\n"
                            "    int %2_dy = ((int)input.position.y) & 3;\n"
@@ -592,9 +708,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "sharpness" && project.target == Target::PostFx && hasUv)
         {
-            const QString amount = floatLiteral(parameterFloat(effect, *definition, "amount"));
-            const QString threshold = floatLiteral(parameterFloat(effect, *definition, "threshold"));
-            const QString radius = floatLiteral(parameterFloat(effect, *definition, "radius"));
+            const QString amount = parameterExpr(project, effect, *definition, "amount");
+            const QString threshold = parameterExpr(project, effect, *definition, "threshold");
+            const QString radius = parameterExpr(project, effect, *definition, "radius");
             out += QString("    // %1 - edge-aware 8-neighbor sharpen\n"
                            "    float2 %2_step = PostFx_GetRenderTargetSize().zw * %3;\n"
                            "    float3 %2_c1 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,-%2_step.y))).rgb);\n"
@@ -617,8 +733,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "pixel_resolution" && project.target == Target::PostFx && hasUv)
         {
-            const QString width = floatLiteral(parameterFloat(effect, *definition, "width"));
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
+            const QString width = parameterExpr(project, effect, *definition, "width");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
             out += QString("    // %1\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
                            "    float2 %2_virtual = float2(%3, max(1.0, %3 * %2_rt.y / max(%2_rt.x,1.0)));\n"
@@ -629,11 +745,11 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "vhs_tape" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString jitter = floatLiteral(parameterFloat(effect, *definition, "jitter"));
-            const QString chroma = floatLiteral(parameterFloat(effect, *definition, "chroma"));
-            const QString tracking = floatLiteral(parameterFloat(effect, *definition, "tracking"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString jitter = parameterExpr(project, effect, *definition, "jitter");
+            const QString chroma = parameterExpr(project, effect, *definition, "chroma");
+            const QString tracking = parameterExpr(project, effect, *definition, "tracking");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
             out += QString("    // %1 - row jitter, tracking tear and analog color separation\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
@@ -658,9 +774,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         }
         else if(effect.typeId == "vhs_dropouts" && project.target == Target::PostFx && hasUv && hasTime)
         {
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
-            const QString shift = floatLiteral(parameterFloat(effect, *definition, "shift"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString density = parameterExpr(project, effect, *definition, "density");
+            const QString shift = parameterExpr(project, effect, *definition, "shift");
             out += QString("    // %1 - intermittent damaged-tape dropouts\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
                            "    float %2_frame = floor(t * 24.0);\n"
@@ -677,12 +793,12 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_sun" && project.target == Target::Sky)
         {
             const QColor sunColor = parameterColor(effect, *definition, "color");
-            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
-            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
-            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
-            const QString glow = floatLiteral(parameterFloat(effect, *definition, "glow"));
-            const QString atmosphere = floatLiteral(parameterFloat(effect, *definition, "atmosphere"));
-            const QString haze = floatLiteral(parameterFloat(effect, *definition, "haze"));
+            const QString size = parameterExpr(project, effect, *definition, "size");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString glow = parameterExpr(project, effect, *definition, "glow");
+            const QString atmosphere = parameterExpr(project, effect, *definition, "atmosphere");
+            const QString haze = parameterExpr(project, effect, *definition, "haze");
             out += QString("    // %1 - compact BO3 day/night atmosphere converted from the supplied Shadertoy reference\n"
                            "    float %2_mu = clamp(dot(d, beginnerSunDir), -1.0, 1.0);\n"
                            "    float %2_mu2 = %2_mu * %2_mu;\n"
@@ -725,12 +841,12 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_moon" && project.target == Target::Sky)
         {
             const QColor moonColor = parameterColor(effect, *definition, "color");
-            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
-            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
-            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
-            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
-            const QString halo = floatLiteral(parameterFloat(effect, *definition, "halo"));
-            const QString phase = floatLiteral(parameterFloat(effect, *definition, "phase"));
+            const QString azimuth = parameterExpr(project, effect, *definition, "azimuth");
+            const QString height = parameterExpr(project, effect, *definition, "height");
+            const QString size = parameterExpr(project, effect, *definition, "size");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString halo = parameterExpr(project, effect, *definition, "halo");
+            const QString phase = parameterExpr(project, effect, *definition, "phase");
             out += QString("    // %1 - independently positioned moon disc with crescent phase and halo\n"
                            "    float %2_az = %3 * 6.2831853;\n"
                            "    float %2_h = clamp(%4, -0.98, 0.98);\n"
@@ -749,8 +865,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_haze" && project.target == Target::Sky)
         {
             const QColor hazeColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString width = floatLiteral(parameterFloat(effect, *definition, "width"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString width = parameterExpr(project, effect, *definition, "width");
             out += QString("    // %1\n"
                            "    float %2_haze = pow(saturate(1.0 - abs(d.z)), %3);\n"
                            "    color = lerp(color, %4, saturate(%2_haze * %5));\n")
@@ -759,10 +875,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_stars" && project.target == Target::Sky)
         {
             const QColor starColor = parameterColor(effect, *definition, "color");
-            const QString density = floatLiteral(parameterFloat(effect, *definition, "density"));
-            const QString size = floatLiteral(parameterFloat(effect, *definition, "size"));
-            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
-            const QString twinkle = floatLiteral(parameterFloat(effect, *definition, "twinkle"));
+            const QString density = parameterExpr(project, effect, *definition, "density");
+            const QString size = parameterExpr(project, effect, *definition, "size");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString twinkle = parameterExpr(project, effect, *definition, "twinkle");
             out += QString("    // %1 - direction-space star field\n"
                            "    float3 %2_sp = d * %3;\n"
                            "    float3 %2_cell = floor(%2_sp);\n"
@@ -776,14 +892,14 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "sky_clouds" && project.target == Target::Sky)
         {
             const QColor cloudColor = parameterColor(effect, *definition, "color");
-            const QString opacity = floatLiteral(parameterFloat(effect, *definition, "opacity"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
-            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
-            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
-            const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
+            const QString opacity = parameterExpr(project, effect, *definition, "opacity");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString coverage = parameterExpr(project, effect, *definition, "coverage");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString height = parameterExpr(project, effect, *definition, "height");
+            const QString direction = parameterExpr(project, effect, *definition, "direction");
             out += QString("    // %1 - perspective cloud sheet with directional wind and sun response\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
                            "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
@@ -817,21 +933,21 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor shadowColor = parameterColor(effect, *definition, "shadow_color");
             const QColor lightColor = parameterColor(effect, *definition, "light_color");
-            const QString opacity = floatLiteral(parameterFloat(effect, *definition, "opacity"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString coverage = floatLiteral(parameterFloat(effect, *definition, "coverage"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            const QString brightness = floatLiteral(parameterFloat(effect, *definition, "brightness"));
-            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
-            const QString direction = floatLiteral(parameterFloat(effect, *definition, "direction"));
-            const QString thickness = floatLiteral(parameterFloat(effect, *definition, "thickness"));
-            const QString detailAmount = floatLiteral(parameterFloat(effect, *definition, "detail"));
-            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
-            const QString sunStrength = floatLiteral(parameterFloat(effect, *definition, "sun_strength"));
-            const QString silverLining = floatLiteral(parameterFloat(effect, *definition, "silver_lining"));
-            const QString horizonFade = floatLiteral(parameterFloat(effect, *definition, "horizon_fade"));
-            const QString quality = floatLiteral(parameterFloat(effect, *definition, "quality"));
-            out += QString("    // %1 - texture-backed 3D volumetric raymarch using RGBA noise + blue-noise jitter\n"
+            const QString opacity = parameterExpr(project, effect, *definition, "opacity");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString coverage = parameterExpr(project, effect, *definition, "coverage");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString height = parameterExpr(project, effect, *definition, "height");
+            const QString direction = parameterExpr(project, effect, *definition, "direction");
+            const QString thickness = parameterExpr(project, effect, *definition, "thickness");
+            const QString detailAmount = parameterExpr(project, effect, *definition, "detail");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
+            const QString sunStrength = parameterExpr(project, effect, *definition, "sun_strength");
+            const QString silverLining = parameterExpr(project, effect, *definition, "silver_lining");
+            const QString horizonFade = parameterExpr(project, effect, *definition, "horizon_fade");
+            const QString quality = parameterExpr(project, effect, *definition, "quality");
+            out += QString("    // %1 - procedural 3D volumetric raymarch with density-aware stepping and directional sunlight\n"
                            "    float %2_windAngle = %9 * 0.01745329252;\n"
                            "    float2 %2_wind = float2(cos(%2_windAngle), sin(%2_windAngle));\n"
                            "    float %2_layerBase = max(0.18, 0.56 + %8 * 0.90);\n"
@@ -842,8 +958,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float %2_path = max(%2_exit - %2_enter, 0.0);\n"
                            "    int %2_steps = clamp((int)round(%18), 16, 64);\n"
                            "    float %2_stepLen = %2_path / max((float)%2_steps, 1.0);\n"
-                           "    float2 %2_blueUv = frac(d.xy * 0.37 + d.yz * 0.19 + float2(0.413, 0.173));\n"
-                           "    float %2_jitter = iChannel1.SampleLevel(glslSampler1, %2_blueUv, 0.0).r;\n"
+                           "    float %2_jitter = BO3BeginnerCloudHash3(floor((d * 0.5 + 0.5) * 4096.0) + float3(17.0,31.0,47.0));\n"
                            "    float %2_marchT = %2_enter + %2_stepLen * %2_jitter;\n"
                            "    float4 %2_accum = float4(0.0,0.0,0.0,0.0);\n"
                            "    [loop] for(int %2_i=0; %2_i<64; ++%2_i)\n"
@@ -870,7 +985,8 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "            %2_accum.rgb += %2_sampleColor * (%2_sampleAlpha * %2_remain);\n"
                            "            %2_accum.a += %2_sampleAlpha * %2_remain;\n"
                            "        }\n"
-                           "        %2_marchT += %2_stepLen;\n"
+                           "        float %2_adaptive = lerp(2.35, 0.68, saturate(%2_density * 3.0));\n"
+                           "        %2_marchT += %2_stepLen * %2_adaptive;\n"
                            "    }\n"
                            "    color = color * (1.0 - %2_accum.a) + %2_accum.rgb;\n")
                 .arg(definition->name)
@@ -896,10 +1012,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor nearColor = parameterColor(effect, *definition, "near_color");
             const QColor farColor = parameterColor(effect, *definition, "far_color");
-            const QString height = floatLiteral(parameterFloat(effect, *definition, "height"));
-            const QString roughness = floatLiteral(parameterFloat(effect, *definition, "roughness"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString softness = floatLiteral(parameterFloat(effect, *definition, "softness"));
+            const QString height = parameterExpr(project, effect, *definition, "height");
+            const QString roughness = parameterExpr(project, effect, *definition, "roughness");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString softness = parameterExpr(project, effect, *definition, "softness");
             out += QString("    // %1 - three atmospheric mountain layers with broad mass + restrained ridge detail\n"
                            "    float2 %2_hd = normalize(d.xy + float2(1e-6, 0.0));\n"
                            "    float %2_farBroad = BO3BeginnerFbm3(float3(%2_hd * (%3 * 0.31), 1.35));\n"
@@ -944,10 +1060,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor colorA = parameterColor(effect, *definition, "color_a");
             const QColor colorB = parameterColor(effect, *definition, "color_b");
-            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString speed = floatLiteral(parameterFloat(effect, *definition, "speed"));
-            const QString azimuth = floatLiteral(parameterFloat(effect, *definition, "azimuth"));
+            const QString intensity = parameterExpr(project, effect, *definition, "intensity");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString speed = parameterExpr(project, effect, *definition, "speed");
+            const QString azimuth = parameterExpr(project, effect, *definition, "azimuth");
             out += QString("    // %1 - compact layered aurora volume inspired by BO3 direction-space sky references\n"
                            "    float %2_az = %3 * 6.2831853;\n"
                            "    float2 %2_xy = BO3BeginnerRotate2(d.xy, -%2_az);\n"
@@ -976,9 +1092,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QColor colorA = parameterColor(effect, *definition, "color_a");
             const QColor colorB = parameterColor(effect, *definition, "color_b");
-            const QString intensity = floatLiteral(parameterFloat(effect, *definition, "intensity"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString drift = floatLiteral(parameterFloat(effect, *definition, "drift"));
+            const QString intensity = parameterExpr(project, effect, *definition, "intensity");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString drift = parameterExpr(project, effect, *definition, "drift");
             out += QString("    // %1 - direction-space folded fractal regions\n"
                            "    float3 %2_drift = float3(sin(t * 0.071), sin(t * 0.053 + 1.7), cos(t * 0.043 - 0.8)) * %3;\n"
                            "    float3 %2_np = d * %4 + %2_drift;\n"
@@ -1000,9 +1116,9 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         else if(effect.typeId == "grid_rings" && hasUv)
         {
             const QColor patternColor = parameterColor(effect, *definition, "color");
-            const QString strength = floatLiteral(parameterFloat(effect, *definition, "strength"));
-            const QString scale = floatLiteral(parameterFloat(effect, *definition, "scale"));
-            const QString rings = floatLiteral(parameterFloat(effect, *definition, "rings"));
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString rings = parameterExpr(project, effect, *definition, "rings");
             if(project.target == Target::Material)
             {
                 out += QString("    // %1 (seamless local 3D pattern)\n"
@@ -1028,6 +1144,13 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                     .arg(definition->name, tag, scale, rings, colorLiteral(patternColor), strength);
             }
         }
+
+        if(!postFxTargetScope.isEmpty())
+        {
+            out += QString("    float %1_scopeMask = BO3BeginnerTargetMask(BO3BeginnerSampleRawDepthPoint(uv), %2);\n"
+                           "    color = lerp(%1_scopeBefore, color, %1_scopeMask);\n")
+                .arg(tag, postFxTargetScope);
+        }
     }
     return out;
 }
@@ -1046,7 +1169,28 @@ const Effect* firstEnabledEffect(const Project& project, const QString& id)
     return nullptr;
 }
 
-QString optionalHelpers(const Project& project)
+bool beginnerEffectRequiresSceneDepth(const QString& typeId)
+{
+    return typeId == QStringLiteral("cartoon_outlines") ||
+           typeId == QStringLiteral("ambient_occlusion") ||
+           typeId == QStringLiteral("depth_fog");
+}
+
+bool projectRequiresSceneDepth(const Project& project)
+{
+    if(project.target != Target::PostFx) return false;
+    for(const Effect& effect : project.effects)
+    {
+        if(!effect.enabled) continue;
+        const EffectDefinition* definition = effectDefinition(effect.typeId);
+        if(!definition || !supportsTarget(*definition, Target::PostFx)) continue;
+        if(beginnerEffectRequiresSceneDepth(effect.typeId)) return true;
+        if(parameterFloat(effect, *definition, QStringLiteral("target_scope")) >= 0.5) return true;
+    }
+    return false;
+}
+
+QString optionalHelpers(const Project& project, bool forceSceneDepth = false)
 {
     QString out;
     const bool needsHash21 =
@@ -1089,10 +1233,7 @@ float BO3BeginnerHash31(float3 p)
 )HLSL");
     }
 
-    const bool needsSceneDepth = project.target == Target::PostFx &&
-                                 (projectUsesEffect(project, "cartoon_outlines") ||
-                                  projectUsesEffect(project, "ambient_occlusion") ||
-                                  projectUsesEffect(project, "depth_fog"));
+    const bool needsSceneDepth = forceSceneDepth || projectRequiresSceneDepth(project);
     if(needsSceneDepth)
     {
         out += QStringLiteral(R"HLSL(
@@ -1117,6 +1258,21 @@ float BO3BeginnerSampleWorldDepth(float2 sampleUv)
     if(rawDepth >= BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT)
         return -1.0;
     return BO3BeginnerLinearDepth(rawDepth);
+}
+
+float BO3BeginnerViewmodelMask(float rawDepth)
+{
+    return step(BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT, rawDepth);
+}
+
+float BO3BeginnerTargetMask(float rawDepth, float targetMode)
+{
+    float viewmodel = BO3BeginnerViewmodelMask(rawDepth);
+    float world = 1.0 - viewmodel;
+    float everything = 1.0 - step(0.5, targetMode);
+    float worldOnly = step(0.5, targetMode) * (1.0 - step(1.5, targetMode));
+    float viewmodelOnly = step(1.5, targetMode);
+    return saturate(everything + worldOnly * world + viewmodelOnly * viewmodel);
 }
 
 float BO3BeginnerDepthControlToWorld(float control)
@@ -1205,24 +1361,54 @@ static const float4x4 BO3BeginnerPsxDither = float4x4(
     if(projectUsesEffect(project, "sky_realistic_clouds"))
     {
         out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_CLOUD_TEXTURES: iChannel0=RGBA Noise Medium; iChannel1=Blue Noise
-Texture2D<float4> iChannel0 : register(t2);
-Texture2D<float4> iChannel1 : register(t3);
-SamplerState glslSampler0 : register(s2);
-SamplerState glslSampler1 : register(s3);
-
-float BO3BeginnerCloudNoise3(float3 p)
+// BO3_BEGINNER_VOLUMETRIC_CLOUDS: procedural 3D FBM raymarch, no external texture dependency.
+// Original BO3 HLSL cloud volume: bounded layer, density-aware stepping,
+// front-to-back compositing and directional lighting.
+float BO3BeginnerCloudHash3(float3 p)
 {
-    // Original texture-backed pseudo-3D noise. The Z coordinate continuously
-    // shears the 2D lookup and blends independent RGBA channels, avoiding a
-    // flat projected cloud sheet while keeping the sample count predictable.
-    float2 uv = p.xy * 0.0078125 + float2(p.z * 0.0173, p.z * 0.0117);
-    float4 n = iChannel0.SampleLevel(glslSampler0, frac(uv), 0.0);
-    float z0 = frac(p.z * 0.137 + 0.19);
-    float z1 = frac(p.z * 0.071 + 0.63);
-    float a = lerp(n.r, n.g, z0);
-    float b = lerp(n.b, n.a, z1);
-    return lerp(a, b, 0.38 + 0.24 * sin(p.z * 0.31));
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float BO3BeginnerCloudValueNoise(float3 x)
+{
+    float3 p = floor(x);
+    float3 f = frac(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = BO3BeginnerCloudHash3(p + float3(0,0,0));
+    float n100 = BO3BeginnerCloudHash3(p + float3(1,0,0));
+    float n010 = BO3BeginnerCloudHash3(p + float3(0,1,0));
+    float n110 = BO3BeginnerCloudHash3(p + float3(1,1,0));
+    float n001 = BO3BeginnerCloudHash3(p + float3(0,0,1));
+    float n101 = BO3BeginnerCloudHash3(p + float3(1,0,1));
+    float n011 = BO3BeginnerCloudHash3(p + float3(0,1,1));
+    float n111 = BO3BeginnerCloudHash3(p + float3(1,1,1));
+    float n00 = lerp(n000, n100, f.x);
+    float n10 = lerp(n010, n110, f.x);
+    float n01 = lerp(n001, n101, f.x);
+    float n11 = lerp(n011, n111, f.x);
+    return lerp(lerp(n00, n10, f.y), lerp(n01, n11, f.y), f.z);
+}
+
+float BO3BeginnerCloudSuperNoise(float3 p)
+{
+    return 0.5 * (BO3BeginnerCloudValueNoise(p) + BO3BeginnerCloudValueNoise(p + 10.5));
+}
+
+float BO3BeginnerCloudFBM(float3 p, float detailAmount)
+{
+    float sum = 0.0;
+    float weight = 0.5;
+    [unroll] for(int i = 0; i < 5; ++i)
+    {
+        float ridge = abs(0.5 - BO3BeginnerCloudSuperNoise(p)) * 2.0;
+        float octaveEnable = i < 2 ? 1.0 : saturate(detailAmount * 1.7 - (float(i) - 2.0) * 0.28);
+        sum += ridge * weight * octaveEnable;
+        p = p * 2.9 + float3(1.31, -0.73, 0.47);
+        weight *= 0.60;
+    }
+    return sum;
 }
 
 float BO3BeginnerCloudDensity(float3 p, float layerBase, float layerThickness,
@@ -1230,13 +1416,10 @@ float BO3BeginnerCloudDensity(float3 p, float layerBase, float layerThickness,
                               float edgeSoftness)
 {
     float h = saturate((p.z - layerBase) / max(layerThickness, 0.001));
-    float vertical = smoothstep(0.0, 0.16, h) * (1.0 - smoothstep(0.68, 1.0, h));
-    float3 q = p * float3(formationScale * 0.34, formationScale * 0.34, formationScale * 0.58);
-    float broad = BO3BeginnerCloudNoise3(q * 0.72 + float3(7.3, -2.1, 4.7));
-    float detail = BO3BeginnerCloudNoise3(q * 1.83 + float3(-3.9, 8.2, 1.6));
-    float micro = BO3BeginnerCloudNoise3(q * 3.27 + float3(11.4, 5.6, -6.8));
-    float field = broad * 0.70 + detail * 0.36 - (1.0 - micro) * (0.08 + 0.24 * detailAmount);
-    float threshold = lerp(0.79, 0.33, saturate(coverage));
+    float vertical = saturate(1.0 - abs(h * 2.0 - 1.0));
+    vertical = smoothstep(0.0, 0.24, vertical);
+    float field = BO3BeginnerCloudFBM(p * max(formationScale, 0.05) * 0.72, detailAmount);
+    float threshold = lerp(0.88, 0.30, saturate(coverage));
     float softness = max(0.015, edgeSoftness);
     float density = smoothstep(threshold - softness, threshold + softness, field);
     return density * vertical;
@@ -1365,19 +1548,85 @@ QString effectStackMarker(const Project& project)
     return names.isEmpty() ? QStringLiteral("None") : names.join(" -> ");
 }
 
-QString generatePostFx(const Project& project)
+QString generatePostFx(const Project& project, bool forceSceneDepth = false)
 {
-    const QString helpers = optionalHelpers(project);
+    const bool needsSceneDepth = forceSceneDepth || projectRequiresSceneDepth(project);
+    const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project, forceSceneDepth);
     const QString effects = commonEffectCode(project, true, true);
+    // Every Beginner PostFX effect can now be scoped to Everything, World Only
+    // or Viewmodel Only. Keep the diagnostic depth/mask views available even
+    // when the selected effect does not intrinsically use depth (for example a
+    // World Only vignette or Viewmodel Only color grade).
+    bool hasPostFxEffect = false;
+    for(const Effect& effect : project.effects)
+    {
+        if(!effect.enabled) continue;
+        const EffectDefinition* definition = effectDefinition(effect.typeId);
+        if(definition && supportsTarget(*definition, Target::PostFx))
+        {
+            hasPostFxEffect = true;
+            break;
+        }
+    }
+    const QString depthDebug = hasPostFxEffect ? QString(R"HLSL(
+#if BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 1
+    return float4(PostFx_DenormalizeColor(color), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 2
+    float beginnerDebugRaw = BO3BeginnerSampleRawDepthPoint(uv);
+    return float4(PostFx_DenormalizeColor(beginnerDebugRaw.xxx), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 3
+    float beginnerDebugRaw = BO3BeginnerSampleRawDepthPoint(uv);
+    float beginnerDebugWorld = 1.0 - BO3BeginnerViewmodelMask(beginnerDebugRaw);
+    float beginnerDebugLinear = BO3BeginnerLinearDepth(min(beginnerDebugRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugNorm = saturate((log2(max(beginnerDebugLinear, 0.001)) - 3.0) / 10.6) * beginnerDebugWorld;
+    return float4(PostFx_DenormalizeColor(beginnerDebugNorm.xxx), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 4
+    float2 beginnerDebugTexel = PostFx_GetRenderTargetSize().zw;
+    float beginnerDebugC = BO3BeginnerSampleRawDepthPoint(uv);
+    float beginnerDebugVM = BO3BeginnerViewmodelMask(beginnerDebugC);
+    float beginnerDebugCD = BO3BeginnerLinearDepth(min(beginnerDebugC, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugLRaw = BO3BeginnerSampleRawDepthPoint(uv-float2(beginnerDebugTexel.x,0));
+    float beginnerDebugRRaw = BO3BeginnerSampleRawDepthPoint(uv+float2(beginnerDebugTexel.x,0));
+    float beginnerDebugURaw = BO3BeginnerSampleRawDepthPoint(uv-float2(0,beginnerDebugTexel.y));
+    float beginnerDebugDRaw = BO3BeginnerSampleRawDepthPoint(uv+float2(0,beginnerDebugTexel.y));
+    float beginnerDebugVMEdge = max(max(abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugLRaw)),abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugRRaw))),max(abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugURaw)),abs(beginnerDebugVM-BO3BeginnerViewmodelMask(beginnerDebugDRaw))));
+    float beginnerDebugLD = BO3BeginnerLinearDepth(min(beginnerDebugLRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugRD = BO3BeginnerLinearDepth(min(beginnerDebugRRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugUD = BO3BeginnerLinearDepth(min(beginnerDebugURaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugDD = BO3BeginnerLinearDepth(min(beginnerDebugDRaw, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001));
+    float beginnerDebugLogC = log2(max(beginnerDebugCD,1.0));
+    float beginnerDebugLogL = log2(max(beginnerDebugLD,1.0)); float beginnerDebugLogR = log2(max(beginnerDebugRD,1.0));
+    float beginnerDebugLogU = log2(max(beginnerDebugUD,1.0)); float beginnerDebugLogD = log2(max(beginnerDebugDD,1.0));
+    float beginnerDebugCurveX = abs((beginnerDebugLogR-beginnerDebugLogC)-(beginnerDebugLogC-beginnerDebugLogL));
+    float beginnerDebugCurveY = abs((beginnerDebugLogD-beginnerDebugLogC)-(beginnerDebugLogC-beginnerDebugLogU));
+    float beginnerDebugCurvature = max(beginnerDebugCurveX, beginnerDebugCurveY);
+    float beginnerDebugEdge = max(smoothstep(0.002,0.012,beginnerDebugCurvature),beginnerDebugVMEdge);
+    return float4(PostFx_DenormalizeColor(beginnerDebugEdge.xxx), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 5
+    float beginnerDebugMask = BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv));
+    return float4(PostFx_DenormalizeColor(beginnerDebugMask.xxx), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 6
+    float beginnerDebugMask = 1.0 - BO3BeginnerViewmodelMask(BO3BeginnerSampleRawDepthPoint(uv));
+    return float4(PostFx_DenormalizeColor(beginnerDebugMask.xxx), 1.0);
+#elif BO3_BEGINNER_PREVIEW_DEPTH_DEBUG == 7
+    float beginnerDebugMask = BO3BeginnerTargetMask(BO3BeginnerSampleRawDepthPoint(uv), BO3_BEGINNER_PREVIEW_TARGET_SCOPE);
+    return float4(PostFx_DenormalizeColor(beginnerDebugMask.xxx), 1.0);
+#endif
+)HLSL") : QString();
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
 // BO3_BEGINNER_TARGET: POSTFX
 // BO3_BEGINNER_EFFECT_STACK: %1
+#ifndef BO3_BEGINNER_PREVIEW_DEPTH_DEBUG
+#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG 0
+#endif
+#ifndef BO3_BEGINNER_PREVIEW_TARGET_SCOPE
+#define BO3_BEGINNER_PREVIEW_TARGET_SCOPE 0.0
+#endif
 #include "postfx/postfx_common.h"
 
 Texture2D<float4> frameBuffer : register(t0);
-Texture2D<float4> DepthSampler : register(t1);
-SamplerState bilinearClampler : register(s1);
+%5SamplerState bilinearClampler : register(s1);
 
 struct VS_INPUT
 {
@@ -1404,17 +1653,18 @@ float4 ps_main(PS_INPUT input) : SV_Target
     float t = GetTime();
     float beginnerVertical = uv.y;
     float3 color = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, uv).rgb);
-%3
+%3%4
     color = max(color, 0.0);
     return float4(PostFx_DenormalizeColor(color), 1.0);
 }
-)HLSL").arg(effectStackMarker(project), helpers, effects);
+)HLSL").arg(effectStackMarker(project), helpers, depthDebug, effects,
+                 needsSceneDepth ? QStringLiteral("Texture2D<float4> DepthSampler : register(t1);\n") : QString());
 }
 
 QString generateMaterial(const Project& project)
 {
     const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
-    const QString helpers = optionalHelpers(project);
+    const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
@@ -1482,19 +1732,25 @@ QString generateSky(const Project& project)
     const QColor zenith = settingColor(project, "zenithColor", QColor("#102E68"));
     const QColor horizonColor = settingColor(project, "horizonColor", QColor("#E17658"));
     const QColor ground = settingColor(project, "groundColor", QColor("#060B18"));
-    const QString helpers = optionalHelpers(project);
+    const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, false);
 
-    double sunTime = 14.0;
-    double sunAzimuth = 0.12;
-    double sunArcHeight = 0.86;
+    QString sunControlMode = "0.0";
+    QString sunTime = "14.0";
+    QString sunAzimuth = "0.12";
+    QString sunArcHeight = "0.86";
+    QString sunManualAzimuth = "0.62";
+    QString sunManualElevation = "0.32";
     if(const Effect* sun = firstEnabledEffect(project, "sky_sun"))
     {
         if(const EffectDefinition* def = effectDefinition("sky_sun"))
         {
-            sunTime = parameterFloat(*sun, *def, "time_of_day");
-            sunAzimuth = parameterFloat(*sun, *def, "azimuth");
-            sunArcHeight = parameterFloat(*sun, *def, "height");
+            sunControlMode = parameterExpr(project, *sun, *def, "control_mode");
+            sunTime = parameterExpr(project, *sun, *def, "time_of_day");
+            sunAzimuth = parameterExpr(project, *sun, *def, "azimuth");
+            sunArcHeight = parameterExpr(project, *sun, *def, "height");
+            sunManualAzimuth = parameterExpr(project, *sun, *def, "manual_azimuth");
+            sunManualElevation = parameterExpr(project, *sun, *def, "manual_elevation");
         }
     }
 
@@ -1508,11 +1764,11 @@ QString generateSky(const Project& project)
         if(const EffectDefinition* def = effectDefinition("sky_water"))
         {
             const QColor tint = parameterColor(*water, *def, "tint");
-            const QString reflection = floatLiteral(parameterFloat(*water, *def, "reflection"));
-            const QString ripple = floatLiteral(parameterFloat(*water, *def, "ripple"));
-            const QString scale = floatLiteral(parameterFloat(*water, *def, "scale"));
-            const QString speed = floatLiteral(parameterFloat(*water, *def, "speed"));
-            const QString horizonBlend = floatLiteral(parameterFloat(*water, *def, "horizon"));
+            const QString reflection = parameterExpr(project, *water, *def, "reflection");
+            const QString ripple = parameterExpr(project, *water, *def, "ripple");
+            const QString scale = parameterExpr(project, *water, *def, "scale");
+            const QString speed = parameterExpr(project, *water, *def, "speed");
+            const QString horizonBlend = parameterExpr(project, *water, *def, "horizon");
             waterDirectionPrelude = QString(
                 "    float3 rawSkyDirection = normalize(input.skyDirection.xyz);\n"
                 "    float beginnerWaterMask = 1.0 - smoothstep(-%1, %1, rawSkyDirection.z);\n"
@@ -1538,15 +1794,22 @@ QString generateSky(const Project& project)
     }
 
     const QString sharedSun = QString(
-        "    // Shared time-of-day sun direction. Clouds and atmosphere use the same light path.\n"
+        "    // Shared day/night or directly positioned sun. Clouds, atmosphere and water consume this one direction.\n"
         "    float beginnerTimeOfDay = %1;\n"
         "    float beginnerSolarPhase = (beginnerTimeOfDay - 6.0) * (6.28318530718 / 24.0);\n"
-        "    float beginnerSunElevation = sin(beginnerSolarPhase) * %2;\n"
-        "    float beginnerSunAzimuth = %3 * 6.28318530718 + cos(beginnerSolarPhase) * 1.15;\n"
-        "    float beginnerSunHorizontal = sqrt(max(1.0 - beginnerSunElevation * beginnerSunElevation, 0.0));\n"
-        "    float3 beginnerSunDir = normalize(float3(cos(beginnerSunAzimuth) * beginnerSunHorizontal, sin(beginnerSunAzimuth) * beginnerSunHorizontal, beginnerSunElevation));\n"
+        "    float beginnerAutoElevation = sin(beginnerSolarPhase) * %2;\n"
+        "    float beginnerAutoAzimuth = %3 * 6.28318530718 + cos(beginnerSolarPhase) * 1.15;\n"
+        "    float beginnerAutoHorizontal = sqrt(max(1.0 - beginnerAutoElevation * beginnerAutoElevation, 0.0));\n"
+        "    float3 beginnerAutoSunDir = normalize(float3(cos(beginnerAutoAzimuth) * beginnerAutoHorizontal, sin(beginnerAutoAzimuth) * beginnerAutoHorizontal, beginnerAutoElevation));\n"
+        "    float beginnerManualElevation = clamp(%4, -0.999, 0.999);\n"
+        "    float beginnerManualAzimuth = %5 * 6.28318530718;\n"
+        "    float beginnerManualHorizontal = sqrt(max(1.0 - beginnerManualElevation * beginnerManualElevation, 0.0));\n"
+        "    float3 beginnerManualSunDir = normalize(float3(cos(beginnerManualAzimuth) * beginnerManualHorizontal, sin(beginnerManualAzimuth) * beginnerManualHorizontal, beginnerManualElevation));\n"
+        "    float beginnerManualMode = step(0.5, %6);\n"
+        "    float3 beginnerSunDir = normalize(lerp(beginnerAutoSunDir, beginnerManualSunDir, beginnerManualMode));\n"
+        "    float beginnerSunElevation = beginnerSunDir.z;\n"
         "    float beginnerDaylight = smoothstep(-0.10, 0.075, beginnerSunElevation);\n")
-        .arg(floatLiteral(sunTime), floatLiteral(sunArcHeight), floatLiteral(sunAzimuth));
+        .arg(sunTime, sunArcHeight, sunAzimuth, sunManualElevation, sunManualAzimuth, sunControlMode);
 
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
 // BO3_BEGINNER_PROJECT: 1
@@ -1627,7 +1890,7 @@ QString targetDescription(Target target)
         case Target::Material:
             return "Give a BO3 model or surface a custom look. Preview it on a sphere, cube, plane, or your own model.";
         case Target::Sky:
-            return "Create the colors and animated atmosphere around the player. Drag in the preview to look around.";
+            return "Create the environment in a full-frame sky editor. Drag the sun directly or drive it with Time of Day.";
         default:
             return "Change how the game screen looks. Use Preview Image to test the effect on any screenshot.";
     }
@@ -1799,9 +2062,12 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("sky_sun", "Atmospheric Sun / Time", "Move the sun through a full day/night cycle. Its direction drives the sky color, twilight, horizon haze and a soft Rayleigh/Mie-inspired sun instead of a blown-out flat disc.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("color", "Sun Color", "Base daylight color of the sun. Sunrise and sunset warm it automatically.", "#FFF1D2"),
+                   ChoiceParam("control_mode", "Sun Control", "Time of Day follows a day/night arc. Manual Position lets you drag the sun directly in the Sky Editor.", {"Time of Day", "Manual Position"}, 0),
                    FloatParam("time_of_day", "Time of Day", "Move the sun through the day. 6 = sunrise, 12 = noon, 18 = sunset, 0/24 = midnight.", 0.0, 24.0, 0.05, 14.0),
-                   FloatParam("azimuth", "Sun Direction", "Rotate the sun path around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
-                   FloatParam("height", "Sun Arc Height", "Maximum elevation of the sun at midday.", 0.20, 0.98, 0.01, 0.86),
+                   FloatParam("azimuth", "Sun Path Direction", "Rotate the automatic day/night sun path around the horizon. 0 and 1 meet seamlessly.", 0.0, 1.0, 0.01, 0.12),
+                   FloatParam("height", "Sun Arc Height", "Maximum elevation of the automatic sun at midday.", 0.20, 0.98, 0.01, 0.86),
+                   FloatParam("manual_azimuth", "Manual Horizontal", "Direct horizontal sun position used in Manual Position mode. Dragging the Sky Editor updates this value.", 0.0, 1.0, 0.001, 0.62),
+                   FloatParam("manual_elevation", "Manual Height", "Direct sun elevation used in Manual Position mode. -1 is below the horizon; +1 is overhead.", -0.98, 0.98, 0.001, 0.32),
                    FloatParam("size", "Disc Size", "Angular radius of the sun. Realistic values stay small.", 0.002, 0.030, 0.0005, 0.006),
                    FloatParam("softness", "Disc Softness", "Width of the sun-disc edge transition.", 0.0005, 0.012, 0.0005, 0.002),
                    FloatParam("brightness", "Sun Brightness", "Controlled HDR intensity of the sun disc.", 0.0, 6.0, 0.05, 2.4),
@@ -1840,7 +2106,7 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("softness", "Softness", "Feathering around cloud edges.", 0.02, 0.35, 0.01, 0.14),
                    FloatParam("direction", "Wind Direction", "Direction the cloud field travels, in degrees around the horizon.", 0.0, 360.0, 1.0, 25.0),
                    FloatParam("speed", "Wind Speed", "How quickly the procedural cloud field drifts. Negative values reverse it.", -3.0, 3.0, 0.01, 0.22)}),
-        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Raymarch a true texture-backed 3D cloud volume with formation erosion, blue-noise jitter, directional sunlight and controllable quality.", "Sky & Environment",
+        EffectDef("sky_realistic_clouds", "Volumetric Clouds", "Raymarch a true procedural 3D cloud volume with density-aware stepping, directional sunlight and controllable quality.", "Sky & Environment",
                   {Target::Sky},
                   {ColorParam("shadow_color", "Shadow Color", "Color inside the darker cloud cavities.", "#54606D"),
                    ColorParam("light_color", "Light Color", "Color on the brighter parts of the cloud volume.", "#F2F4F6"),
@@ -2204,6 +2470,35 @@ bool projectFromJson(const QJsonObject& object, Project& project, QString& error
     return true;
 }
 
+QString runtimeParameterNameFor(const Project& project, const QString& instanceId, const QString& key)
+{
+    if(key == QStringLiteral("target_scope")) return QString();
+    for(const Effect& effect : project.effects)
+        if(effect.instanceId == instanceId) return runtimeParameterName(project, effect, key);
+    return QString();
+}
+
+QVector<RuntimeParameter> runtimeFloatParameters(const Project& project)
+{
+    QVector<RuntimeParameter> result;
+    for(const Effect& effect : project.effects)
+    {
+        if(!effect.enabled) continue;
+        const EffectDefinition* definition = effectDefinition(effect.typeId);
+        if(!definition || !supportsTarget(*definition, project.target)) continue;
+        for(const ParameterDefinition& parameter : definition->parameters)
+        {
+            if(parameter.kind == ParameterKind::Color) continue;
+            if(parameter.key == QStringLiteral("target_scope")) continue;
+            RuntimeParameter runtime;
+            runtime.name = runtimeParameterName(project, effect, parameter.key);
+            runtime.value = parameterFloat(effect, *definition, parameter.key);
+            result.push_back(runtime);
+        }
+    }
+    return result;
+}
+
 QString generateHlsl(const Project& project, QStringList* notes)
 {
     if(notes)
@@ -2223,6 +2518,56 @@ QString generateHlsl(const Project& project, QStringList* notes)
         case Target::Sky: return generateSky(project);
         default: return generatePostFx(project);
     }
+}
+
+QString generatePreviewHlsl(const Project& project, int depthDebugView,
+                           const QString& debugEffectInstanceId, QStringList* notes)
+{
+    const int mode = std::clamp(depthDebugView, 0, 7);
+    QString source;
+    if(project.target == Target::PostFx && mode >= 2)
+        source = generatePostFx(project, true);
+    else
+        source = generateHlsl(project, notes);
+    if(project.target != Target::PostFx || mode <= 0) return source;
+
+    QString targetScope = QStringLiteral("0.0");
+    const Effect* selectedEffect = nullptr;
+    if(!debugEffectInstanceId.isEmpty())
+    {
+        for(const Effect& effect : project.effects)
+            if(effect.enabled && effect.instanceId == debugEffectInstanceId) { selectedEffect = &effect; break; }
+    }
+    if(!selectedEffect)
+    {
+        for(const Effect& effect : project.effects)
+        {
+            if(!effect.enabled) continue;
+            const EffectDefinition* definition = effectDefinition(effect.typeId);
+            if(!definition || !supportsTarget(*definition, Target::PostFx)) continue;
+            selectedEffect = &effect;
+            break;
+        }
+    }
+    if(selectedEffect)
+    {
+        const EffectDefinition* definition = effectDefinition(selectedEffect->typeId);
+        if(definition)
+        {
+            for(const ParameterDefinition& parameter : definition->parameters)
+            {
+                if(parameter.key == QStringLiteral("target_scope"))
+                {
+                    targetScope = floatLiteral(parameterFloat(*selectedEffect, *definition, QStringLiteral("target_scope")));
+                    break;
+                }
+            }
+        }
+    }
+
+    source.prepend(QString("#define BO3_BEGINNER_PREVIEW_TARGET_SCOPE %1\n").arg(targetScope));
+    source.prepend(QString("#define BO3_BEGINNER_PREVIEW_DEPTH_DEBUG %1\n").arg(mode));
+    return source;
 }
 
 QString projectSummary(const Project& project)

@@ -20,7 +20,8 @@ enum class Target
 enum class ParameterKind
 {
     Float,
-    Color
+    Color,
+    Choice
 };
 
 struct ParameterDefinition
@@ -34,6 +35,8 @@ struct ParameterDefinition
     double step = 0.01;
     double defaultValue = 0.0;
     QColor defaultColor = QColor(Qt::white);
+    QStringList choices;
+    int defaultChoice = 0;
 };
 
 struct EffectDefinition
@@ -80,7 +83,16 @@ QVector<QPair<QString, QString>> presetsForTarget(Target target);
 QJsonObject projectToJson(const Project& project);
 bool projectFromJson(const QJsonObject& object, Project& project, QString& error);
 
+struct RuntimeParameter
+{
+    QString name;
+    double value = 0.0;
+};
+
+QString runtimeParameterNameFor(const Project& project, const QString& instanceId, const QString& key);
+QVector<RuntimeParameter> runtimeFloatParameters(const Project& project);
 QString generateHlsl(const Project& project, QStringList* notes = nullptr);
+QString generatePreviewHlsl(const Project& project, int depthDebugView = 0, const QString& debugEffectInstanceId = QString(), QStringList* notes = nullptr);
 QString projectSummary(const Project& project);
 QString compatibilitySummary(const Project& project);
 
