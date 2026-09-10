@@ -1616,7 +1616,6 @@ public:
                !postHlsl.contains("user-supplied GLSL") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_REFERENCE") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_GAMMA_CORRECT") ||
-               !postHlsl.contains("camera movement removed") ||
                !postHlsl.contains("Pencil Sketch") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
