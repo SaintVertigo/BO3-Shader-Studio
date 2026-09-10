@@ -16,6 +16,7 @@
         <file alias="13_community_resources.md">../docs/learning/13_community_resources.md</file>
     </qresource>
     <qresource prefix="/preview">
+        <file alias="ape_deferred_lighting.hlsl">shaders/ape_deferred_lighting.hlsl</file>
         <file alias="beginner_depth_game_scene.jpg">preview/beginner_depth_game_scene.jpg</file>
         <file alias="bo3_depth_shadows_of_evil_capture.png">preview/bo3_depth_shadows_of_evil_capture.png</file>
         <file alias="bo3_depth_der_eisendrache.jpg">preview/bo3_depth_der_eisendrache.jpg</file>
