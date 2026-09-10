@@ -162,6 +162,32 @@ function enable_filter(filterName)
 }
 
 // self == local player
+// Enables a filter without taking ownership of currentPostFxFilter. This is the
+// path used by BO3 Shader Studio for persistent custom PostFX so temporary stock
+// effects can come and go without disabling the Studio filter. The filter must
+// use a non-conflicting filter index (Studio exports use slot 6).
+function enable_filter_persistent(filterName)
+{
+    if(!isdefined(level.postFxFilters[filterName]))
+        return false;
+
+    filter = level.postFxFilters[filterName];
+
+    return [[filter]]->Enable(self);
+}
+
+// self == local player
+function disable_filter_named(filterName)
+{
+    if(!isdefined(level.postFxFilters[filterName]))
+        return false;
+
+    filter = level.postFxFilters[filterName];
+
+    return [[filter]]->Disable(self);
+}
+
+// self == local player
 function disable_filter()
 {
     if(!isdefined(self.currentPostFxFilter))

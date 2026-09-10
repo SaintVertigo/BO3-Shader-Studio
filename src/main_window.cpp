@@ -2427,8 +2427,10 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 return "generated CSC integration lost the proven client PostFX readiness delay";
             if(!script.contains("[[custom_paint_pass]]->Set( \"mtl_custom_paint\", 0, false, false );"))
                 return "generated filter pass does not point at the exported material";
-            if(!script.contains("self filters::enable_filter( \"custom_paint\" );"))
-                return "generated CSC integration does not enable the material through _filters";
+            if(!script.contains("[[custom_paint_filter]]->Set( \"custom_paint\", BO3HLSL_FILTER_INDEX_PERSISTENT, custom_paint_pass );"))
+                return "generated CSC integration does not reserve the persistent PostFX filter slot";
+            if(!script.contains("self filters::enable_filter_persistent( \"custom_paint\" );"))
+                return "generated CSC integration does not enable the material through the persistent _filters path";
             if(script.contains("REGISTER_SYSTEM") || script.contains("playPostfxBundle"))
                 return "manual CSC integration regressed to an automatic startup path";
             if(!readme.contains("include,filters") || !readme.contains("material,mtl_custom_paint"))
@@ -2442,6 +2444,11 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 return "bundled _filters.csc still contains the broken incomplete currentFilter condition";
             if(!filtersCsc.contains("SetFilterPassMaterial( localClientNum, index, pass.index, 0 );"))
                 return "bundled _filters.csc lost the user-verified numeric material clear fix";
+            if(!filtersCsc.contains("function enable_filter_persistent(filterName)"))
+                return "bundled _filters.csc is missing the non-exclusive persistent filter path";
+            const QString filtersGsh = readRuntimeTextFile("export_templates/_filters.gsh");
+            if(!filtersGsh.contains("#define BO3HLSL_FILTER_INDEX_PERSISTENT          6"))
+                return "bundled _filters.gsh is missing the reserved persistent filter index";
 
             const QString rootReadme = createBo3PackageRootReadme(
                 0, "custom_paint", "custom_paint", materialName, QString(), "_custom", true);
@@ -6762,14 +6769,14 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
             "    %1_pass = new Pass();\n"
             "    [[%1_pass]]->Set( \"%3\", 0, false, false );\n\n"
             "    %1_filter = new Filter();\n"
-            "    [[%1_filter]]->Set( \"%2\", 0, %1_pass );\n"
+            "    [[%1_filter]]->Set( \"%2\", BO3HLSL_FILTER_INDEX_PERSISTENT, %1_pass );\n"
             "    level.postFxFilters[\"%2\"] = %1_filter;\n"
             "}\n\n"
             "function enable_%1_filter()\n"
             "{\n"
             "    if( !isdefined( level.postFxFilters[\"%2\"] ) )\n"
             "        init_%1_filter();\n\n"
-            "    self filters::enable_filter( \"%2\" );\n"
+            "    self filters::enable_filter_persistent( \"%2\" );\n"
             "}\n")
             .arg(id, filterName, materialName);
     }
@@ -6781,7 +6788,8 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         out += "BO3 HLSL Previewer - PostFX Manual CSC Integration\n";
         out += "===================================================\n\n";
         out += "The old shader-specific auto-start CSC/ZPKG workflow is intentionally not used.\n";
-        out += "Put the generated integration directly in the usermap/mod client CSC that already runs for the local player.\n\n";
+        out += "Put the generated integration directly in the usermap/mod client CSC that already runs for the local player.\n";
+        out += "Studio PostFX uses persistent filter slot 6 so temporary BO3 PostFX bundles on slot 0 do not replace it.\n\n";
         out += "USERMAP / MOD CSC\n";
         out += "- Normal usermap: edit the map's main client .csc (the one that calls zm_usermap::main()).\n";
         out += "- Mod: edit the mod client .csc that owns your local-player initialization/spawn callback.\n";

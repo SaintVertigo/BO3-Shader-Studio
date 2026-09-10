@@ -12,3 +12,8 @@
 #define SCRIPT_VECTOR_Y                         1
 #define SCRIPT_VECTOR_Z                         2
 #define SCRIPT_VECTOR_W                         3
+
+// BO3 stock shared.gsh currently reserves filter slots 0-5 and 7 for game effects.
+// Slot 6 is intentionally used by BO3 Shader Studio so a persistent custom PostFX
+// does not collide with stock postfx bundles, which use filter index 0.
+#define BO3HLSL_FILTER_INDEX_PERSISTENT          6
