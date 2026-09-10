@@ -16738,9 +16738,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         camera3D_->setObjectName("PreviewModeToggle");
         camera3D_->setToolTip("Toggle interactive 3D camera navigation. Off uses the shader's normal 2D/fullscreen preview.");
         meshCombo_ = new QComboBox(); meshCombo_->addItems(QStringList{"Sphere", "Cube", "Plane", "Card", "Custom Model"});
-        meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. Custom Model is enabled after importing OBJ, ASCII FBX, or XMODEL_EXPORT.");
+        meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. APE Match uses Treyarch's local APE sphere/cube/plane geometry when available. Custom Model supports OBJ, ASCII FBX, XMODEL_EXPORT, and BO3 XMODEL_BIN.");
         loadModelQuickButton_ = new QPushButton("Load Model...");
-        loadModelQuickButton_->setToolTip("Import a custom OBJ, ASCII FBX, or text XMODEL_EXPORT preview mesh.");
+        loadModelQuickButton_->setToolTip("Import a custom OBJ, ASCII FBX, XMODEL_EXPORT, or BO3 XMODEL_BIN preview mesh.");
         gbufferViewCombo_ = new QComboBox(); gbufferViewCombo_->addItems(QStringList{"Final Lit", "RT0", "RT1", "RT2", "RT3", "Depth", "Albedo", "Normal", "Specular", "Gloss", "AO", "Emissive"});
         gbufferViewCombo_->setToolTip("Choose the final lit result or inspect an individual GBuffer channel.");
         lightingQuickMode_ = new QComboBox(); lightingQuickMode_->addItems(QStringList{"Lit", "Fulbright"});
@@ -20693,7 +20693,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 return true;
             }
             const QString suffix = info.suffix().toLower();
-            if (QStringList{"obj","fbx","xmodel_export","xmodel"}.contains(suffix))
+            if (QStringList{"obj","fbx","xmodel_export","xmodel","xmodel_bin"}.contains(suffix))
             {
                 loadCustomModelFromPath(info.absoluteFilePath());
                 return true;
@@ -20737,7 +20737,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void chooseCustomModel()
     {
         const QString path = QFileDialog::getOpenFileName(this, "Import Preview Model", currentDirectory(),
-            "Preview models (*.obj *.fbx *.xmodel_export *.xmodel);;Wavefront OBJ (*.obj);;FBX ASCII (*.fbx);;XMODEL_EXPORT (*.xmodel_export *.xmodel);;All files (*.*)");
+            "Preview models (*.obj *.fbx *.xmodel_export *.xmodel *.xmodel_bin);;BO3 XMODEL_BIN (*.xmodel_bin);;Wavefront OBJ (*.obj);;FBX ASCII (*.fbx);;XMODEL_EXPORT (*.xmodel_export *.xmodel);;All files (*.*)");
         if(!path.isEmpty()) loadCustomModelFromPath(path);
     }
 
@@ -20816,6 +20816,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return dir.absolutePath();
     }
 
+    void loadApeReferencePreviewMeshes(const QString& root)
+    {
+        if (!preview_ || root.isEmpty()) return;
+        auto& r = preview_->renderer();
+
+        struct RefMesh { PreviewMesh mesh; const char* file; };
+        static constexpr RefMesh refs[] = {
+            {PreviewMesh::Sphere, "ape_preview_sphere.XMODEL_BIN"},
+            {PreviewMesh::Cube,   "ape_preview_cube.XMODEL_BIN"},
+            {PreviewMesh::Plane,  "ape_preview_plane.XMODEL_BIN"}
+        };
+
+        for (const auto& ref : refs)
+        {
+            if (r.HasApeReferenceMesh(ref.mesh)) continue;
+            const QString absolute = QDir(root).filePath(
+                QStringLiteral("model_export/code/") + QString::fromLatin1(ref.file));
+            if (!QFileInfo::exists(absolute)) continue;
+            std::wstring ignored;
+            r.LoadApeReferenceMesh(ref.mesh, fs::path(absolute.toStdWString()), ignored);
+        }
+    }
+
     bool loadApeEnvironmentForPreset(int index, QString& sourceDescription, QString& failureDescription)
     {
         sourceDescription.clear();
@@ -20823,6 +20846,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!preview_) return false;
 
         const QString root = ensureConfiguredBo3RootForApe();
+        if (!root.isEmpty()) loadApeReferencePreviewMeshes(root);
         if (root.isEmpty())
         {
             failureDescription =

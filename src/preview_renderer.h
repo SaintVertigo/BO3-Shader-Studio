@@ -218,6 +218,9 @@ public:
     void SetPreviewMesh(PreviewMesh mesh);
     PreviewMesh GetPreviewMesh() const;
     bool LoadCustomModel(const std::filesystem::path& path, std::wstring& error);
+    bool LoadApeReferenceMesh(PreviewMesh mesh, const std::filesystem::path& path, std::wstring& error);
+    void ClearApeReferenceMeshes();
+    bool HasApeReferenceMesh(PreviewMesh mesh) const;
     void ClearCustomModel();
     bool HasCustomModel() const;
     std::wstring CustomModelPath() const;

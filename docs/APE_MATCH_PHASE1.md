@@ -88,3 +88,17 @@ Phase 1 is not the final APE renderer. The next comparison pass should calibrate
 8. a later A/B comparison workflow using captured APE reference frames.
 
 The goal is to move each of these from screenshot approximation to a verified TOOLSGFX-compatible behavior as the relevant engine path is traced.
+
+## Phase 1d — native APE preview geometry
+
+APE Match no longer has to approximate Treyarch's preview UV layout with Shader Studio's procedural primitives. The model importer now reads BO3 `XMODEL_BIN` files used by the Mod Tools asset viewer (the `*LZ4*` token-stream format), including authored per-corner normals and UVs.
+
+When the user's configured BO3 Mod Tools install contains the stock preview assets under `model_export/code`, APE Match and Neutral / No Lighting automatically use:
+
+- `ape_preview_sphere.XMODEL_BIN`
+- `ape_preview_cube.XMODEL_BIN`
+- `ape_preview_plane.XMODEL_BIN`
+
+Look Dev intentionally keeps the Studio's procedural primitives so this compatibility pass does not silently change existing artist-preview projects. If a stock APE reference model is unavailable, APE Match falls back to the existing Studio primitive rather than bundling Treyarch assets.
+
+The ordinary **Load Model** workflow also accepts `.XMODEL_BIN`, so additional local BO3 models can be inspected without converting them to OBJ/XMODEL_EXPORT first. The Phase 1d reader is intentionally scoped to the stable static-token layout used by the shipped APE preview models; unsupported token variants fail with an explicit error instead of guessing their payload layout.

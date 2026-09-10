@@ -2337,20 +2337,14 @@ public:
     }
     PreviewMesh GetPreviewMesh() const { return previewMesh_; }
 
-    bool LoadCustomModel(const fs::path& path, std::wstring& error)
+    bool UploadImportedPreviewMesh(const previewmodel::Mesh& imported, PreviewMeshBuffers& gpu, std::wstring& error)
     {
-        previewmodel::Mesh imported;
-        std::string importError;
-        if (!previewmodel::loadModel(WideToUtf8(path.wstring()), imported, importError))
-        {
-            error = Utf8ToWide(importError);
-            return false;
-        }
         if (imported.vertices.empty() || imported.indices.empty())
         {
             error = L"The imported model contains no renderable triangles.";
             return false;
         }
+
         std::vector<MaterialVertex> vertices;
         vertices.reserve(imported.vertices.size());
         for (const auto& v : imported.vertices)
@@ -2362,28 +2356,48 @@ public:
                 {v.uv[0], v.uv[1]}
             });
         }
-        PreviewMeshBuffers gpu{};
+
+        PreviewMeshBuffers uploaded{};
         D3D11_BUFFER_DESC vbDesc{};
         vbDesc.ByteWidth = static_cast<UINT>(vertices.size() * sizeof(MaterialVertex));
         vbDesc.Usage = D3D11_USAGE_DEFAULT;
         vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA vbData{}; vbData.pSysMem = vertices.data();
-        if (FAILED(device_->CreateBuffer(&vbDesc, &vbData, gpu.vb.GetAddressOf())))
+        D3D11_SUBRESOURCE_DATA vbData{};
+        vbData.pSysMem = vertices.data();
+        if (FAILED(device_->CreateBuffer(&vbDesc, &vbData, uploaded.vb.GetAddressOf())))
         {
-            error = L"Could not create the custom-model vertex buffer.";
+            error = L"Could not create the imported-model vertex buffer.";
             return false;
         }
+
         D3D11_BUFFER_DESC ibDesc{};
         ibDesc.ByteWidth = static_cast<UINT>(imported.indices.size() * sizeof(uint32_t));
         ibDesc.Usage = D3D11_USAGE_DEFAULT;
         ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        D3D11_SUBRESOURCE_DATA ibData{}; ibData.pSysMem = imported.indices.data();
-        if (FAILED(device_->CreateBuffer(&ibDesc, &ibData, gpu.ib.GetAddressOf())))
+        D3D11_SUBRESOURCE_DATA ibData{};
+        ibData.pSysMem = imported.indices.data();
+        if (FAILED(device_->CreateBuffer(&ibDesc, &ibData, uploaded.ib.GetAddressOf())))
         {
-            error = L"Could not create the custom-model index buffer.";
+            error = L"Could not create the imported-model index buffer.";
             return false;
         }
-        gpu.indexCount = static_cast<UINT>(imported.indices.size());
+        uploaded.indexCount = static_cast<UINT>(imported.indices.size());
+        gpu = std::move(uploaded);
+        return true;
+    }
+
+    bool LoadCustomModel(const fs::path& path, std::wstring& error)
+    {
+        previewmodel::Mesh imported;
+        std::string importError;
+        if (!previewmodel::loadModel(WideToUtf8(path.wstring()), imported, importError))
+        {
+            error = Utf8ToWide(importError);
+            return false;
+        }
+        PreviewMeshBuffers gpu{};
+        if (!UploadImportedPreviewMesh(imported, gpu, error)) return false;
+
         customMesh_ = std::move(gpu);
         customModelPath_ = path;
         customModelFormat_ = Utf8ToWide(imported.sourceFormat);
@@ -2393,6 +2407,59 @@ public:
         cameraPanX_ = cameraPanY_ = 0.0f;
         return true;
     }
+
+    bool LoadApeReferenceMesh(PreviewMesh mesh, const fs::path& path, std::wstring& error)
+    {
+        PreviewMeshBuffers* target = nullptr;
+        switch (mesh)
+        {
+        case PreviewMesh::Sphere: target = &apeSphereMesh_; break;
+        case PreviewMesh::Cube: target = &apeCubeMesh_; break;
+        case PreviewMesh::Plane: target = &apePlaneMesh_; break;
+        default:
+            error = L"APE reference-mesh loading currently supports Sphere, Cube, and Plane.";
+            return false;
+        }
+
+        previewmodel::Mesh imported;
+        std::string importError;
+        if (!previewmodel::loadModel(WideToUtf8(path.wstring()), imported, importError))
+        {
+            error = Utf8ToWide(importError);
+            return false;
+        }
+        if (imported.sourceFormat != "BO3 XMODEL_BIN")
+        {
+            error = L"APE reference meshes must be BO3 XMODEL_BIN assets.";
+            return false;
+        }
+
+        PreviewMeshBuffers gpu{};
+        if (!UploadImportedPreviewMesh(imported, gpu, error)) return false;
+        *target = std::move(gpu);
+        return true;
+    }
+
+    void ClearApeReferenceMeshes()
+    {
+        apeSphereMesh_ = {};
+        apeCubeMesh_ = {};
+        apePlaneMesh_ = {};
+    }
+
+    bool HasApeReferenceMesh(PreviewMesh mesh) const
+    {
+        const PreviewMeshBuffers* candidate = nullptr;
+        switch (mesh)
+        {
+        case PreviewMesh::Sphere: candidate = &apeSphereMesh_; break;
+        case PreviewMesh::Cube: candidate = &apeCubeMesh_; break;
+        case PreviewMesh::Plane: candidate = &apePlaneMesh_; break;
+        default: return false;
+        }
+        return candidate->vb && candidate->ib && candidate->indexCount > 0;
+    }
+
     void ClearCustomModel()
     {
         customMesh_ = {};
@@ -3739,6 +3806,16 @@ private:
 
     const PreviewMeshBuffers* CurrentPreviewMesh() const
     {
+        // APE Match and Neutral/No Lighting use Treyarch's actual APE preview
+        // geometry when it is available from the user's local BO3 Mod Tools
+        // install. This preserves APE's authored UV seams/tiling instead of
+        // approximating them with the Studio's procedural primitives.
+        if (materialPreviewProfile_ != MaterialPreviewProfile::LookDev)
+        {
+            if (previewMesh_ == PreviewMesh::Sphere && HasApeReferenceMesh(PreviewMesh::Sphere)) return &apeSphereMesh_;
+            if (previewMesh_ == PreviewMesh::Cube && HasApeReferenceMesh(PreviewMesh::Cube)) return &apeCubeMesh_;
+            if (previewMesh_ == PreviewMesh::Plane && HasApeReferenceMesh(PreviewMesh::Plane)) return &apePlaneMesh_;
+        }
         if (previewMesh_ == PreviewMesh::Cube) return &cubeMesh_;
         if (previewMesh_ == PreviewMesh::Plane) return &planeMesh_;
         if (previewMesh_ == PreviewMesh::Card) return &cardMesh_;
@@ -6216,6 +6293,9 @@ float4 ps_main(VS_OUT i) : SV_Target0
     PreviewMeshBuffers cubeMesh_;
     PreviewMeshBuffers planeMesh_;
     PreviewMeshBuffers cardMesh_;
+    PreviewMeshBuffers apeSphereMesh_;
+    PreviewMeshBuffers apeCubeMesh_;
+    PreviewMeshBuffers apePlaneMesh_;
     PreviewMeshBuffers customMesh_;
     fs::path customModelPath_;
     std::wstring customModelFormat_;
@@ -6702,6 +6782,21 @@ PreviewMesh PreviewRenderer::GetPreviewMesh() const
 bool PreviewRenderer::LoadCustomModel(const std::filesystem::path& path, std::wstring& error)
 {
     return impl_->LoadCustomModel(path, error);
+}
+
+bool PreviewRenderer::LoadApeReferenceMesh(PreviewMesh mesh, const std::filesystem::path& path, std::wstring& error)
+{
+    return impl_->LoadApeReferenceMesh(mesh, path, error);
+}
+
+void PreviewRenderer::ClearApeReferenceMeshes()
+{
+    impl_->ClearApeReferenceMeshes();
+}
+
+bool PreviewRenderer::HasApeReferenceMesh(PreviewMesh mesh) const
+{
+    return impl_->HasApeReferenceMesh(mesh);
 }
 
 void PreviewRenderer::ClearCustomModel()

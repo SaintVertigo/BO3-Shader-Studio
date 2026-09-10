@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -178,6 +179,248 @@ bool parseUv(const std::string& line,V2& v)
     auto p=line.find(' '); if(p==std::string::npos)return false; std::string s=line.substr(p+1); for(char&c:s)if(c==',')c=' '; std::istringstream ss(s); int set=0; if(!(ss>>set))return false; return bool(ss>>v.x>>v.y);
 }
 
+
+// BO3 XMODEL_BIN files are an LZ4-compressed token stream. The token layout is
+// the binary counterpart of XMODEL_EXPORT, so we can recover the exact authored
+// per-corner UVs/normals instead of approximating APE's preview meshes.
+//
+// This reader intentionally implements only the stable token vocabulary used by
+// BO3 model exports. It does not depend on an external LZ4 DLL, which keeps the
+// portable Studio build self-contained while still reading the user's local Mod
+// Tools assets at runtime.
+bool decompressLz4Block(const std::vector<std::uint8_t>& src, size_t expectedSize,
+                        std::vector<std::uint8_t>& dst, std::string& error)
+{
+    dst.clear();
+    dst.resize(expectedSize);
+    size_t ip=0, op=0;
+    auto readLen=[&](size_t base,size_t& len)->bool
+    {
+        len=base;
+        if(base!=15) return true;
+        while(ip<src.size())
+        {
+            const std::uint8_t b=src[ip++];
+            len+=b;
+            if(b!=255) return true;
+        }
+        return false;
+    };
+    while(ip<src.size())
+    {
+        const std::uint8_t token=src[ip++];
+        size_t literalLen=0;
+        if(!readLen(token>>4,literalLen)){error="Truncated LZ4 literal length.";return false;}
+        if(ip+literalLen>src.size()||op+literalLen>dst.size()){error="Invalid LZ4 literal range.";return false;}
+        if(literalLen){std::memcpy(dst.data()+op,src.data()+ip,literalLen);ip+=literalLen;op+=literalLen;}
+        if(ip>=src.size()) break;
+        if(ip+2>src.size()){error="Truncated LZ4 match offset.";return false;}
+        const size_t offset=(size_t)src[ip]|((size_t)src[ip+1]<<8); ip+=2;
+        if(offset==0||offset>op){error="Invalid LZ4 match offset.";return false;}
+        size_t matchLen=0;
+        if(!readLen(token&0x0f,matchLen)){error="Truncated LZ4 match length.";return false;}
+        matchLen+=4;
+        if(op+matchLen>dst.size()){error="Invalid LZ4 match range.";return false;}
+        const size_t matchPos=op-offset;
+        for(size_t i=0;i<matchLen;++i) dst[op++]=dst[matchPos+i];
+    }
+    if(op!=expectedSize)
+    {
+        error="XMODEL_BIN LZ4 payload expanded to an unexpected size.";
+        return false;
+    }
+    return true;
+}
+
+struct XBinCursor
+{
+    const std::vector<std::uint8_t>& b;
+    size_t p=0;
+    bool ok=true;
+    void align(size_t n){p=(p+n-1)&~(n-1);if(p>b.size())ok=false;}
+    template<class T> T read()
+    {
+        T v{};
+        if(!ok||p+sizeof(T)>b.size()){ok=false;return v;}
+        std::memcpy(&v,b.data()+p,sizeof(T));p+=sizeof(T);return v;
+    }
+    std::string stringZ()
+    {
+        if(!ok||p>=b.size()){ok=false;return {};}
+        const size_t begin=p;
+        while(p<b.size()&&b[p]!=0)++p;
+        if(p>=b.size()){ok=false;return {};}
+        std::string s((const char*)b.data()+begin,p-begin);++p;align(4);return s;
+    }
+};
+
+enum class XBinType { Comment,Section,UShort,UInt,Int,Float,Vec2,Vec3,Vec4,Vec3S16,Vec4U8,BoneWeight,BoneInfo,UShortString,UShortStringX3,Tri,UVSet,Unsupported };
+XBinType xbinType(std::uint16_t h)
+{
+    switch(h)
+    {
+    case 0x8738: case 0xC355: return XBinType::Comment;
+    case 0x7AAC: case 0x46C8: case 0xC7F3: return XBinType::Section;
+    case 0xDD9A: case 0xEA46: case 0xBCD4: case 0x92D3: case 0x4643: case 0x76BA:
+    case 0x7A6C: case 0xA1B2: case 0x62AF: case 0x9279: case 0x9016: case 0x950D:
+    case 0x745A: case 0x24D1: case 0x8F03: return XBinType::UShort;
+    case 0xC723: case 0xBE92: case 0xB917: case 0x2AEC: case 0xB097: case 0x1D7D: return XBinType::UInt;
+    case 0x1FC2: case 0xB35E: case 0xA65B: case 0x7836: return XBinType::Int;
+    case 0x5CD2: return XBinType::Float;
+    case 0x83C7: case 0xC835: case 0xFE0C: case 0x7D76: case 0x7E24: return XBinType::Vec2;
+    case 0x9383: case 0x1C56: case 0xA58B: return XBinType::Vec3;
+    case 0x37FF: case 0x4265: case 0xE593: case 0x317C: case 0x6DAB: case 0xEF69: case 0x6EEE: return XBinType::Vec4;
+    case 0x89EC: case 0xDCFD: case 0xCCDC: case 0xFCBF: return XBinType::Vec3S16;
+    case 0x6DD8: return XBinType::Vec4U8;
+    case 0xF1AB: return XBinType::BoneWeight;
+    case 0xF099: return XBinType::BoneInfo;
+    case 0x87D4: case 0x360B: return XBinType::UShortString;
+    case 0xA700: return XBinType::UShortStringX3;
+    case 0x562F: return XBinType::Tri;
+    case 0x1AD4: return XBinType::UVSet;
+    // TRI16 (0x6711) and FRAME/Unk4 (0x1675) are not emitted by the static
+    // APE preview meshes. Stop rather than guessing their payload layout.
+    default: return XBinType::Unsupported;
+    }
+}
+
+bool loadXModelBin(const std::string& path,Mesh& out,std::string& error)
+{
+    std::ifstream f(path,std::ios::binary);
+    if(!f){error="Could not open XMODEL_BIN file.";return false;}
+    std::vector<std::uint8_t> packed((std::istreambuf_iterator<char>(f)),{});
+    if(packed.size()<10||std::memcmp(packed.data(),"*LZ4*",5)!=0)
+    {
+        error="This does not look like a BO3 XMODEL_BIN file.";return false;
+    }
+    std::uint32_t unpackedSize=0;std::memcpy(&unpackedSize,packed.data()+5,4);
+    if(unpackedSize==0||unpackedSize>512u*1024u*1024u)
+    {
+        error="XMODEL_BIN reports an invalid decompressed size.";return false;
+    }
+    std::vector<std::uint8_t> compressed(packed.begin()+9,packed.end()),data;
+    if(!decompressLz4Block(compressed,unpackedSize,data,error))return false;
+
+    XBinCursor r{data};
+    std::unordered_map<std::uint32_t,V3> sourcePositions;
+    bool inFaces=false,cornerActive=false;
+    std::uint32_t pendingSource=0,expectedFaces=0,facesBuilt=0;
+    bool pendingSourceValid=false;
+    Vertex corner{};std::uint32_t tri[3]{};int triCorner=0;
+
+    auto finalizeCorner=[&]()->bool
+    {
+        if(!cornerActive)return true;
+        if(triCorner>=3){error="XMODEL_BIN face contains more than three vertices.";return false;}
+        tri[triCorner++]=(std::uint32_t)out.vertices.size();out.vertices.push_back(corner);cornerActive=false;
+        if(triCorner==3)
+        {
+            out.indices.insert(out.indices.end(),{tri[0],tri[1],tri[2]});
+            ++facesBuilt;triCorner=0;
+        }
+        return true;
+    };
+
+    while(r.ok&&r.p<data.size()&&(expectedFaces==0||facesBuilt<expectedFaces))
+    {
+        r.align(4);if(!r.ok||r.p+2>data.size())break;
+        const std::uint16_t h=r.read<std::uint16_t>();
+        const XBinType type=xbinType(h);
+        if(type==XBinType::Unsupported)
+        {
+            std::ostringstream ss;ss<<"Unsupported XMODEL_BIN token 0x"<<std::hex<<std::uppercase<<h<<" at byte "<<(r.p-2)<<".";error=ss.str();return false;
+        }
+
+        if(h==0xBE92) // NUMFACES
+        {
+            r.align(4);expectedFaces=r.read<std::uint32_t>();inFaces=true;pendingSourceValid=false;continue;
+        }
+        if((h==0x8F03||h==0xB097)) // VERT / VERT32
+        {
+            std::uint32_t id=0;
+            if(h==0x8F03){r.align(2);id=r.read<std::uint16_t>();}
+            else {r.align(4);id=r.read<std::uint32_t>();}
+            if(inFaces)
+            {
+                if(cornerActive&&!finalizeCorner())return false;
+                const auto it=sourcePositions.find(id);
+                if(it==sourcePositions.end()){error="XMODEL_BIN face references a vertex with no source position.";return false;}
+                corner=Vertex{};corner.position={it->second.x,it->second.y,it->second.z};cornerActive=true;
+            }
+            else {pendingSource=id;pendingSourceValid=true;}
+            continue;
+        }
+        if(h==0x9383) // OFFSET
+        {
+            r.align(4);V3 p{r.read<float>(),r.read<float>(),r.read<float>()};
+            if(!inFaces&&pendingSourceValid){sourcePositions[pendingSource]=p;pendingSourceValid=false;}
+            continue;
+        }
+        if(h==0x89EC) // NORMAL
+        {
+            r.align(2);const float k=1.0f/32767.0f;
+            V3 n{r.read<std::int16_t>()*k,r.read<std::int16_t>()*k,r.read<std::int16_t>()*k};n=norm(n);
+            if(inFaces&&cornerActive)corner.normal={n.x,n.y,n.z};continue;
+        }
+        if(h==0x1AD4) // UV set
+        {
+            const std::uint16_t sets=r.read<std::uint16_t>();
+            V2 first{};bool have=false;
+            for(std::uint16_t i=0;i<sets;++i){V2 uv{r.read<float>(),r.read<float>()};if(!have){first=uv;have=true;}}
+            if(inFaces&&cornerActive&&have)
+            {
+                // XMODEL UVs use the artist/DCC convention. The Studio's image
+                // upload path is top-left-origin, matching the existing
+                // XMODEL_EXPORT/OBJ importers after the V flip.
+                corner.uv={first.x,1.0f-first.y};
+                if(!finalizeCorner())return false;
+            }
+            continue;
+        }
+        if(h==0x562F) // TRI: object/material indices; corner tokens follow
+        {
+            if(cornerActive&&!finalizeCorner())return false;
+            if(triCorner!=0){error="Incomplete XMODEL_BIN triangle before TRI token.";return false;}
+            r.read<std::uint8_t>();r.read<std::uint8_t>();continue;
+        }
+
+        // Consume all remaining stable token payloads so the reader can reach
+        // the position/face streams without depending on model-specific layout.
+        switch(type)
+        {
+        case XBinType::Comment: r.align(4);r.stringZ();break;
+        case XBinType::Section: break;
+        case XBinType::UShort: r.align(2);r.read<std::uint16_t>();break;
+        case XBinType::UInt: r.align(4);r.read<std::uint32_t>();break;
+        case XBinType::Int: r.align(4);r.read<std::int32_t>();break;
+        case XBinType::Float: r.align(4);r.read<float>();break;
+        case XBinType::Vec2: r.align(4);r.read<float>();r.read<float>();break;
+        case XBinType::Vec3: r.align(4);r.read<float>();r.read<float>();r.read<float>();break;
+        case XBinType::Vec4: r.align(4);for(int i=0;i<4;++i)r.read<float>();break;
+        case XBinType::Vec3S16: r.align(2);for(int i=0;i<3;++i)r.read<std::int16_t>();break;
+        case XBinType::Vec4U8: r.align(4);for(int i=0;i<4;++i)r.read<std::uint8_t>();break;
+        case XBinType::BoneWeight: r.align(2);r.read<std::uint16_t>();r.read<float>();break;
+        case XBinType::BoneInfo: r.align(4);r.read<std::int32_t>();r.read<std::int32_t>();r.stringZ();break;
+        case XBinType::UShortString: r.align(2);r.read<std::uint16_t>();r.stringZ();break;
+        case XBinType::UShortStringX3: r.align(2);r.read<std::uint16_t>();r.stringZ();r.stringZ();r.stringZ();break;
+        case XBinType::Tri: r.read<std::uint8_t>();r.read<std::uint8_t>();break;
+        case XBinType::UVSet:
+        {
+            const std::uint16_t n=r.read<std::uint16_t>();for(std::uint16_t i=0;i<n;++i){r.read<float>();r.read<float>();}break;
+        }
+        default: break;
+        }
+    }
+    if(!r.ok){error="Unexpected end of XMODEL_BIN token stream.";return false;}
+    if(cornerActive&&!finalizeCorner())return false;
+    if(expectedFaces==0||out.indices.empty()){error="XMODEL_BIN contains no readable triangle faces.";return false;}
+    if(facesBuilt!=expectedFaces)
+    {
+        error="XMODEL_BIN face stream ended before all declared faces were read.";return false;
+    }
+    out.sourceFormat="BO3 XMODEL_BIN";finalize(out);return true;
+}
+
 bool loadXModelExport(const std::string& path,Mesh& out,std::string& error)
 {
     std::ifstream f(path); if(!f){error="Could not open XMODEL file.";return false;}
@@ -245,7 +488,8 @@ bool loadModel(const std::string& path, Mesh& mesh, std::string& error)
     if(ext==".obj")ok=loadObj(path,mesh,error);
     else if(ext==".fbx")ok=loadAsciiFbx(path,mesh,error);
     else if(ext==".xmodel_export"||ext==".xmodel")ok=loadXModelExport(path,mesh,error);
-    else {error="Unsupported model format. Use OBJ, ASCII FBX, or text XMODEL_EXPORT.";return false;}
+    else if(ext==".xmodel_bin")ok=loadXModelBin(path,mesh,error);
+    else {error="Unsupported model format. Use OBJ, ASCII FBX, XMODEL_EXPORT, or BO3 XMODEL_BIN.";return false;}
     if(ok&&mesh.vertices.size()>2'000'000){error="Model is too large for the previewer (over 2 million vertices).";return false;}
     return ok;
 }
