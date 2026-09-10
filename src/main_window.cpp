@@ -1626,10 +1626,13 @@ public:
                !postHlsl.contains("BO3BeginnerPencilSrgbToLinear") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_STYLE_CONTROLS") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_APPROVED_SATURATION = 1.08") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_STROKE_THICKNESS") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_PAPER_COLOR") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_STROKE_COLOR") ||
                !postHlsl.contains("float paperMask = smoothstep(0.42, 0.92, saturate(col.x))") ||
                postHlsl.contains("BO3BeginnerPencilSkyMask") ||
                !postHlsl.contains("paperWhitenessAmount"))
-                return "Beginner Pencil Sketch is missing the approved reconstruction, simplified color model, or stroke-driven Paper Whiteness support.";
+                return "Beginner Pencil Sketch is missing the approved reconstruction, Paper Whiteness response, or the new stroke/paper styling controls.";
 
             const beginner::EffectDefinition* pencilDefinition = beginner::effectDefinition(QStringLiteral("pencil_sketch"));
             if(!pencilDefinition)
@@ -1639,11 +1642,14 @@ public:
                 pencilParameterKeys << parameter.key;
             if(!pencilParameterKeys.contains(QStringLiteral("color_amount")) ||
                !pencilParameterKeys.contains(QStringLiteral("paper_whiteness")) ||
+               !pencilParameterKeys.contains(QStringLiteral("stroke_thickness")) ||
+               !pencilParameterKeys.contains(QStringLiteral("paper_color")) ||
+               !pencilParameterKeys.contains(QStringLiteral("stroke_color")) ||
                pencilParameterKeys.contains(QStringLiteral("saturation")) ||
                pencilParameterKeys.contains(QStringLiteral("monochrome")) ||
                pencilParameterKeys.contains(QStringLiteral("tint_strength")) ||
                pencilParameterKeys.contains(QStringLiteral("tint_color")))
-                return "Beginner Pencil Sketch controls did not simplify to Color + Paper Whiteness as expected.";
+                return "Beginner Pencil Sketch controls did not expose the simplified Color/Paper controls plus Stroke Thickness / Paper Color / Stroke Color as expected.";
             if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
                beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
                beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||

@@ -1187,28 +1187,34 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
         {
             const QString strength = parameterExpr(project, effect, *definition, "strength");
             const QString scale = parameterExpr(project, effect, *definition, "scale");
+            const QString strokeThickness = parameterExpr(project, effect, *definition, "stroke_thickness");
             const QString grain = parameterExpr(project, effect, *definition, "grain");
             const QString drawingAmount = parameterExpr(project, effect, *definition, "drawing_amount");
             const QString colorAmount = parameterExpr(project, effect, *definition, "color_amount");
             const QString contrast = parameterExpr(project, effect, *definition, "contrast");
             const QString brightness = parameterExpr(project, effect, *definition, "brightness");
             const QString paperWhiteness = parameterExpr(project, effect, *definition, "paper_whiteness");
+            const QColor paperColor = parameterColor(effect, *definition, "paper_color");
+            const QColor strokeColor = parameterColor(effect, *definition, "stroke_color");
             const QString depthContour = parameterExpr(project, effect, *definition, "depth_contour");
             const QString edgeWhite = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
             out += QString("    // %1 - BO3_BEGINNER_PENCIL_REFERENCE / BO3_BEGINNER_PENCIL_GAMMA_CORRECT / BO3_BEGINNER_PENCIL_STYLE_CONTROLS\n"
-                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), max(%8, 0.05), max(%9, 0.0), saturate(%10), saturate(%11), saturate(%12), max(%13, 0.0));\n"
+                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), max(%5, 0.05), saturate(%6), saturate(%7), saturate(%8), max(%9, 0.05), max(%10, 0.0), saturate(%11), %12, %13, saturate(%14), saturate(%15), max(%16, 0.0));\n"
                            "    color = lerp(color, %2_pencil, %3);\n")
                 .arg(definition->name)
                 .arg(tag)
                 .arg(strength)
                 .arg(scale)
+                .arg(strokeThickness)
                 .arg(grain)
                 .arg(drawingAmount)
                 .arg(colorAmount)
                 .arg(contrast)
                 .arg(brightness)
                 .arg(paperWhiteness)
+                .arg(colorLiteral(paperColor))
+                .arg(colorLiteral(strokeColor))
                 .arg(depthContour)
                 .arg(edgeWhite)
                 .arg(vignette);
@@ -2328,10 +2334,11 @@ float BO3BeginnerPencilDepthContour(float2 uv)
     return smoothstep(0.005, 0.040, edge);
 }
 
-float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount,
-                                  float drawingAmount, float colorAmount,
-                                  float contrastAmount, float brightnessAmount,
-                                  float paperWhitenessAmount,
+float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float strokeThicknessAmount,
+                                  float grainAmount, float drawingAmount,
+                                  float colorAmount, float contrastAmount,
+                                  float brightnessAmount, float paperWhitenessAmount,
+                                  float3 paperColor, float3 strokeColor,
                                   float depthContourAmount, float edgeWhite,
                                   float vignetteAmount)
 {
@@ -2388,12 +2395,29 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
     col.x = 1.0 - col.x;
     col.x *= col.x * col.x;
 
+    // BO3_BEGINNER_PENCIL_STROKE_THICKNESS
+    // col.x is the paper / inverse-ink response. Shape the ink coverage before
+    // paper and color styling so thicker or thinner strokes feel structural,
+    // not like a post sharpen/blur.
+    float pencilInk = saturate(1.0 - col.x);
+    pencilInk = pow(pencilInk, 1.0 / max(strokeThicknessAmount, 0.05));
+    col.x = saturate(1.0 - pencilInk);
+
     // In the original hand-drawn shader, areas with little directional ink
     // naturally read as exposed white paper. col.x is already that inverse-ink
     // response: it approaches 1 in broad/flat regions and falls near strokes.
     // Paper Whiteness restores that behavior WITHOUT consulting Float-Z.
     float paperMask = smoothstep(0.42, 0.92, saturate(col.x));
     float3 pencilBase = lerp(col2, 1.0.xxx, paperMask * saturate(paperWhitenessAmount));
+
+    // BO3_BEGINNER_PENCIL_PAPER_COLOR
+    // Tint only the revealed paper regions. Default paperColor is white, which
+    // intentionally preserves the current approved look.
+    float paperTintStrength = saturate(length(saturate(paperColor) - 1.0.xxx) / 1.7320508);
+    float paperLum = saturate(BO3BeginnerPencilLuma(pencilBase));
+    float3 paperTinted = BO3BeginnerPencilSetLum(saturate(paperColor), paperLum);
+    pencilBase = lerp(pencilBase, paperTinted, paperMask * paperTintStrength);
+
     float3 sketch = saturate(col.x * pencilBase);
     float sketchLum = saturate(BO3BeginnerPencilLuma(sketch));
 
@@ -2409,6 +2433,15 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
     float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
     float3 monoArt = targetLum.xxx;
     float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
+
+    // BO3_BEGINNER_PENCIL_STROKE_COLOR
+    // Tint only the denser pencil lines. Default strokeColor is black, and the
+    // implicit strength is derived from how far the chosen color moves away
+    // from black so the approved current look stays unchanged.
+    float strokeMask = smoothstep(0.16, 0.82, pencilInk);
+    float strokeTintStrength = saturate(length(saturate(strokeColor)) / 1.7320508);
+    float3 strokeTinted = BO3BeginnerPencilSetLum(saturate(strokeColor), saturate(BO3BeginnerPencilLuma(art)));
+    art = lerp(art, strokeTinted, strokeMask * strokeTintStrength);
 
     float depthContour = BO3BeginnerPencilDepthContour(uv) * saturate(depthContourAmount);
     art = lerp(art, art * 0.42, depthContour);
@@ -3461,16 +3494,19 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
-        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z is used only for the optional depth contour.", "Stylized Screen",
+        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, paper and stroke styling are artist-friendly, and Float-Z is used only for the optional depth contour.", "Stylized Screen",
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "Blend between the original BO3 scene and the colored-pencil reconstruction.", 0.0, 1.0, 0.01, 0.94),
                    FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes. 1.0 matches the approved standalone shader.", 0.25, 3.0, 0.01, 1.0),
+                   FloatParam("stroke_thickness", "Stroke Thickness", "Thickness of the pencil linework independent of Stroke Scale. Lower values feel finer; higher values feel heavier and more filled in.", 0.25, 2.5, 0.01, 1.0),
                    FloatParam("grain", "Graphite Grain", "Monochrome random texture contribution used by the reference drawing algorithm.", 0.0, 1.5, 0.01, 0.70),
                    FloatParam("drawing_amount", "Drawing Amount", "How strongly the directional pencil reconstruction controls scene luminance.", 0.0, 1.0, 0.01, 0.86),
                    FloatParam("color_amount", "Color", "0 is pure graphite; 1 restores the approved colored-pencil pigment.", 0.0, 1.0, 0.01, 1.0),
                    FloatParam("contrast", "Contrast", "Final drawing contrast. 1.0 preserves the approved current look.", 0.25, 2.5, 0.01, 1.0),
                    FloatParam("brightness", "Brightness", "Final drawing brightness. 1.0 preserves the approved current look.", 0.25, 2.0, 0.01, 1.0),
                    FloatParam("paper_whiteness", "Paper Whiteness", "Restore the old pencil shader's white-paper response in low-ink, low-detail regions. This is stroke-driven, not depth-driven; skies often become much lighter because they contain less pencil ink.", 0.0, 1.0, 0.01, 0.0),
+                   ColorParam("paper_color", "Paper Color", "Color of the revealed paper. Default white preserves the current look; warmer or cooler colors tint the blank paper regions.", "#FFFFFF"),
+                   ColorParam("stroke_color", "Stroke Color", "Color of the denser pencil linework. Default black preserves the current look.", "#000000"),
                    FloatParam("depth_contour", "Depth Contour", "Subtle Float-Z silhouette reinforcement. Keep low so depth supports the drawing instead of becoming a cartoon outline.", 0.0, 0.5, 0.01, 0.10),
                    FloatParam("paper", "Edge White", "Optional white outside-frame fade from the original reference. 0 disables it.", 0.0, 1.0, 0.01, 0.0),
                    FloatParam("vignette", "Vignette", "Optional edge darkening. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),
