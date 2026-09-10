@@ -1628,6 +1628,8 @@ public:
                !postHlsl.contains("BO3_BEGINNER_PENCIL_APPROVED_SATURATION = 1.08") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_STROKE_THICKNESS") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_PAPER_COLOR") ||
+               !postHlsl.contains("Paper Color must be applied AFTER the monochrome/colored-pencil rebuild") ||
+               !postHlsl.contains("art = lerp(art, selectedPaperColor") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_STROKE_COLOR") ||
                !postHlsl.contains("float paperMask = smoothstep(0.42, 0.92, saturate(col.x))") ||
                postHlsl.contains("BO3BeginnerPencilSkyMask") ||

@@ -2410,14 +2410,6 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float strokeThic
     float paperMask = smoothstep(0.42, 0.92, saturate(col.x));
     float3 pencilBase = lerp(col2, 1.0.xxx, paperMask * saturate(paperWhitenessAmount));
 
-    // BO3_BEGINNER_PENCIL_PAPER_COLOR
-    // Tint only the revealed paper regions. Default paperColor is white, which
-    // intentionally preserves the current approved look.
-    float paperTintStrength = saturate(length(saturate(paperColor) - 1.0.xxx) / 1.7320508);
-    float paperLum = saturate(BO3BeginnerPencilLuma(pencilBase));
-    float3 paperTinted = BO3BeginnerPencilSetLum(saturate(paperColor), paperLum);
-    pencilBase = lerp(pencilBase, paperTinted, paperMask * paperTintStrength);
-
     float3 sketch = saturate(col.x * pencilBase);
     float sketchLum = saturate(BO3BeginnerPencilLuma(sketch));
 
@@ -2433,6 +2425,17 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float strokeThic
     float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
     float3 monoArt = targetLum.xxx;
     float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
+
+    // BO3_BEGINNER_PENCIL_PAPER_COLOR
+    // Paper Color must be applied AFTER the monochrome/colored-pencil rebuild.
+    // Otherwise Color=0 converts the selected paper hue straight back to gray.
+    // White is the neutral/default paper, so it remains a true no-op and keeps
+    // the approved Pencil default unchanged.
+    float3 selectedPaperColor = saturate(paperColor);
+    float paperColorDistance = length(selectedPaperColor - 1.0.xxx) / 1.7320508;
+    float paperTintStrength = smoothstep(0.001, 0.08, paperColorDistance);
+    float paperReveal = paperMask * lerp(0.45, 1.0, saturate(paperWhitenessAmount));
+    art = lerp(art, selectedPaperColor, saturate(paperReveal * paperTintStrength));
 
     // BO3_BEGINNER_PENCIL_STROKE_COLOR
     // Tint only the denser pencil lines. Default strokeColor is black, and the
