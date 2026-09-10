@@ -4721,11 +4721,14 @@ PS_OUT ps_main(VS_OUT i)
     o.rt2 = float4(max(0.04, scalarSpec), 0.5, saturate(ao), 1.0 / 3.0);
     // RT3 is preview-only here so legacy vertex-only examples can still show
     // emissive. Real opaque BO3 GBuffer materials normally leave it unused.
-    o.rt3 = float4(emissive        // Keep the APE deferred-light shader in the Qt resource bundle rather
-        // than as a giant C++ string literal. MSVC limits individual/combined
-        // string literals to roughly 16 KiB (C2026), while this shader is a
-        // little larger than that. Loading it from qrc also keeps the shader
-        // readable and independently diffable without changing runtime behavior.
+    o.rt3 = float4(emissive, saturate(ao));
+    return o;
+}
+)";
+
+        // Keep the APE deferred-light shader in the Qt resource bundle rather
+        // than as a giant C++ string literal. Loading it from qrc avoids MSVC
+        // C2026 while keeping the shader readable and independently diffable.
         QFile deferredLightResource(QStringLiteral(":/preview/ape_deferred_lighting.hlsl"));
         if (!deferredLightResource.open(QIODevice::ReadOnly))
         {
@@ -4740,10 +4743,6 @@ PS_OUT ps_main(VS_OUT i)
             error = L"Built-in APE deferred lighting shader resource is empty.";
             return false;
         }
-
-         return source;
-        }();
-
         const char* deferredLightPsSource = deferredLightPsSourceStorage.c_str();
 
         auto compileBlob = [&](const char* source, const char* debugName, const char* entry, const char* profile, ComPtr<ID3DBlob>& code) -> bool
