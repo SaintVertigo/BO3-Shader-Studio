@@ -2472,8 +2472,10 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                 return "generated CSC integration lost the proven client PostFX readiness delay";
             if(!script.contains("[[custom_paint_pass]]->Set( \"mtl_custom_paint\", 0, false, false );"))
                 return "generated filter pass does not point at the exported material";
-            if(!script.contains("[[custom_paint_filter]]->Set( \"custom_paint\", BO3HLSL_FILTER_INDEX_PERSISTENT, custom_paint_pass );"))
-                return "generated CSC integration does not reserve the persistent PostFX filter slot";
+            if(!script.contains("[[custom_paint_filter]]->Set( \"custom_paint\", 6, custom_paint_pass );"))
+                return "generated CSC integration does not reserve literal persistent PostFX filter slot 6";
+            if(script.contains("BO3HLSL_FILTER_INDEX_PERSISTENT"))
+                return "generated CSC integration still depends on the optional _filters.gsh persistent-slot macro";
             if(!script.contains("self filters::enable_filter_persistent( \"custom_paint\" );"))
                 return "generated CSC integration does not enable the material through the persistent _filters path";
             if(script.contains("REGISTER_SYSTEM") || script.contains("playPostfxBundle"))
@@ -6897,7 +6899,7 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
             "    %1_pass = new Pass();\n"
             "    [[%1_pass]]->Set( \"%3\", 0, false, false );\n\n"
             "    %1_filter = new Filter();\n"
-            "    [[%1_filter]]->Set( \"%2\", BO3HLSL_FILTER_INDEX_PERSISTENT, %1_pass );\n"
+            "    [[%1_filter]]->Set( \"%2\", 6, %1_pass );\n"
             "    level.postFxFilters[\"%2\"] = %1_filter;\n"
             "}\n\n"
             "function enable_%1_filter()\n"
@@ -12706,6 +12708,98 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         dlg.exec();
     }
 
+    void replaceBo3PostFxFilters()
+    {
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        QString bo3Root = QDir::cleanPath(settings.value("bo3/exportRoot").toString());
+
+        auto looksLikeBo3Root = [](const QString& root) -> bool
+        {
+            if(root.trimmed().isEmpty() || !QFileInfo(root).isDir()) return false;
+            const QDir dir(root);
+            return QFileInfo(dir.filePath("BlackOps3.exe")).exists() ||
+                   QFileInfo(dir.filePath("share/raw")).isDir();
+        };
+
+        if(!looksLikeBo3Root(bo3Root))
+        {
+            bo3Root = QFileDialog::getExistingDirectory(
+                this,
+                "Choose Call of Duty Black Ops III Install Folder",
+                bo3Root);
+            if(bo3Root.isEmpty()) return;
+            bo3Root = QDir::cleanPath(bo3Root);
+        }
+
+        if(!looksLikeBo3Root(bo3Root))
+        {
+            QMessageBox::warning(
+                this,
+                "Replace BO3 PostFX Filters",
+                "That folder does not look like the Call of Duty: Black Ops III install root.\n\n"
+                "Choose the folder that contains BlackOps3.exe and the share/raw folder.");
+            return;
+        }
+
+        const QString filtersCsc = readRuntimeTextFile("export_templates/_filters.csc");
+        const QString filtersGsh = readRuntimeTextFile("export_templates/_filters.gsh");
+        if(filtersCsc.isEmpty() || filtersGsh.isEmpty())
+        {
+            QMessageBox::critical(
+                this,
+                "Replace BO3 PostFX Filters",
+                "Shader Studio could not find its bundled _filters.csc / _filters.gsh templates.\n\n"
+                "Reinstall or repair Shader Studio before replacing the BO3 files.");
+            return;
+        }
+
+        const QString postFxDir = QDir(bo3Root).filePath("share/raw/scripts/postfx");
+        const QString cscPath = QDir(postFxDir).filePath("_filters.csc");
+        const QString gshPath = QDir(postFxDir).filePath("_filters.gsh");
+
+        QMessageBox confirm(QMessageBox::Warning,
+                            "Replace BO3 PostFX Filters",
+                            "This will OVERWRITE both BO3 PostFX filter support files:\n\n"
+                            + QDir::toNativeSeparators(cscPath) + "\n"
+                            + QDir::toNativeSeparators(gshPath) +
+                            "\n\nAny custom edits currently inside those two files will be lost. "
+                            "Only continue if you want Shader Studio's current persistent-PostFX versions to replace them.",
+                            QMessageBox::NoButton,
+                            this);
+        QPushButton* replaceButton = confirm.addButton("Replace Both Files", QMessageBox::AcceptRole);
+        QPushButton* cancelButton = confirm.addButton("Cancel", QMessageBox::RejectRole);
+        confirm.setDefaultButton(cancelButton);
+        confirm.exec();
+        if(confirm.clickedButton() != replaceButton) return;
+
+        QDir().mkpath(postFxDir);
+        QString error;
+        if(!writeTextFileQt(cscPath, filtersCsc, error))
+        {
+            QMessageBox::critical(this, "Replace BO3 PostFX Filters", error);
+            return;
+        }
+        if(!writeTextFileQt(gshPath, filtersGsh, error))
+        {
+            QMessageBox::critical(
+                this,
+                "Replace BO3 PostFX Filters",
+                error + "\n\n_filters.csc was already replaced, but _filters.gsh could not be written. "
+                        "Run Replace Filters again after fixing the file/folder permissions.");
+            return;
+        }
+
+        settings.setValue("bo3/exportRoot", bo3Root);
+        QMessageBox::information(
+            this,
+            "BO3 PostFX Filters Replaced",
+            "Done. Shader Studio replaced:\n\n"
+            "• _filters.csc\n"
+            "• _filters.gsh\n\n"
+            "in:\n" + QDir::toNativeSeparators(postFxDir) +
+            "\n\nIf BO3 Mod Tools was open, restart it before testing/exporting the shader.");
+    }
+
     void exportToBO3()
     {
         const bool beginnerExport = beginnerUiMode_ && beginnerProjectActive_;
@@ -16008,10 +16102,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* actions = new QHBoxLayout();
         auto* viewCode = new QPushButton("Learn How It Works");
         viewCode->setToolTip("See the visual recipe behind this shader. Generated HLSL is optional.");
+        auto* replaceFiltersButton = new QPushButton("Replace Filters");
+        replaceFiltersButton->setToolTip("Replace BO3's share/raw/scripts/postfx/_filters.csc and _filters.gsh with Shader Studio's current versions. You will be warned before either file is overwritten.");
         auto* exportButton = new QPushButton("Export to Black Ops III");
         exportButton->setObjectName("PrimaryAction");
         exportButton->setMinimumHeight(38);
         actions->addWidget(viewCode);
+        actions->addWidget(replaceFiltersButton);
         actions->addWidget(exportButton, 1);
         rightLayout->addLayout(actions);
 
@@ -16069,6 +16166,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(viewCode, &QPushButton::clicked, this, [this]
         {
             showBeginnerLearningDialog();
+        });
+        connect(replaceFiltersButton, &QPushButton::clicked, this, [this]
+        {
+            replaceBo3PostFxFilters();
         });
         connect(exportButton, &QPushButton::clicked, this, [this]
         {
@@ -16179,6 +16280,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         glslConverterAction->setToolTip("Convert common GLSL/Shadertoy fragment shaders into BO3 PostFX, procedural sky, Material / Surface, or HLSL syntax.");
         auto* shaderInputsAction = toolsMenu->addAction("Shader Inputs / Textures...");
         shaderInputsAction->setToolTip("Open Shadertoy / GLSL iChannel texture inputs and material texture bindings.");
+        auto* replaceFiltersAction = toolsMenu->addAction("Replace BO3 PostFX Filters...");
+        replaceFiltersAction->setToolTip("Explicitly overwrite share/raw/scripts/postfx/_filters.csc and _filters.gsh with Shader Studio's current persistent-PostFX support files. A warning is shown before anything is replaced.");
         toolsMenu->addSeparator();
         auto* glslRegressionAction = toolsMenu->addAction("Run GLSL Converter Regression Suite");
         glslRegressionAction->setToolTip("Convert and FXC-compile the bundled GLSL regression corpus. Use this after converter changes instead of testing random shaders one at a time.");
@@ -16399,6 +16502,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(includeAction, &QAction::triggered, this, [this]{ chooseIncludeRoot(); });
         connect(selectTechsetAction, &QAction::triggered, this, [this]{ selectAssociatedTechset(); });
         connect(exportBo3Action, &QAction::triggered, this, [this]{ exportToBO3(); });
+        connect(replaceFiltersAction, &QAction::triggered, this, [this]{ replaceBo3PostFxFilters(); });
         connect(exportFoldersAction, &QAction::triggered, this, [this]{ showBO3ExportLocations(); });
         connect(installHistoryAction, &QAction::triggered, this, [this]{ showBO3InstallHistory(); });
         connect(learningGuideAction, &QAction::triggered, this, [this]{ showBo3LearningGuide(-1); });
