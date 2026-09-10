@@ -38,6 +38,17 @@ enum class PreviewSourceEncoding
     HdrSceneLinear = 1
 };
 
+// Material preview intent is deliberately separate from the shader/package
+// target. APE Match mirrors the BO3 Asset Property Editor's TOOLSGFX viewport,
+// LookDev is the artist-friendly Studio renderer, and Neutral is an unlit
+// diagnostic view equivalent to APE's Rendering -> No Lighting mode.
+enum class MaterialPreviewProfile
+{
+    ApeMatch = 0,
+    LookDev = 1,
+    Neutral = 2
+};
+
 enum class LiveComparisonMode
 {
     ProcessedOnly = 0,
@@ -118,6 +129,7 @@ public:
     void Resize(UINT w, UINT h);
     bool CompilePixelShader(const std::string& userSource, const std::filesystem::path& sourcePath, const std::filesystem::path& includeRoot, const std::string& entryPoint, const std::string& profile, bool injectBO3Globals, std::wstring& errors);
     bool LoadEnvironmentTexture(const std::filesystem::path& path, std::wstring& error);
+    bool LoadEnvironmentCubemapFaces(const std::array<std::filesystem::path, 6>& faces, std::wstring& error, UINT outputWidth = 2048, UINT outputHeight = 1024);
     bool CreateDefaultStudioEnvironment(std::wstring& error);
     void ClearEnvironmentTexture();
     bool EnvironmentEnabled() const;
@@ -128,6 +140,13 @@ public:
     bool EnvironmentAffectsLighting() const;
     void SetFulbright(bool enabled);
     bool Fulbright() const;
+    void SetMaterialPreviewProfile(MaterialPreviewProfile profile);
+    MaterialPreviewProfile GetMaterialPreviewProfile() const;
+    void SetLightColor(float r, float g, float b);
+    std::array<float,3> LightColor() const;
+    void ResetLightColorToEnvironment();
+    void SetEnvironmentRotationDegrees(float degrees);
+    float EnvironmentRotationDegrees() const;
     bool LoadShadertoyChannelTexture(int channel, const std::filesystem::path& path, bool flipY, std::wstring& error);
     void ClearShadertoyChannelTexture(int channel);
     void SetShadertoyChannelRepeat(int channel, bool repeat);

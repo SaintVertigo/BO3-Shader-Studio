@@ -17634,7 +17634,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         outer->setContentsMargins(8, 8, 8, 8);
         outer->setSpacing(10);
 
-        auto* intro = new QLabel("APE-style material preview lighting. Hold Shift + left-drag over the 3D preview to rotate the sun exactly like APE. A built-in studio sky is loaded by default; you can also load an equirectangular EXR or image sky/environment to light the material and ground, or switch to Fulbright to view the material with no lighting.");
+        auto* intro = new QLabel("Material preview now has three explicit intents: APE Match reproduces the recovered BO3 Asset Property Editor lighting presets, Look Dev keeps the Studio's artist-friendly controls, and Neutral mirrors APE's Rendering -> No Lighting diagnostic view. Shift + left-drag still rotates the sun for manual look-dev work.");
         intro->setWordWrap(true);
         intro->setStyleSheet("QLabel { color:#B9C0CA; }");
         outer->addWidget(intro);
@@ -17654,6 +17654,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         modelHint->setWordWrap(true); modelHint->setObjectName("CompactHelp");
         modelLayout->addWidget(modelHint);
         outer->addWidget(modelGroup);
+
+        auto* profileRow = new QHBoxLayout();
+        profileRow->addWidget(new QLabel("Preview profile:"));
+        materialPreviewProfileCombo_ = new QComboBox();
+        materialPreviewProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
+        materialPreviewProfileCombo_->setCurrentIndex(1); // preserve existing Studio behavior until the user opts into APE Match
+        materialPreviewProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral bypasses environment/direct lighting like APE's No Lighting mode.");
+        profileRow->addWidget(materialPreviewProfileCombo_);
+        profileRow->addSpacing(8);
+        profileRow->addWidget(new QLabel("APE lighting:"));
+        apeLightingPresetCombo_ = new QComboBox();
+        apeLightingPresetCombo_->addItems(QStringList{"Morning", "Day", "Sunset", "Night"});
+        apeLightingPresetCombo_->setCurrentIndex(1);
+        apeLightingPresetCombo_->setEnabled(false);
+        apeLightingPresetCombo_->setToolTip("Exact default SSI presets recovered from source_data/ssi.gdt, paired with the original Treyarch HDR environments.");
+        profileRow->addWidget(apeLightingPresetCombo_);
+        profileRow->addStretch(1);
+        outer->addLayout(profileRow);
+
+        apePresetInfoLabel_ = new QLabel("APE Match data ready: Day / Morning / Sunset / Night SSI presets + HDR environments.");
+        apePresetInfoLabel_->setObjectName("CompactHelp");
+        apePresetInfoLabel_->setWordWrap(true);
+        outer->addWidget(apePresetInfoLabel_);
 
         auto* presetRow = new QHBoxLayout();
         presetRow->addWidget(new QLabel("Lookdev preset:"));
@@ -17751,6 +17774,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         outer->addWidget(resetLight, 0, Qt::AlignLeft);
         outer->addStretch(1);
 
+        connect(materialPreviewProfileCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
+            applyMaterialPreviewProfile(index);
+        });
+        connect(apeLightingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
+            if (materialPreviewProfileCombo_ && materialPreviewProfileCombo_->currentIndex() == 0)
+                applyApeLightingPreset(index);
+        });
         connect(lightingModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
             if (preview_) preview_->renderer().SetFulbright(index == 1);
             syncSceneControlsFromRenderer();
@@ -20211,6 +20241,30 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void syncSceneControlsFromRenderer()
     {
         if (!preview_) return;
+        const MaterialPreviewProfile profile = preview_->renderer().GetMaterialPreviewProfile();
+        if (materialPreviewProfileCombo_)
+        {
+            QSignalBlocker blocker(materialPreviewProfileCombo_);
+            const int profileIndex = profile == MaterialPreviewProfile::ApeMatch ? 0 :
+                                     profile == MaterialPreviewProfile::Neutral ? 2 : 1;
+            materialPreviewProfileCombo_->setCurrentIndex(profileIndex);
+        }
+        if (apeLightingPresetCombo_)
+            apeLightingPresetCombo_->setEnabled(profile == MaterialPreviewProfile::ApeMatch);
+        const bool manualLookdev = profile == MaterialPreviewProfile::LookDev;
+        if (lightingPresetCombo_) lightingPresetCombo_->setEnabled(manualLookdev);
+        if (lightingModeCombo_) lightingModeCombo_->setEnabled(manualLookdev);
+        if (lightingQuickMode_) lightingQuickMode_->setEnabled(manualLookdev);
+        if (toneMapCombo_) toneMapCombo_->setEnabled(manualLookdev);
+        if (lookdevExposure_) lookdevExposure_->setEnabled(manualLookdev);
+        if (environmentLightingCheck_) environmentLightingCheck_->setEnabled(manualLookdev);
+        if (lightYawSlider_) lightYawSlider_->setEnabled(manualLookdev);
+        if (lightPitchSlider_) lightPitchSlider_->setEnabled(manualLookdev);
+        if (lightIntensitySlider_) lightIntensitySlider_->setEnabled(manualLookdev);
+        if (ambientSlider_) ambientSlider_->setEnabled(manualLookdev);
+        if (shadowSlider_) shadowSlider_->setEnabled(manualLookdev);
+        if (contactShadowSlider_) contactShadowSlider_->setEnabled(manualLookdev);
+
         const int lightingModeIndex = preview_->renderer().Fulbright() ? 1 : 0;
         if (lightingModeCombo_)
         {
@@ -20638,10 +20692,272 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         statusBar()->showMessage("Using built-in sphere preview",2500);
     }
 
+    QString configuredBo3RootForApe() const
+    {
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        const QString root = QDir::cleanPath(settings.value("bo3/exportRoot").toString());
+        if (root.isEmpty()) return QString();
+
+        const QDir dir(root);
+        const bool looksLikeBo3 = QFileInfo(dir.filePath("BlackOps3.exe")).exists() ||
+                                  QFileInfo(dir.filePath("share/raw")).isDir();
+        return looksLikeBo3 ? dir.absolutePath() : QString();
+    }
+
+    QString ensureConfiguredBo3RootForApe()
+    {
+        const QString configured = configuredBo3RootForApe();
+        if (!configured.isEmpty()) return configured;
+
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        QString startDir = QDir::cleanPath(settings.value("bo3/exportRoot").toString());
+        if (startDir.isEmpty() || !QFileInfo(startDir).isDir())
+            startDir = QDir::homePath();
+
+        const QString selected = QFileDialog::getExistingDirectory(
+            this,
+            "Locate Call of Duty Black Ops III",
+            startDir,
+            QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+        if (selected.isEmpty()) return QString();
+
+        const QDir dir(QDir::cleanPath(selected));
+        const bool looksLikeBo3 = QFileInfo(dir.filePath("BlackOps3.exe")).exists() ||
+                                  QFileInfo(dir.filePath("share/raw")).isDir();
+        if (!looksLikeBo3)
+        {
+            QMessageBox::warning(
+                this,
+                "APE Match",
+                "That folder does not look like the Black Ops III installation root.\n\n"
+                "Choose the folder containing BlackOps3.exe and the share\\raw Mod Tools data.");
+            return QString();
+        }
+
+        settings.setValue("bo3/exportRoot", dir.absolutePath());
+        return dir.absolutePath();
+    }
+
+    bool loadApeEnvironmentForPreset(int index, QString& sourceDescription, QString& failureDescription)
+    {
+        sourceDescription.clear();
+        failureDescription.clear();
+        if (!preview_) return false;
+
+        const QString root = ensureConfiguredBo3RootForApe();
+        if (root.isEmpty())
+        {
+            failureDescription =
+                "APE Match needs the local Black Ops III Mod Tools HDR sky assets. "
+                "Select the BO3 installation root when prompted (or configure it from Export).";
+            return false;
+        }
+
+        auto loadLatLong = [&](const QString& relative) -> bool
+        {
+            const QString absolute = QDir(root).filePath(relative);
+            if (!QFileInfo::exists(absolute))
+            {
+                failureDescription = QString("Missing local APE HDR source: %1")
+                    .arg(QDir::toNativeSeparators(absolute));
+                return false;
+            }
+            std::wstring error;
+            if (!preview_->renderer().LoadEnvironmentTexture(fs::path(absolute.toStdWString()), error))
+            {
+                failureDescription = QString("Could not load APE HDR source: %1\n%2")
+                    .arg(QDir::toNativeSeparators(absolute), ToQString(error));
+                return false;
+            }
+            sourceDescription = QDir::toNativeSeparators(absolute);
+            return true;
+        };
+
+        auto loadCube = [&](const QString& directory, const QString& stem) -> bool
+        {
+            const QStringList suffixes{"rt", "lf", "up", "dn", "ft", "bk"};
+            std::array<fs::path, 6> faces{};
+            QStringList displayPaths;
+            for (int i = 0; i < suffixes.size(); ++i)
+            {
+                const QString relative = directory + "/" + stem + "_" + suffixes[i] + ".exr";
+                const QString absolute = QDir(root).filePath(relative);
+                if (!QFileInfo::exists(absolute))
+                {
+                    failureDescription = QString("Missing local APE HDR cubemap face: %1")
+                        .arg(QDir::toNativeSeparators(absolute));
+                    return false;
+                }
+                faces[static_cast<size_t>(i)] = fs::path(absolute.toStdWString());
+                displayPaths.append(QDir::toNativeSeparators(absolute));
+            }
+
+            std::wstring error;
+            if (!preview_->renderer().LoadEnvironmentCubemapFaces(faces, error, 2048, 1024))
+            {
+                failureDescription = QString("Could not reconstruct APE HDR cubemap:\n%1")
+                    .arg(ToQString(error));
+                return false;
+            }
+            sourceDescription = displayPaths.first() + " (+ 5 cube faces)";
+            return true;
+        };
+
+        switch (std::clamp(index, 0, 3))
+        {
+        case 0: // Morning
+            return loadCube("model_export/t7_skybox/skybox_default", "skybox_default_day_clear_0700");
+        case 1: // Day
+            return loadLatLong("model_export/t7_skybox/skybox_default/skybox_default_day_ll.exr");
+        case 2: // Sunset
+            return loadLatLong("model_export/t7_skybox/skybox_default/skybox_default_sunset_ll.exr");
+        case 3: // Night
+            return loadCube("model_export/t7_skybox/zm_factory/Temp", "zm_skybox_factory_05");
+        default:
+            return false;
+        }
+    }
+
+    void applyMaterialPreviewProfile(int index)
+    {
+        if (!preview_) return;
+        auto& r = preview_->renderer();
+        if (index == 0)
+        {
+            r.SetMaterialPreviewProfile(MaterialPreviewProfile::ApeMatch);
+            r.SetFulbright(false);
+            if (apeLightingPresetCombo_) apeLightingPresetCombo_->setEnabled(true);
+            applyApeLightingPreset(apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            statusBar()->showMessage("APE Match enabled - recovered TOOLSGFX/SSI lighting is active", 3500);
+        }
+        else if (index == 2)
+        {
+            r.SetMaterialPreviewProfile(MaterialPreviewProfile::Neutral);
+            r.SetFulbright(true);
+            r.SetEnvironmentAffectsLighting(false);
+            r.SetBackgroundColor(76.0f / 255.0f, 102.0f / 255.0f, 127.0f / 255.0f); // exact flat RGB sampled from APE No Lighting viewport
+            r.SetGroundEnabled(false);
+            r.SetLookdevExposureEV(0.0f);
+            r.SetToneMapMode(0);
+            r.ResetLightColorToEnvironment();
+            statusBar()->showMessage("Neutral / No Lighting enabled - raw material response with APE-style background", 3500);
+        }
+        else
+        {
+            r.SetMaterialPreviewProfile(MaterialPreviewProfile::LookDev);
+            r.SetFulbright(false);
+            r.SetEnvironmentAffectsLighting(true);
+            r.ResetLightColorToEnvironment();
+            r.SetEnvironmentRotationDegrees(0.0f);
+            r.SetBackgroundColor(0.0f, 0.0f, 0.0f);
+            r.SetGroundEnabled(true);
+            std::wstring ignored;
+            r.CreateDefaultStudioEnvironment(ignored);
+            applyLightingPreset(lightingPresetCombo_ ? lightingPresetCombo_->currentIndex() : 0);
+            statusBar()->showMessage("Look Dev preview enabled", 2500);
+        }
+        updateBackgroundButtonText();
+        syncSceneControlsFromRenderer();
+    }
+
+    void applyApeLightingPreset(int index)
+    {
+        if (!preview_) return;
+        QString initError;
+        if (!preview_->ensureInitialized(initError))
+        {
+            QMessageBox::warning(this, "APE Match", "Could not initialize the Direct3D previewer: " + initError);
+            return;
+        }
+        struct ApePreset
+        {
+            const char* name;
+            float sunR, sunG, sunB;
+            float ssiPitch, ssiYaw;
+            float stops, ev, evComp, evMin, evMax;
+            float penumbra;
+            float previewExposureEv;
+            float ambient;
+            float shadow;
+            float environmentRotation;
+        };
+
+        // Source of truth: Treyarch's shipped source_data/ssi.gdt. The direct-light
+        // scale normalizes the recovered Stops/EV relationship so default_day is 1.
+        // previewExposureEv is intentionally a calibration value for APE's display
+        // transform; keeping it separate prevents screenshot tuning from corrupting
+        // the recovered SSI data.
+        static constexpr ApePreset presets[] = {
+            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.25f, 0.34f, 0.48f, 120.0f},
+            {"Day",     1.0f,      0.9764f,   0.9490f,   125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.55f, 0.34f, 0.55f, 120.0f},
+            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.65f, 0.30f, 0.55f, 120.0f},
+            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  5.00f, 0.20f, 0.66f, 120.0f}
+        };
+        const ApePreset& p = presets[std::clamp(index, 0, 3)];
+        auto& r = preview_->renderer();
+        r.SetMaterialPreviewProfile(MaterialPreviewProfile::ApeMatch);
+        r.SetFulbright(false);
+        r.SetEnvironmentAffectsLighting(true);
+        r.SetGroundEnabled(false); // APE's material viewport environment already contains its floor/background
+        r.SetToneMapMode(2);
+        r.SetLookdevExposureEV(p.previewExposureEv);
+        r.SetLightColor(p.sunR, p.sunG, p.sunB);
+        r.SetEnvironmentRotationDegrees(p.environmentRotation);
+
+        // APE reference framing recovered from the supplied sphere captures.
+        // The Studio already used the matching 45-degree FOV / 4.2 distance; APE's
+        // default material camera is pitched downward by about 26.7 degrees.
+        r.ResetCamera();
+        r.RotateCamera(0.0f, 26.7f);
+
+        // SSI uses the BO3 source coordinate frame.  Screenshot calibration across
+        // all four stock APE presets gives a fixed +90 degree yaw remap into the
+        // Studio frame while the elevation conversion remains 180 - SSI pitch.
+        const float elevation = std::clamp(180.0f - p.ssiPitch, -89.0f, 89.0f);
+        const float studioYaw = std::fmod(p.ssiYaw + 90.0f, 360.0f);
+        r.SetLightAngles(studioYaw, elevation);
+        const float directScale = std::clamp(std::pow(2.0f, p.stops - p.ev + p.evComp + 1.0f), 0.0f, 4.0f);
+        r.SetLightIntensity(directScale);
+        r.SetAmbientIntensity(p.ambient);
+        r.SetShadowStrength(p.shadow);
+        r.SetContactShadowStrength(0.0f);
+
+        QString environmentSource;
+        QString environmentFailure;
+        const bool environmentLoaded = loadApeEnvironmentForPreset(index, environmentSource, environmentFailure);
+        if (apePresetInfoLabel_)
+        {
+            const QString truth = QString("APE %1 | SSI Pitch %2 / Yaw %3 | Stops %4 | EV %5 | EV Comp %6 | EV range %7..%8 | calibrated camera")
+                .arg(QString::fromLatin1(p.name))
+                .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
+                .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
+                .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1);
+            if (environmentLoaded)
+            {
+                apePresetInfoLabel_->setText(truth + " | Local HDR source loaded");
+                apePresetInfoLabel_->setToolTip(environmentSource);
+            }
+            else
+            {
+                apePresetInfoLabel_->setText(truth + " | " + environmentFailure);
+                apePresetInfoLabel_->setToolTip(environmentFailure);
+            }
+        }
+        if (!environmentLoaded)
+            statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
+        else
+            statusBar()->showMessage(QString("APE Match %1: SSI + local HDR environment loaded").arg(QString::fromLatin1(p.name)), 3500);
+        syncSceneControlsFromRenderer();
+        updateCameraUi();
+    }
+
     void applyLightingPreset(int index)
     {
         if(!preview_) return;
         auto& r=preview_->renderer();
+        r.SetMaterialPreviewProfile(MaterialPreviewProfile::LookDev);
+        r.SetEnvironmentAffectsLighting(true);
+        r.ResetLightColorToEnvironment();
         switch(index)
         {
         case 1: // Daylight
@@ -20950,6 +21266,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QPushButton* backgroundColorButton_ = nullptr;
     QComboBox* lightingModeCombo_ = nullptr;
     QComboBox* lightingPresetCombo_ = nullptr;
+    QComboBox* materialPreviewProfileCombo_ = nullptr;
+    QComboBox* apeLightingPresetCombo_ = nullptr;
+    QLabel* apePresetInfoLabel_ = nullptr;
     QComboBox* toneMapCombo_ = nullptr;
     QDoubleSpinBox* lookdevExposure_ = nullptr;
     QCheckBox* groundCheck_ = nullptr;

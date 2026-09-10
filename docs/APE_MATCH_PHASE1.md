@@ -1,0 +1,90 @@
+# APE Match — Phase 1
+
+This pass starts the BO3 Shader Studio material-preview parity work with Treyarch's Asset Property Editor (APE). It is intentionally a renderer/validation foundation rather than a visual UI overhaul.
+
+## Preview profiles
+
+The Material Preview scene now has three explicit profiles:
+
+- **APE Match** — applies the recovered APE SSI defaults and loads Treyarch's HDR environment sources from the user's own Black Ops III Mod Tools install.
+- **Look Dev** — preserves Shader Studio's existing artist-friendly preview and manual lighting controls.
+- **Neutral / No Lighting** — mirrors APE's diagnostic no-lighting intent: environment/direct/specular lighting is bypassed and the material is shown against the APE-style blue-gray clear color.
+
+APE Match locks the ordinary Look Dev lighting/exposure controls so a preset cannot be accidentally changed while it is being used as a parity reference.
+
+## Recovered APE default SSI data
+
+The values below come from the shipped `source_data/ssi.gdt` definitions used by the APE asset-viewer environment.
+
+| Preset | Sun sRGB | Pitch | Yaw | EV | EV Comp | EV Min | EV Max | Stops | Penumbra | Skybox |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Morning | 1.0000, 0.8941, 0.7411 | 165 | 263 | 13.5 | 0 | -32 | 31 | 11.29999785 | 1.0 | `skybox_default_day_clear_0700` |
+| Day | 1.0000, 0.9764, 0.9490 | 125 | 150 | 15 | 0 | 1 | 16 | 14 | 1.5 | `skybox_default_day` |
+| Sunset | 1.0000, 0.768151, 0.545725 | 158 | 300 | 12.5 | 0 | 8 | 12.5 | 11 | 1.5 | `skybox_default_sunset` |
+| Night | 0.791298, 1.0000, 1.0000 | 130 | 140 | 6 | 2.5 | 3 | 3.5 | -2.2 | 1.5 | `skybox_default_night` |
+
+All four recovered default SSI records use four bounces, dynamic shadows, sun enabled, and `spec_comp = 0`.
+
+## Local HDR sources
+
+Shader Studio does **not** redistribute Treyarch/Activision game assets. APE Match resolves the original environment files from the BO3 install root already saved by the exporter.
+
+Expected source paths:
+
+- Morning: `model_export/t7_skybox/skybox_default/skybox_default_day_clear_0700_{rt,lf,up,dn,ft,bk}.exr`
+- Day: `model_export/t7_skybox/skybox_default/skybox_default_day_ll.exr`
+- Sunset: `model_export/t7_skybox/skybox_default/skybox_default_sunset_ll.exr`
+- Night: `model_export/t7_skybox/zm_factory/Temp/zm_skybox_factory_05_{rt,lf,up,dn,ft,bk}.exr`
+
+Morning and Night are reconstructed from the six cube faces into an HDR equirectangular preview texture. Day and Sunset use their original lat-long EXRs.
+
+If the BO3 root is not configured or an asset is missing, Shader Studio keeps the recovered SSI settings active but clearly reports that the local HDR source is unavailable. It does not silently bundle or substitute a proprietary asset.
+
+## HDR pipeline change
+
+OpenEXR environment textures now remain floating-point linear HDR when uploaded to Direct3D. The old path converted EXR skies to an 8-bit, pre-tone-mapped texture during load, which discarded the high-luminance range needed for APE-like reflections and specular response.
+
+The 8192x4096 Day/Sunset lat-longs are reduced to a 2048x1024 floating-point preview texture before GPU upload. Lighting statistics are still measured from the full-resolution decoded source. This keeps HDR values intact while avoiding a roughly 512 MiB RGBA32F environment allocation.
+
+## Phase-1 lighting model
+
+The source-of-truth SSI values and the screenshot-calibration values are deliberately separate. The current first-pass renderer:
+
+- applies the exact recovered SSI sun color and direction;
+- preserves HDR sky values;
+- uses a separate direct-light scale derived from the Stops/EV relationship;
+- uses isolated preview exposure/ambient/shadow calibration values per preset;
+- uses an ACES-style fitted display curve as a temporary APE Match display transform;
+- preserves the Studio's existing 45-degree material FOV and 4.2 camera distance, which match the APE reference sphere framing closely;
+- resets APE Match to a screenshot-calibrated ~26.7-degree camera pitch;
+- remaps the recovered SSI sun yaw by +90 degrees into the Studio coordinate frame while retaining `180 - SSI pitch` for sun elevation;
+- applies an APE-only horizontal environment handedness correction plus a 120-degree environment yaw calibration;
+- uses the sampled APE No Lighting clear color exactly as RGB 76, 102, 127.
+
+The calibration values are not claimed to be Treyarch engine constants. They exist only to converge the Studio output against reference APE screenshots without corrupting the recovered source data.
+
+## Screenshot calibration completed in this pass
+
+The supplied APE glossy-sphere captures were used only as regression/calibration references; they are not bundled with the Studio. Across Morning, Day, Sunset, and Night, the specular-highlight positions give a consistent fixed mapping from SSI space into the Studio camera frame. The resulting first-pass transform is:
+
+- material camera: 45-degree vertical FOV, distance 4.2, pitch ~26.7 degrees;
+- sun elevation: `180 - SSI pitch`;
+- Studio sun yaw: `(SSI yaw + 90) mod 360`;
+- APE environment sampling: horizontal handedness correction, then ~120 degrees of yaw rotation.
+
+The four-preset light-direction fit is internally consistent to roughly a degree in the provided reference frames, which is sufficient for a Phase-1 implementation. These remain explicitly labeled calibration values until the corresponding APE/ToolsGfx camera and sky-rotation constants are found directly.
+
+## Remaining parity work
+
+Phase 1 is not the final APE renderer. The next comparison pass should calibrate or replace the approximations for:
+
+1. replace the screenshot-calibrated camera/environment orientation constants with exact APE/ToolsGfx constants if they are recovered;
+2. ToolsGfx exposure/tonemap behavior (`ev`, `evcmp`, `evmin`, `evmax`, `stops`);
+3. probe convolution / roughness-dependent environment filtering;
+4. direct sun intensity and penumbra behavior;
+5. BO3 specular/gloss response and reflection weighting;
+6. APE preview mesh tangent/normal behavior;
+7. material category/techset-driven resource bindings;
+8. a later A/B comparison workflow using captured APE reference frames.
+
+The goal is to move each of these from screenshot approximation to a verified TOOLSGFX-compatible behavior as the relevant engine path is traced.

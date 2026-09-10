@@ -654,7 +654,6 @@ public:
 
             const UINT w = static_cast<UINT>(exrWidth);
             const UINT h = static_cast<UINT>(exrHeight);
-            std::vector<uint8_t> previewPixels(static_cast<size_t>(w) * h * 4);
 
             double sumR = 0.0, sumG = 0.0, sumB = 0.0, totalWeight = 0.0;
             double bestLum = -1.0;
@@ -669,21 +668,10 @@ public:
                     const float r = std::max(0.0f, exrPixels[i + 0]);
                     const float g = std::max(0.0f, exrPixels[i + 1]);
                     const float b = std::max(0.0f, exrPixels[i + 2]);
-                    const float a = std::clamp(exrPixels[i + 3], 0.0f, 1.0f);
-
-                    // EXR values are normally linear HDR. Tone-map only the
-                    // displayed sky texture; lighting statistics below remain
-                    // based on the original floating-point values.
-                    auto displayChannel = [](float v) -> uint8_t
-                    {
-                        const float mapped = v / (1.0f + v);
-                        const float srgbLike = std::pow(std::clamp(mapped, 0.0f, 1.0f), 1.0f / 2.2f);
-                        return static_cast<uint8_t>(std::lround(srgbLike * 255.0f));
-                    };
-                    previewPixels[i + 0] = displayChannel(r);
-                    previewPixels[i + 1] = displayChannel(g);
-                    previewPixels[i + 2] = displayChannel(b);
-                    previewPixels[i + 3] = static_cast<uint8_t>(std::lround(a * 255.0f));
+                    exrPixels[i + 0] = r;
+                    exrPixels[i + 1] = g;
+                    exrPixels[i + 2] = b;
+                    exrPixels[i + 3] = std::clamp(exrPixels[i + 3], 0.0f, 1.0f);
 
                     sumR += static_cast<double>(r) * rowWeight;
                     sumG += static_cast<double>(g) * rowWeight;
@@ -698,8 +686,61 @@ public:
                 }
             }
 
+            // Keep OpenEXR environment maps as floating-point linear HDR all the
+            // way to the preview shader. The previous path baked a Reinhard-like
+            // 8-bit image at load time, destroying the high-luminance range that
+            // APE/TOOLSGFX relies on for sky reflections and specular response.
+            //
+            // Treyarch's Day/Sunset source lat-longs are 8192x4096. Uploading
+            // those as RGBA32F would consume about 512 MiB of VRAM per sky, so
+            // use a preview-sized HDR copy while keeping statistics from the
+            // full-resolution source above. No clamping/tone mapping occurs.
+            const UINT maxPreviewWidth = 2048u;
+            const UINT maxPreviewHeight = 1024u;
+            UINT uploadW = w;
+            UINT uploadH = h;
+            std::vector<float> reducedHdr;
+            const float* uploadPixels = exrPixels;
+            if (w > maxPreviewWidth || h > maxPreviewHeight)
+            {
+                const float scale = std::min(static_cast<float>(maxPreviewWidth) / static_cast<float>(w),
+                                             static_cast<float>(maxPreviewHeight) / static_cast<float>(h));
+                uploadW = std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(w) * scale)));
+                uploadH = std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(h) * scale)));
+                reducedHdr.resize(static_cast<size_t>(uploadW) * uploadH * 4u);
+
+                for (UINT y = 0; y < uploadH; ++y)
+                {
+                    const float sourceY = ((static_cast<float>(y) + 0.5f) * static_cast<float>(h) /
+                                           static_cast<float>(uploadH)) - 0.5f;
+                    const UINT y0 = static_cast<UINT>(std::clamp(std::floor(sourceY), 0.0f, static_cast<float>(h - 1)));
+                    const UINT y1 = std::min(h - 1, y0 + 1);
+                    const float ty = std::clamp(sourceY - static_cast<float>(y0), 0.0f, 1.0f);
+                    for (UINT x = 0; x < uploadW; ++x)
+                    {
+                        const float sourceX = ((static_cast<float>(x) + 0.5f) * static_cast<float>(w) /
+                                               static_cast<float>(uploadW)) - 0.5f;
+                        const UINT x0 = static_cast<UINT>(std::clamp(std::floor(sourceX), 0.0f, static_cast<float>(w - 1)));
+                        const UINT x1 = std::min(w - 1, x0 + 1);
+                        const float tx = std::clamp(sourceX - static_cast<float>(x0), 0.0f, 1.0f);
+                        const size_t dst = (static_cast<size_t>(y) * uploadW + x) * 4u;
+                        const size_t i00 = (static_cast<size_t>(y0) * w + x0) * 4u;
+                        const size_t i10 = (static_cast<size_t>(y0) * w + x1) * 4u;
+                        const size_t i01 = (static_cast<size_t>(y1) * w + x0) * 4u;
+                        const size_t i11 = (static_cast<size_t>(y1) * w + x1) * 4u;
+                        for (int c = 0; c < 4; ++c)
+                        {
+                            const float top = exrPixels[i00 + c] + (exrPixels[i10 + c] - exrPixels[i00 + c]) * tx;
+                            const float bottom = exrPixels[i01 + c] + (exrPixels[i11 + c] - exrPixels[i01 + c]) * tx;
+                            reducedHdr[dst + c] = top + (bottom - top) * ty;
+                        }
+                    }
+                }
+                uploadPixels = reducedHdr.data();
+            }
+
             ComPtr<ID3D11ShaderResourceView> srv;
-            if (!CreateTextureSRV(previewPixels.data(), w, h, srv, error))
+            if (!CreateFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error))
             {
                 std::free(exrPixels);
                 return false;
@@ -707,13 +748,10 @@ public:
 
             if (totalWeight > 0.0)
             {
-                const float avgR = static_cast<float>(sumR / totalWeight);
-                const float avgG = static_cast<float>(sumG / totalWeight);
-                const float avgB = static_cast<float>(sumB / totalWeight);
                 environmentAverageColor_ = {
-                    avgR / (1.0f + avgR),
-                    avgG / (1.0f + avgG),
-                    avgB / (1.0f + avgB)
+                    static_cast<float>(sumR / totalWeight),
+                    static_cast<float>(sumG / totalWeight),
+                    static_cast<float>(sumB / totalWeight)
                 };
             }
             const float maxSun = std::max({brightestLinear[0], brightestLinear[1], brightestLinear[2], 0.0001f});
@@ -811,6 +849,191 @@ public:
         environmentPath_ = path;
         environmentEnabled_ = true;
         environmentIsEXR_ = false;
+        return true;
+    }
+
+    bool LoadEnvironmentCubemapFaces(const std::array<fs::path, 6>& faces, std::wstring& error,
+                                     UINT outputWidth, UINT outputHeight)
+    {
+        // Face order follows BO3's conventional names used by the APE sky assets:
+        // +X right, -X left, +Y up, -Y down, +Z front, -Z back.
+        struct FloatFace
+        {
+            UINT w = 0;
+            UINT h = 0;
+            std::vector<float> rgba;
+        };
+        std::array<FloatFace, 6> loaded{};
+
+        auto bilinear = [](const FloatFace& face, float u, float v) -> std::array<float,4>
+        {
+            if (face.rgba.empty() || face.w == 0 || face.h == 0) return {0,0,0,1};
+            u = std::clamp(u, 0.0f, 1.0f);
+            v = std::clamp(v, 0.0f, 1.0f);
+            const float fx = u * static_cast<float>(face.w - 1);
+            const float fy = v * static_cast<float>(face.h - 1);
+            const UINT x0 = static_cast<UINT>(fx);
+            const UINT y0 = static_cast<UINT>(fy);
+            const UINT x1 = std::min(face.w - 1, x0 + 1);
+            const UINT y1 = std::min(face.h - 1, y0 + 1);
+            const float tx = fx - static_cast<float>(x0);
+            const float ty = fy - static_cast<float>(y0);
+            std::array<float,4> out{};
+            for (int c = 0; c < 4; ++c)
+            {
+                const float a = face.rgba[(static_cast<size_t>(y0) * face.w + x0) * 4 + c];
+                const float b = face.rgba[(static_cast<size_t>(y0) * face.w + x1) * 4 + c];
+                const float d = face.rgba[(static_cast<size_t>(y1) * face.w + x0) * 4 + c];
+                const float e = face.rgba[(static_cast<size_t>(y1) * face.w + x1) * 4 + c];
+                const float top = a + (b - a) * tx;
+                const float bottom = d + (e - d) * tx;
+                out[c] = top + (bottom - top) * ty;
+            }
+            return out;
+        };
+
+        for (size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex)
+        {
+            float* exrPixels = nullptr;
+            int sourceW = 0, sourceH = 0;
+            const char* exrError = nullptr;
+            const std::string utf8Path = WideToUtf8(faces[faceIndex].wstring());
+            const int result = LoadEXR(&exrPixels, &sourceW, &sourceH, utf8Path.c_str(), &exrError);
+            if (result != TINYEXR_SUCCESS || !exrPixels || sourceW <= 0 || sourceH <= 0)
+            {
+                if (exrError)
+                {
+                    error = L"Could not decode APE cubemap face '" + faces[faceIndex].wstring() + L"': " + Utf8ToWide(exrError);
+                    FreeEXRErrorMessage(exrError);
+                }
+                else
+                    error = L"Could not decode APE cubemap face: " + faces[faceIndex].wstring();
+                if (exrPixels) std::free(exrPixels);
+                return false;
+            }
+
+            const UINT srcW = static_cast<UINT>(sourceW);
+            const UINT srcH = static_cast<UINT>(sourceH);
+            const UINT maxFaceDimension = 1024;
+            const float reduction = std::min(1.0f, static_cast<float>(maxFaceDimension) /
+                static_cast<float>(std::max(srcW, srcH)));
+            FloatFace face;
+            face.w = std::max<UINT>(1u, static_cast<UINT>(std::lround(srcW * reduction)));
+            face.h = std::max<UINT>(1u, static_cast<UINT>(std::lround(srcH * reduction)));
+            face.rgba.resize(static_cast<size_t>(face.w) * face.h * 4u);
+
+            if (face.w == srcW && face.h == srcH)
+            {
+                std::copy(exrPixels, exrPixels + static_cast<size_t>(srcW) * srcH * 4u, face.rgba.begin());
+            }
+            else
+            {
+                FloatFace sourceFace;
+                sourceFace.w = srcW;
+                sourceFace.h = srcH;
+                sourceFace.rgba.assign(exrPixels, exrPixels + static_cast<size_t>(srcW) * srcH * 4u);
+                for (UINT y = 0; y < face.h; ++y)
+                {
+                    const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(face.h);
+                    for (UINT x = 0; x < face.w; ++x)
+                    {
+                        const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(face.w);
+                        const auto sample = bilinear(sourceFace, u, v);
+                        const size_t dst = (static_cast<size_t>(y) * face.w + x) * 4u;
+                        for (int c = 0; c < 4; ++c) face.rgba[dst + c] = sample[c];
+                    }
+                }
+            }
+            std::free(exrPixels);
+            loaded[faceIndex] = std::move(face);
+        }
+
+        outputWidth = std::clamp<UINT>(outputWidth, 256u, 4096u);
+        outputHeight = std::clamp<UINT>(outputHeight, 128u, 2048u);
+        if (outputWidth != outputHeight * 2u) outputWidth = outputHeight * 2u;
+        std::vector<float> equirect(static_cast<size_t>(outputWidth) * outputHeight * 4u, 0.0f);
+
+        constexpr float kPi = 3.14159265358979323846f;
+        double sumR = 0.0, sumG = 0.0, sumB = 0.0, totalWeight = 0.0;
+        double bestLum = -1.0;
+        std::array<float,3> brightest{1,1,1};
+
+        auto sampleCube = [&](float x, float y, float z) -> std::array<float,4>
+        {
+            const float ax = std::abs(x), ay = std::abs(y), az = std::abs(z);
+            int face = 0;
+            float s = 0.0f, t = 0.0f, major = 1.0f;
+            if (ax >= ay && ax >= az)
+            {
+                major = std::max(ax, 1e-8f);
+                if (x >= 0.0f) { face = 0; s = -z / major; t = -y / major; }
+                else           { face = 1; s =  z / major; t = -y / major; }
+            }
+            else if (ay >= ax && ay >= az)
+            {
+                major = std::max(ay, 1e-8f);
+                if (y >= 0.0f) { face = 2; s =  x / major; t =  z / major; }
+                else           { face = 3; s =  x / major; t = -z / major; }
+            }
+            else
+            {
+                major = std::max(az, 1e-8f);
+                if (z >= 0.0f) { face = 4; s =  x / major; t = -y / major; }
+                else           { face = 5; s = -x / major; t = -y / major; }
+            }
+            return bilinear(loaded[face], s * 0.5f + 0.5f, t * 0.5f + 0.5f);
+        };
+
+        for (UINT y = 0; y < outputHeight; ++y)
+        {
+            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(outputHeight);
+            const float theta = v * kPi;
+            const float sinTheta = std::sin(theta);
+            const double rowWeight = std::max(0.001, static_cast<double>(sinTheta));
+            for (UINT x = 0; x < outputWidth; ++x)
+            {
+                const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(outputWidth);
+                const float phi = (u - 0.5f) * (2.0f * kPi);
+                const float dx = sinTheta * std::cos(phi);
+                const float dy = std::cos(theta);
+                const float dz = sinTheta * std::sin(phi);
+                auto sample = sampleCube(dx, dy, dz);
+                sample[0] = std::max(0.0f, sample[0]);
+                sample[1] = std::max(0.0f, sample[1]);
+                sample[2] = std::max(0.0f, sample[2]);
+                sample[3] = std::clamp(sample[3], 0.0f, 1.0f);
+                const size_t dst = (static_cast<size_t>(y) * outputWidth + x) * 4u;
+                for (int c = 0; c < 4; ++c) equirect[dst + c] = sample[c];
+
+                sumR += static_cast<double>(sample[0]) * rowWeight;
+                sumG += static_cast<double>(sample[1]) * rowWeight;
+                sumB += static_cast<double>(sample[2]) * rowWeight;
+                totalWeight += rowWeight;
+                const double lum = sample[0] * 0.2126 + sample[1] * 0.7152 + sample[2] * 0.0722;
+                if (lum > bestLum) { bestLum = lum; brightest = {sample[0], sample[1], sample[2]}; }
+            }
+        }
+
+        ComPtr<ID3D11ShaderResourceView> srv;
+        if (!CreateFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error)) return false;
+        if (totalWeight > 0.0)
+        {
+            environmentAverageColor_ = {
+                static_cast<float>(sumR / totalWeight),
+                static_cast<float>(sumG / totalWeight),
+                static_cast<float>(sumB / totalWeight)
+            };
+        }
+        const float maxSun = std::max({brightest[0], brightest[1], brightest[2], 0.0001f});
+        environmentSunColor_ = {
+            std::clamp(brightest[0] / maxSun, 0.0f, 1.0f),
+            std::clamp(brightest[1] / maxSun, 0.0f, 1.0f),
+            std::clamp(brightest[2] / maxSun, 0.0f, 1.0f)
+        };
+        environmentSRV_ = srv;
+        environmentPath_ = faces[4]; // front face is the most useful display name
+        environmentEnabled_ = true;
+        environmentIsEXR_ = true;
         return true;
     }
 
@@ -1101,6 +1324,24 @@ public:
     bool EnvironmentAffectsLighting() const { return environmentAffectsLighting_; }
     void SetFulbright(bool enabled) { fulbright_ = enabled; }
     bool Fulbright() const { return fulbright_; }
+    void SetMaterialPreviewProfile(MaterialPreviewProfile profile) { materialPreviewProfile_ = profile; }
+    MaterialPreviewProfile GetMaterialPreviewProfile() const { return materialPreviewProfile_; }
+    void SetLightColor(float r, float g, float b)
+    {
+        lightColor_ = {std::max(0.0f, r), std::max(0.0f, g), std::max(0.0f, b)};
+        useExplicitLightColor_ = true;
+    }
+    std::array<float,3> LightColor() const
+    {
+        return useExplicitLightColor_ ? lightColor_ : environmentSunColor_;
+    }
+    void ResetLightColorToEnvironment() { useExplicitLightColor_ = false; }
+    void SetEnvironmentRotationDegrees(float degrees)
+    {
+        environmentRotationDegrees_ = std::fmod(degrees, 360.0f);
+        if (environmentRotationDegrees_ < 0.0f) environmentRotationDegrees_ += 360.0f;
+    }
+    float EnvironmentRotationDegrees() const { return environmentRotationDegrees_; }
 
     bool LoadShadertoyChannelTexture(int channel, const fs::path& path, bool flipY, std::wstring& error)
     {
@@ -3017,7 +3258,7 @@ private:
     bool CreateDeferredLightBuffer(std::wstring& error)
     {
         D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = 112;
+        desc.ByteWidth = 128;
         desc.Usage = D3D11_USAGE_DYNAMIC;
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3042,6 +3283,7 @@ private:
             DirectX::XMFLOAT4 backgroundColor;
             DirectX::XMFLOAT4 lookdevSettings;
             DirectX::XMFLOAT4 debugSettings;
+            DirectX::XMFLOAT4 apeSettings;
         } data{};
         const float ly = DirectX::XMConvertToRadians(lightYawDegrees_);
         const float lp = DirectX::XMConvertToRadians(lightPitchDegrees_);
@@ -3050,13 +3292,20 @@ private:
         const float lz = std::cos(lp) * std::sin(ly);
         data.lightDirIntensity = {lx, lyy, lz, lightIntensity_};
         data.ambientShadow = {ambientIntensity_, shadowStrength_, environmentAffectsLighting_ ? 1.0f : 0.0f, environmentEnabled_ ? 1.0f : 0.0f};
-        const auto ambientColor = (environmentAffectsLighting_ && environmentEnabled_) ? environmentAverageColor_ : std::array<float,3>{0.26f, 0.26f, 0.28f};
-        const auto sunColor = (environmentAffectsLighting_ && environmentEnabled_) ? environmentSunColor_ : std::array<float,3>{1.0f, 1.0f, 1.0f};
+        auto ambientColor = (environmentAffectsLighting_ && environmentEnabled_) ? environmentAverageColor_ : std::array<float,3>{0.26f, 0.26f, 0.28f};
+        if (environmentIsEXR_ && materialPreviewProfile_ == MaterialPreviewProfile::LookDev)
+        {
+            for (float& c : ambientColor) c = c / (1.0f + std::max(0.0f, c));
+        }
+        const auto sunColor = useExplicitLightColor_
+            ? lightColor_
+            : ((environmentAffectsLighting_ && environmentEnabled_) ? environmentSunColor_ : std::array<float,3>{1.0f, 1.0f, 1.0f});
         data.environmentAmbient = {ambientColor[0], ambientColor[1], ambientColor[2], previewMode_ == PreviewMode::ForwardMaterial ? 1.0f : 0.0f};
         data.lightColorFulbright = {sunColor[0], sunColor[1], sunColor[2], fulbright_ ? 1.0f : 0.0f};
         data.backgroundColor = {backgroundColor_[0], backgroundColor_[1], backgroundColor_[2], 1.0f};
         data.lookdevSettings = {lookdevExposureEV_, static_cast<float>(toneMapMode_), groundEnabled_ ? 1.0f : 0.0f, contactShadowStrength_};
-        data.debugSettings = {static_cast<float>(gbufferView_), 0.0f, 0.0f, 0.0f};
+        data.debugSettings = {static_cast<float>(gbufferView_), static_cast<float>(materialPreviewProfile_), 0.0f, 0.0f};
+        data.apeSettings = {environmentRotationDegrees_ * (3.14159265358979323846f / 180.0f), 0.0f, 0.0f, 0.0f};
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(context_->Map(deferredLightBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
@@ -3697,6 +3946,9 @@ private:
         context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context_->VSSetShader(skyVertexShader_.Get(), nullptr, 0);
         UpdateEnvironmentCameraBuffer(vp);
+        UpdateDeferredLightBuffer();
+        ID3D11Buffer* environmentSettings = deferredLightBuffer_.Get();
+        context_->PSSetConstantBuffers(13, 1, &environmentSettings);
         context_->PSSetShader(environmentPixelShader_.Get(), nullptr, 0);
         context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
         ID3D11ShaderResourceView* env = environmentSRV_.Get();
@@ -3724,7 +3976,8 @@ private:
         lastViewportWidth_ = static_cast<UINT>(std::max(1.0f, vp.Width));
         lastViewportHeight_ = static_cast<UINT>(std::max(1.0f, vp.Height));
 
-        RenderEnvironmentBackground(vp);
+        if (materialPreviewProfile_ != MaterialPreviewProfile::Neutral)
+            RenderEnvironmentBackground(vp);
         context_->OMSetRenderTargets(1, renderTarget_.GetAddressOf(), materialDepthDSV_.Get());
         SetupMaterialGeometryPass(vp);
         const PreviewMeshBuffers* mesh = CurrentPreviewMesh();
@@ -4164,6 +4417,17 @@ float4 ps_main(VS_OUT i) : SV_Target0
         static const char* environmentPsSource = R"(
 Texture2D previewEnvironment : register(t0);
 SamplerState previewSampler : register(s0);
+cbuffer PreviewEnvironmentSettings : register(b13)
+{
+    float4 previewLightDirIntensity;
+    float4 previewAmbientShadow;
+    float4 previewEnvironmentAmbient;
+    float4 previewLightColorFulbright;
+    float4 previewBackgroundColor;
+    float4 previewLookdevSettings;
+    float4 previewDebugSettings;
+    float4 previewApeSettings;
+};
 
 struct VS_OUT
 {
@@ -4175,14 +4439,41 @@ struct VS_OUT
 float2 DirectionToEquirect(float3 direction)
 {
     float3 d = normalize(direction);
+    // APE/BO3's asset-preview environment uses the opposite horizontal
+    // handedness from the Studio camera frame. Keep this isolated to APE Match
+    // so Look Dev and user-authored environment orientation remain unchanged.
+    int profile = (int)(previewDebugSettings.y + 0.5);
+    if (profile == 0)
+        d.x = -d.x;
+    float angle = previewApeSettings.x;
+    float s = sin(angle), c = cos(angle);
+    d.xz = float2(d.x * c - d.z * s, d.x * s + d.z * c);
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
 }
 
+float3 ApplyEnvironmentDisplay(float3 color)
+{
+    color = max(color, 0.0);
+    int profile = (int)(previewDebugSettings.y + 0.5);
+    if (profile == 2) return previewBackgroundColor.rgb;
+    color *= exp2(previewLookdevSettings.x);
+    int mode = (int)(previewLookdevSettings.y + 0.5);
+    if (mode == 1)
+        color = color / (1.0 + color);
+    else if (mode == 2 || profile == 0)
+    {
+        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+        color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+    }
+    return color;
+}
+
 float4 ps_main(VS_OUT i) : SV_Target0
 {
-    return float4(previewEnvironment.Sample(previewSampler, DirectionToEquirect(i.skyDirection.xyz)).rgb, 1.0);
+    float3 env = previewEnvironment.Sample(previewSampler, DirectionToEquirect(i.skyDirection.xyz)).rgb;
+    return float4(ApplyEnvironmentDisplay(env), 1.0);
 }
 )";
 
@@ -4308,7 +4599,8 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewLightColorFulbright; // rgb sun color, w fulbright
     float4 previewBackgroundColor;     // preview clear/background color
     float4 previewLookdevSettings;     // x exposure EV, y tone map, z ground, w contact shadow
-    float4 previewDebugSettings;       // x = GBufferView enum
+    float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
+    float4 previewApeSettings;         // x = environment yaw rotation in radians
 };
 
 struct VS_OUT
@@ -4360,6 +4652,15 @@ float DecodeBo3Gloss(float packedGloss)
 float2 DirectionToEquirect(float3 direction)
 {
     float3 d = normalize(direction);
+    // APE/BO3's asset-preview environment uses the opposite horizontal
+    // handedness from the Studio camera frame. Keep this isolated to APE Match
+    // so Look Dev and user-authored environment orientation remain unchanged.
+    int profile = (int)(previewDebugSettings.y + 0.5);
+    if (profile == 0)
+        d.x = -d.x;
+    float angle = previewApeSettings.x;
+    float s = sin(angle), c = cos(angle);
+    d.xz = float2(d.x * c - d.z * s, d.x * s + d.z * c);
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
@@ -4376,13 +4677,24 @@ float3 EnvironmentAt(float2 uv)
 
 float3 ApplyLookdev(float3 color)
 {
-    color = max(color, 0.0) * exp2(previewLookdevSettings.x);
+    int profile = (int)(previewDebugSettings.y + 0.5);
+    color = max(color, 0.0);
+
+    // APE's No Lighting path is intentionally diagnostic: do not run HDR
+    // environment exposure or a filmic curve over the raw material response.
+    if (profile == 2)
+        return saturate(color);
+
+    color *= exp2(previewLookdevSettings.x);
     int mode = (int)(previewLookdevSettings.y + 0.5);
     if (mode == 1)
         color = color / (1.0 + color); // Reinhard
-    else if (mode == 2)
+    else if (mode == 2 || profile == 0)
     {
-        // ACES fitted curve - compact lookdev approximation.
+        // APE Match currently uses the same compact shoulder/toe curve while
+        // keeping the recovered SSI exposure and HDR environment separate.
+        // This is deliberately isolated so screenshot calibration can refine
+        // the display transform without changing Look Dev.
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
@@ -4423,6 +4735,10 @@ float4 ps_main(VS_OUT i) : SV_Target0
 
     if (depth >= 0.99999)
     {
+        const int profile = (int)(previewDebugSettings.y + 0.5);
+        if (profile == 2)
+            return float4(previewBackgroundColor.rgb, 1.0);
+
         // Procedural lookdev floor. It is a viewport aid only and never changes
         // the BO3 shader/package being validated.
         if (previewLookdevSettings.z > 0.5 && viewRay.y < -0.0001)
@@ -4478,7 +4794,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
     if (debugMode == 11) return float4(max(rt3.rgb, 0.0), 1.0);
 
-    if (previewLightColorFulbright.w > 0.5)
+    const int materialProfile = (int)(previewDebugSettings.y + 0.5);
+    if (previewLightColorFulbright.w > 0.5 || materialProfile == 2)
         return float4(ApplyLookdev(albedo + emissive), 1.0);
 
     float3 N = DecodeBo3GBufferNormal(rt1);
@@ -5780,6 +6097,10 @@ float4 ps_main(VS_OUT i) : SV_Target0
     bool environmentIsEXR_ = false;
     bool environmentAffectsLighting_ = true;
     bool fulbright_ = false;
+    MaterialPreviewProfile materialPreviewProfile_ = MaterialPreviewProfile::LookDev;
+    std::array<float, 3> lightColor_{1.0f, 1.0f, 1.0f};
+    bool useExplicitLightColor_ = false;
+    float environmentRotationDegrees_ = 0.0f;
     float lightYawDegrees_ = 135.0f;
     float lightPitchDegrees_ = 45.0f;
     float lightIntensity_ = 1.2f;
@@ -5930,6 +6251,11 @@ bool PreviewRenderer::LoadEnvironmentTexture(const std::filesystem::path& path, 
     return impl_->LoadEnvironmentTexture(path, error);
 }
 
+bool PreviewRenderer::LoadEnvironmentCubemapFaces(const std::array<std::filesystem::path, 6>& faces, std::wstring& error, UINT outputWidth, UINT outputHeight)
+{
+    return impl_->LoadEnvironmentCubemapFaces(faces, error, outputWidth, outputHeight);
+}
+
 bool PreviewRenderer::CreateDefaultStudioEnvironment(std::wstring& error)
 {
     return impl_->CreateDefaultStudioEnvironment(error);
@@ -5978,6 +6304,41 @@ void PreviewRenderer::SetFulbright(bool enabled)
 bool PreviewRenderer::Fulbright() const
 {
     return impl_->Fulbright();
+}
+
+void PreviewRenderer::SetMaterialPreviewProfile(MaterialPreviewProfile profile)
+{
+    impl_->SetMaterialPreviewProfile(profile);
+}
+
+MaterialPreviewProfile PreviewRenderer::GetMaterialPreviewProfile() const
+{
+    return impl_->GetMaterialPreviewProfile();
+}
+
+void PreviewRenderer::SetLightColor(float r, float g, float b)
+{
+    impl_->SetLightColor(r, g, b);
+}
+
+std::array<float,3> PreviewRenderer::LightColor() const
+{
+    return impl_->LightColor();
+}
+
+void PreviewRenderer::ResetLightColorToEnvironment()
+{
+    impl_->ResetLightColorToEnvironment();
+}
+
+void PreviewRenderer::SetEnvironmentRotationDegrees(float degrees)
+{
+    impl_->SetEnvironmentRotationDegrees(degrees);
+}
+
+float PreviewRenderer::EnvironmentRotationDegrees() const
+{
+    return impl_->EnvironmentRotationDegrees();
 }
 
 bool PreviewRenderer::LoadShadertoyChannelTexture(int channel, const std::filesystem::path& path, bool flipY, std::wstring& error)
