@@ -2064,6 +2064,9 @@ float4 ps_main(float4 p : SV_POSITION) : SV_TARGET { return 1.0; }
                 return "generic Beginner project name did not collapse to the authored effect name";
             if(cleanSuggestedExportBaseName("my_custom_pencil", 0, generatedPencil) != "my_custom_pencil")
                 return "explicit friendly export name was rewritten unexpectedly";
+            const QString cleanPencilMaterial = QStringLiteral("mtl_custom_") + cleanSuggestedExportBaseName("floatz_capture", 0, generatedPencil);
+            if(cleanPencilMaterial != "mtl_custom_pencil_sketch" || cleanPencilMaterial.contains("floatz", Qt::CaseInsensitive))
+                return "Float-Z capture naming leaked into the clean Pencil material regression fixture";
             return {};
         });
 
@@ -12239,6 +12242,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         QString finalZip = zipPath;
         if (!finalZip.endsWith(".zip", Qt::CaseInsensitive)) finalZip += ".zip";
+        if(QFileInfo::exists(finalZip))
+        {
+            QMessageBox replaceBox(QMessageBox::Warning,
+                                   "Package Already Exists",
+                                   QString("A shareable BO3 package with this name already exists:\n\n%1\n\nDo you want to replace it?")
+                                       .arg(QDir::toNativeSeparators(finalZip)),
+                                   QMessageBox::Yes | QMessageBox::No,
+                                   this);
+            replaceBox.setDefaultButton(QMessageBox::No);
+            replaceBox.setEscapeButton(QMessageBox::No);
+            replaceBox.button(QMessageBox::Yes)->setText("Replace Package");
+            replaceBox.button(QMessageBox::No)->setText("Keep Existing");
+            if(replaceBox.exec() != QMessageBox::Yes) return false;
+        }
         QFile::remove(finalZip);
 
         auto psQuote = [](QString value)
@@ -12862,6 +12879,30 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(savedNamespace.trimmed().isEmpty()) savedNamespace = "_custom";
         if(savedPrefix.trimmed().isEmpty()) savedPrefix = "custom";
 
+        // 0.16.x cleanup: older Float-Z/depth preview builds could persist their
+        // capture/debug stem as the hidden Beginner Asset prefix. The Base name
+        // was later cleaned, but that stale prefix still produced material names
+        // such as mtl_floatz_capture_pencil_sketch. Migrate only those known
+        // capture-style saved defaults; explicitly typed current-dialog names stay
+        // under user control.
+        auto isLegacyCaptureNamingToken = [](QString value) -> bool
+        {
+            value = value.trimmed().toLower();
+            value.remove(QRegularExpression(R"(^_+)"));
+            return (value.contains("floatz") && value.contains("capture")) ||
+                   (value.contains("float_z") && value.contains("capture")) ||
+                   (value.contains("depth") && value.contains("capture")) ||
+                   value == "floatz" || value == "float_z" || value == "depth_capture";
+        };
+        if(!settings.value("bo3/floatzNamingMigrated016", false).toBool())
+        {
+            if(isLegacyCaptureNamingToken(savedPrefix)) savedPrefix = "custom";
+            if(isLegacyCaptureNamingToken(savedNamespace)) savedNamespace = "_custom";
+            settings.setValue("bo3/assetPrefix", savedPrefix);
+            settings.setValue("bo3/exportNamespace", savedNamespace);
+            settings.setValue("bo3/floatzNamingMigrated016", true);
+        }
+
         auto* bo3Root = new QLineEdit(settings.value("bo3/exportRoot").toString());
         auto* browseRoot = new QPushButton("Browse...");
         auto* installHistoryButton = new QPushButton("History...");
@@ -13387,6 +13428,57 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 requestedInstallRoot = QDir::cleanPath(requestedInstallRoot);
             }
             settings.setValue("bo3/exportRoot", requestedInstallRoot);
+
+            // Never silently replace a previous export that uses the same shader
+            // identity. Check the stable shader/GDT/techset footprint before the
+            // temporary staging tree is copied into BO3 and ask explicitly.
+            QStringList existingNamedExportFiles;
+            auto addExistingNamedExport = [&](const QString& relative)
+            {
+                const QString absolute = QDir(requestedInstallRoot).filePath(relative);
+                if(QFileInfo::exists(absolute)) existingNamedExportFiles << QDir::toNativeSeparators(absolute);
+            };
+            addExistingNamedExport(QString("source_data/%1/%2.gdt").arg(ns, bn));
+            if(exportType == 0)
+            {
+                addExistingNamedExport(QString("share/raw/shaders_stable/%1.hlsl").arg(bn));
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable/postfx/%1.techsetdef").arg(tech));
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable_toolsgfx/postfx/%1.techsetdef").arg(tech));
+            }
+            else if(exportType == 1)
+            {
+                addExistingNamedExport(QString("share/raw/shaders_stable/%1/%2.hlsl").arg(ns, bn));
+                addExistingNamedExport(QString("share/raw/shaders_stable_toolsgfx/%1/%2.hlsl").arg(ns, bn));
+                const QString materialTechsetCategory = customMaterialSurface == 8 ? "geometry_effect"
+                    : ((customMaterialSurface == 5 || customMaterialSurface == 6) ? "decal" : "geometry_custom");
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable/%1/%2.techsetdef").arg(materialTechsetCategory, tech));
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable_toolsgfx/%1/%2.techsetdef").arg(materialTechsetCategory, tech));
+            }
+            else
+            {
+                addExistingNamedExport(QString("share/raw/shaders_stable/geometry/%1.hlsl").arg(bn));
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable/geometry/%1.techsetdef").arg(tech));
+                addExistingNamedExport(QString("share/raw/techsetdefs_stable_toolsgfx/geometry/%1.techsetdef").arg(tech));
+            }
+
+            existingNamedExportFiles.removeDuplicates();
+            if(!existingNamedExportFiles.isEmpty())
+            {
+                QString shown = existingNamedExportFiles.mid(0, 6).join("\n");
+                if(existingNamedExportFiles.size() > 6)
+                    shown += QString("\n...and %1 more matching file(s).").arg(existingNamedExportFiles.size() - 6);
+                QMessageBox replaceBox(QMessageBox::Warning,
+                                       "Shader Already Exported",
+                                       QString("A BO3 shader named '%1' already exists in this install.\n\nDo you want to replace the existing export?\n\n%2")
+                                           .arg(bn, shown),
+                                       QMessageBox::Yes | QMessageBox::No,
+                                       this);
+                replaceBox.setDefaultButton(QMessageBox::No);
+                replaceBox.setEscapeButton(QMessageBox::No);
+                replaceBox.button(QMessageBox::Yes)->setText("Replace Existing");
+                replaceBox.button(QMessageBox::No)->setText("Keep Existing");
+                if(replaceBox.exec() != QMessageBox::Yes) return;
+            }
         }
 
         const QString stable=QDir(rootPath).filePath("share/raw/shaders_stable");
