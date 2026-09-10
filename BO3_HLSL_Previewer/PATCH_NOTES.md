@@ -59,3 +59,9 @@ The original BO3 Shader Studio 0.1 bridge release should remain on GitHub so use
 - Fixed Windows/MSVC `C2026: string too big, trailing characters truncated` in `preview_renderer.cpp` after the Phase 1g deferred-lighting shader exceeded MSVC's per-literal limit.
 - The embedded deferred-light HLSL is now assembled at runtime from two smaller raw-string chunks; shader text and rendering behavior are unchanged.
 - No APE lighting constants or probe math were changed by this hotfix.
+
+## APE Match Phase 1g.2 — Definitive MSVC String-Literal Fix
+- GitHub build logs showed Phase 1g.1 still failed with `C2026` in the embedded deferred-light shader.
+- Reworked the shader embedding again: the HLSL is now appended in six independent raw-string statements inside a static initializer lambda.
+- Every deferred-light source literal is under 3 KB, well below MSVC's per-literal ceiling, and the reconstructed HLSL byte-for-byte matches the Phase 1g shader text.
+- Rendering math, SSI values, probe calibration, and APE lighting behavior are unchanged.

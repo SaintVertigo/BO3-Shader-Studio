@@ -4724,8 +4724,15 @@ PS_OUT ps_main(VS_OUT i)
 }
 )";
 
-        static const std::string deferredLightPsSourceStorage =
-            std::string(R"BO3_APE_DEFERRED(
+        static const std::string deferredLightPsSourceStorage = []()
+        {
+            // MSVC limits a single string literal to roughly 16 KiB. Keep the
+            // built-in deferred-light HLSL in several independently appended
+            // chunks so the compiler never concatenates it into one oversized
+            // literal during translation.
+            std::string source;
+            source.reserve(16700);
+            source += R"BO3_APE_0(
 Texture2D gbuffer0 : register(t0);
 Texture2D gbuffer1 : register(t1);
 Texture2D gbuffer2 : register(t2);
@@ -4798,7 +4805,8 @@ float3 DecodeBo3GBufferNormal(float4 normalGloss)
 float DecodeBo3Gloss(float packedGloss)
 {
     // For the flat tangent-space normal used by generated procedural materials,
-    // GBuffer_PackGloss reduces to a normalized 0..17 gloss scale followed by
+)BO3_APE_0";
+            source += R"BO3_APE_1(    // GBuffer_PackGloss reduces to a normalized 0..17 gloss scale followed by
     // BO3's 0.49755621 range/offset. Recover the normalized lookdev value.
     return saturate((packedGloss - 0.00146627566) / 0.49755621);
 }
@@ -4881,7 +4889,8 @@ float3 EnvironmentDirectionLod(float3 direction, float lod)
 {
     return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(direction),
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
-}
+)BO3_APE_1";
+            source += R"BO3_APE_2(}
 
 float3 EvaluateApeDiffuseIrradiance(float3 direction)
 {
@@ -4943,8 +4952,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
 
     if (depth >= 0.99999)
     {
-)BO3_APE_DEFERRED") +
-            R"BO3_APE_DEFERRED(        const int profile = (int)(previewDebugSettings.y + 0.5);
+        const int profile = (int)(previewDebugSettings.y + 0.5);
         if (profile == 2)
             return float4(previewBackgroundColor.rgb, 1.0);
 
@@ -4959,7 +4967,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
                 if (max(abs(p.x), abs(p.z)) < 7.0)
                 {
                     float2 cell = floor(p.xz * 2.0);
-                    float checker = fmod(abs(cell.x + cell.y), 2.0);
+)BO3_APE_2";
+            source += R"BO3_APE_3(                    float checker = fmod(abs(cell.x + cell.y), 2.0);
                     float3 floorColor = lerp(float3(0.075,0.078,0.082), float3(0.105,0.108,0.114), checker);
                     float contact = exp(-dot(p.xz, p.xz) * 2.8) * previewLookdevSettings.w;
                     float ndotl = saturate(previewLightDirIntensity.y);
@@ -5025,7 +5034,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
 
     // BO3 GBuffer RT2 is ReflectanceOcclusion, not a conventional
     // (specular.rgb, gloss) texture. Generated procedural materials currently
-    // use the stock dielectric 0.04 reflectance; RT2.z is occlusion. RT1.z owns
+)BO3_APE_3";
+            source += R"BO3_APE_4(    // use the stock dielectric 0.04 reflectance; RT2.z is occlusion. RT1.z owns
     // the packed gloss value.
     float reflectance = saturate(rt2.x);
     float3 specColor = max(float3(reflectance, reflectance, reflectance), float3(0.04, 0.04, 0.04));
@@ -5074,7 +5084,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
         }
         else
         {
-            float3 envDiffuse = EnvironmentDirection(N) * albedo * (previewAmbientShadow.x * 1.55) * ao;
+)BO3_APE_4";
+            source += R"BO3_APE_5(            float3 envDiffuse = EnvironmentDirection(N) * albedo * (previewAmbientShadow.x * 1.55) * ao;
             ambient = max(ambient, envDiffuse);
         }
     }
@@ -5112,7 +5123,10 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 color = ambient + direct + envSpec + emissive;
     return float4(ApplyLookdev(color), 1.0);
 }
-)BO3_APE_DEFERRED";
+)BO3_APE_5";
+            return source;
+        }();
+
         const char* deferredLightPsSource = deferredLightPsSourceStorage.c_str();
 
         auto compileBlob = [&](const char* source, const char* debugName, const char* entry, const char* profile, ComPtr<ID3DBlob>& code) -> bool
