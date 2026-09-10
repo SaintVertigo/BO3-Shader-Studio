@@ -1190,11 +1190,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString grain = parameterExpr(project, effect, *definition, "grain");
             const QString drawingAmount = parameterExpr(project, effect, *definition, "drawing_amount");
             const QString colorAmount = parameterExpr(project, effect, *definition, "color_amount");
+            const QString saturation = parameterExpr(project, effect, *definition, "saturation");
+            const QString contrast = parameterExpr(project, effect, *definition, "contrast");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString monochrome = parameterExpr(project, effect, *definition, "monochrome");
+            const QString tintStrength = parameterExpr(project, effect, *definition, "tint_strength");
+            const QColor tintColor = parameterColor(effect, *definition, "tint_color");
             const QString depthContour = parameterExpr(project, effect, *definition, "depth_contour");
             const QString edgeWhite = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
-            out += QString("    // %1 - BO3_BEGINNER_PENCIL_REFERENCE / BO3_BEGINNER_PENCIL_GAMMA_CORRECT: approved colored-pencil look; camera movement removed\n"
-                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), saturate(%8), saturate(%9), max(%10, 0.0));\n"
+            out += QString("    // %1 - BO3_BEGINNER_PENCIL_REFERENCE / BO3_BEGINNER_PENCIL_GAMMA_CORRECT / BO3_BEGINNER_PENCIL_STYLE_CONTROLS\n"
+                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), max(%8, 0.0), max(%9, 0.05), max(%10, 0.0), saturate(%11), saturate(%12), %13, saturate(%14), saturate(%15), max(%16, 0.0));\n"
                            "    color = lerp(color, %2_pencil, %3);\n")
                 .arg(definition->name)
                 .arg(tag)
@@ -1203,6 +1209,12 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                 .arg(grain)
                 .arg(drawingAmount)
                 .arg(colorAmount)
+                .arg(saturation)
+                .arg(contrast)
+                .arg(brightness)
+                .arg(monochrome)
+                .arg(tintStrength)
+                .arg(colorLiteral(tintColor))
                 .arg(depthContour)
                 .arg(edgeWhite)
                 .arg(vignette);
@@ -2324,6 +2336,9 @@ float BO3BeginnerPencilDepthContour(float2 uv)
 
 float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount,
                                   float drawingAmount, float colorAmount,
+                                  float saturationAmount, float contrastAmount,
+                                  float brightnessAmount, float monochromeAmount,
+                                  float tintStrength, float3 tintColor,
                                   float depthContourAmount, float edgeWhite,
                                   float vignetteAmount)
 {
@@ -2386,7 +2401,7 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
     float3 src = BO3BeginnerPencilSceneDisplay(uv);
     float srcLum = BO3BeginnerPencilLuma(src);
     float targetLum = lerp(srcLum, sketchLum, saturate(drawingAmount));
-    float3 sourcePigment = BO3BeginnerPencilAdjustSaturation(src, 1.08);
+    float3 sourcePigment = BO3BeginnerPencilAdjustSaturation(src, saturationAmount);
     float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
     float3 monoArt = targetLum.xxx;
     float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
@@ -2400,6 +2415,20 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
         float vign = saturate(1.0 - r * r * r * vignetteAmount);
         art *= vign;
     }
+
+    // BO3_BEGINNER_PENCIL_STYLE_CONTROLS
+    // New defaults are neutral except saturation=1.08, which is the exact
+    // saturation used by the approved current Pencil Sketch look.
+    float artLum = BO3BeginnerPencilLuma(art);
+    art = lerp(art, artLum.xxx, saturate(monochromeAmount));
+
+    float tintLum = BO3BeginnerPencilLuma(art);
+    float3 tintPigment = BO3BeginnerPencilSetLum(saturate(tintColor), tintLum);
+    art = lerp(art, tintPigment, saturate(tintStrength));
+
+    art = (art - 0.5.xxx) * max(contrastAmount, 0.05) + 0.5.xxx;
+    art *= max(brightnessAmount, 0.0);
+    art = saturate(art);
 
     return saturate(BO3BeginnerPencilSrgbToLinear(art));
 }
@@ -3442,6 +3471,12 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("grain", "Graphite Grain", "Monochrome random texture contribution used by the reference drawing algorithm.", 0.0, 1.5, 0.01, 0.70),
                    FloatParam("drawing_amount", "Drawing Amount", "How strongly the directional pencil reconstruction controls scene luminance.", 0.0, 1.0, 0.01, 0.86),
                    FloatParam("color_amount", "Color Amount", "Blend between monochrome graphite and the original BO3 scene colors.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("saturation", "Saturation", "Color saturation inside the pencil pigment. 1.08 preserves the approved current look; 0 removes color.", 0.0, 2.0, 0.01, 1.08),
+                   FloatParam("contrast", "Contrast", "Final drawing contrast. 1.0 preserves the approved current look.", 0.25, 2.5, 0.01, 1.0),
+                   FloatParam("brightness", "Brightness", "Final drawing brightness. 1.0 preserves the approved current look.", 0.25, 2.0, 0.01, 1.0),
+                   FloatParam("monochrome", "Black & White", "Blend the final colored-pencil result toward a true black-and-white drawing. 0 keeps the approved colored look; 1 is fully monochrome.", 0.0, 1.0, 0.01, 0.0),
+                   FloatParam("tint_strength", "Tint Strength", "Blend the drawing toward the selected Tint Color while preserving pencil luminance.", 0.0, 1.0, 0.01, 0.0),
+                   ColorParam("tint_color", "Tint Color", "Optional drawing tint. Tint Strength 0 leaves the approved colors untouched.", "#FFFFFF"),
                    FloatParam("depth_contour", "Depth Contour", "Subtle Float-Z silhouette reinforcement. Keep low so depth supports the drawing instead of becoming a cartoon outline.", 0.0, 0.5, 0.01, 0.10),
                    FloatParam("paper", "Edge White", "Optional white outside-frame fade from the original reference. 0 disables it.", 0.0, 1.0, 0.01, 0.0),
                    FloatParam("vignette", "Vignette", "Optional edge darkening. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),

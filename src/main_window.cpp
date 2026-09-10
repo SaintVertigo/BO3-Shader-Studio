@@ -1624,8 +1624,11 @@ public:
             if(!postHlsl.contains("BO3BeginnerPencilGetGrad") ||
                !postHlsl.contains("BO3BeginnerPencilGetColHT") ||
                !postHlsl.contains("const int sampNum = 16") ||
-               !postHlsl.contains("BO3BeginnerPencilSrgbToLinear"))
-                return "Beginner Pencil Sketch is missing the approved reference-faithful gamma-correct reconstruction.";
+               !postHlsl.contains("BO3BeginnerPencilSrgbToLinear") ||
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_STYLE_CONTROLS") ||
+               !postHlsl.contains("monochromeAmount") ||
+               !postHlsl.contains("tintStrength"))
+                return "Beginner Pencil Sketch is missing the approved gamma-correct reconstruction or its style controls.";
             if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
                beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
                beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||
