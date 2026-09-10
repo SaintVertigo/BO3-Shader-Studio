@@ -3754,6 +3754,14 @@ private:
         for (const auto& resource : resources_)
         {
             ID3D11ShaderResourceView* fallback = NeutralForDimension(resource.dimension);
+            const bool beginnerAlbedo = resource.name == "beginnerAlbedoMap";
+            if (beginnerAlbedo) fallback = neutralSRV_.Get();
+            else if (resource.name == "beginnerNormalMap") fallback = neutralNormalSRV_.Get();
+            else if (resource.name == "beginnerSpecularMap") fallback = neutralSpecularSRV_.Get();
+            else if (resource.name == "beginnerGlossMap") fallback = neutralGlossSRV_.Get();
+            else if (resource.name == "beginnerAOMap") fallback = neutralSRV_.Get();
+            else if (resource.name == "beginnerEmissiveMap") fallback = neutralBlackSRV_.Get();
+
             for (UINT n = 0; n < std::max(1u, resource.bindCount); ++n)
             {
                 const UINT slot = resource.slot + n;
@@ -3762,13 +3770,13 @@ private:
             }
             if (resource.name == "frameBuffer" && resource.slot == 0 && Is2DLike(resource.dimension))
             {
-                // Scene-sampling custom materials can reserve t0 for the live scene.
-                // Beginner materials no longer use this path, but keep the generic
-                // preview binding available for Advanced custom HLSL materials.
                 srvs[0] = sourceSRV_.Get();
                 reservesSceneSlot0 = true;
             }
-            else if (resource.slot == 0 && Is2DLike(resource.dimension)) srvs[0] = sourceSRV_.Get();
+            else if (resource.slot == 0 && Is2DLike(resource.dimension) && !beginnerAlbedo)
+            {
+                srvs[0] = sourceSRV_.Get();
+            }
 
             if (resource.name == "DepthSampler" && resource.slot == 1 && Is2DLike(resource.dimension))
             {

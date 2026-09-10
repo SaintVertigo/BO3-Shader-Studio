@@ -3296,6 +3296,109 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
 )HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects);
 }
 
+QString generateMaterialPreview(const Project& project)
+{
+    const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
+    const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
+    const QString effects = commonEffectCode(project, true, true);
+    return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
+// BO3_BEGINNER_PROJECT: 1
+// BO3_BEGINNER_TARGET: MATERIAL
+// BO3_BEGINNER_EFFECT_STACK: %1
+// BO3_PREVIEWER_MATERIAL_SURFACE: OPAQUE
+// BO3_BEGINNER_MATERIAL_PREVIEW_GBUFFER: 1
+
+#include "lib/globals.hlsl"
+#include "lib/transform.hlsl"
+#include "lib/vertdecl_vertex.hlsl"
+#include "lib/vertdecl_vertex_tangentspace.hlsl"
+#include "lib/gpu_skin.hlsl"
+#include "lib/gbuffer.hlsl"
+
+// Preview-only fixed material texture contract. Material Textures can be changed
+// live without recompiling. Empty slots receive semantic BO3-like fallbacks in
+// PreviewRenderer, so the legacy Base Color-only project still looks identical.
+Texture2D<float4> beginnerAlbedoMap   : register(t0);
+Texture2D<float4> beginnerNormalMap   : register(t2);
+Texture2D<float4> beginnerSpecularMap : register(t4);
+Texture2D<float4> beginnerGlossMap    : register(t5);
+Texture2D<float4> beginnerAOMap       : register(t6);
+Texture2D<float4> beginnerEmissiveMap : register(t7);
+SamplerState beginnerMaterialSampler  : register(s0);
+
+struct BeginnerMaterialInput
+{
+    float4 position      : SV_POSITION;
+    float4 texCoords     : TEXCOORD0;
+    float4 worldPosition : TEXCOORD1;
+    float4 normal        : TEXCOORD2;
+    float4 tangent       : TEXCOORD3;
+    float4 biTangent     : TEXCOORD4;
+    float4 localPosition : TEXCOORD5;
+};
+
+BeginnerMaterialInput vs_main(const GBufferVertexInput vertex, const uint instance : INSTANCE_SEMANTIC)
+{
+    BeginnerMaterialInput output;
+    float3 position = vertex.position;
+    float3 normal = Vertex_DecodeNormal(vertex.normal);
+    float3 tangent = Vertex_DecodeNormal(vertex.tangent.xyz);
+    GPUSkin_SkinVertex(position, normal, tangent, vertex.weights, vertex.indices, instance);
+    const float3 localPosition = position;
+    position = Transform_PositionToWorld(position, instance);
+    normal = normalize(Transform_NormalToWorld(normal, instance));
+    tangent = normalize(Transform_NormalToWorld(tangent, instance));
+    output.position = Transform_OffsetToClip(position);
+    output.texCoords = float4(vertex.texCoords, 0.0, 0.0);
+    output.worldPosition = float4(position, 1.0);
+    output.normal = float4(normal, 0.0);
+    output.tangent = float4(tangent, 0.0);
+    output.biTangent = float4(Vertex_CalculateBiNormal(normal, tangent, Vertex_DecodeBiNormalSign(vertex.tangent.w)), 0.0);
+    output.localPosition = float4(localPosition, 1.0);
+    return output;
+}
+%2
+GBufferPixelOutput ps_main(const BeginnerMaterialInput input, const uint isFrontFace : SV_IsFrontFace)
+{
+    float2 uv = input.texCoords.xy;
+    float3 surfacePosition = input.localPosition.xyz;
+    float3 surfaceNormal = normalize(input.normal.xyz);
+    float3 surfaceViewDir = normalize(Transform_GetCameraWorldPosition() - input.worldPosition.xyz);
+    float t = GetTime();
+
+    float4 beginnerAlbedoSample = beginnerAlbedoMap.Sample(beginnerMaterialSampler, uv);
+    float3 color = beginnerAlbedoSample.rgb * %3;
+%4
+    color = max(color, 0.0);
+
+    // Match BO3's deferred material contract so APE Match can apply the same
+    // environment/direct-light stage instead of showing Beginner materials as
+    // an unlit flat color.
+    float4 beginnerBump = GBuffer_DecodeNormal(
+        beginnerNormalMap.Sample(beginnerMaterialSampler, uv).xyz, 1.0);
+    float beginnerGloss = saturate(beginnerGlossMap.Sample(beginnerMaterialSampler, uv).r);
+    float beginnerAO = saturate(beginnerAOMap.Sample(beginnerMaterialSampler, uv).r);
+    float3 beginnerSpecular = saturate(beginnerSpecularMap.Sample(beginnerMaterialSampler, uv).rgb);
+    float3 beginnerEmissive = max(beginnerEmissiveMap.Sample(beginnerMaterialSampler, uv).rgb, 0.0);
+
+    float4 beginnerAlbedo = float4(color + beginnerEmissive, beginnerAlbedoSample.a);
+    float4 beginnerNormalGloss = GBuffer_CalculateNormalGloss(
+        input.normal.xyz, input.tangent.xyz, input.biTangent.xyz,
+        isFrontFace, beginnerBump, beginnerGloss, float2(0.0, 17.0));
+    float4 beginnerReflectanceOcclusion = GBuffer_CalculateReflectanceOcclusion(
+        uint2(input.position.xy), isFrontFace, beginnerAlbedo,
+        beginnerSpecular, float3(1.0, 1.0, 1.0), beginnerAO, true, true);
+
+    GBufferPixelOutput output;
+    output.Albedo = beginnerAlbedo;
+    output.NormalGloss = beginnerNormalGloss;
+    output.ReflectanceOcclusion = beginnerReflectanceOcclusion;
+    return output;
+}
+)HLSL").arg(effectStackMarker(project), helpers, colorLiteral(base), effects);
+}
+
+
 QString generateSky(const Project& project)
 {
     const QColor zenith = settingColor(project, "zenithColor", QColor("#102E68"));
@@ -4437,7 +4540,9 @@ QString generatePreviewHlsl(const Project& project, int depthDebugView,
 {
     const int mode = std::clamp(depthDebugView, 0, 7);
     QString source;
-    if(project.target == Target::PostFx && mode >= 2)
+    if(project.target == Target::Material)
+        source = generateMaterialPreview(project);
+    else if(project.target == Target::PostFx && mode >= 2)
         source = generatePostFx(project, true);
     else
         source = generateHlsl(project, notes);

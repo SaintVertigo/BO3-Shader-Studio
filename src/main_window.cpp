@@ -1730,6 +1730,17 @@ public:
 
             const beginner::Project material = projects[1].first;
             const QString materialHlsl = beginner::generateHlsl(material);
+            const QString materialPreviewHlsl = beginner::generatePreviewHlsl(material);
+            if(!materialPreviewHlsl.contains("BO3_BEGINNER_MATERIAL_PREVIEW_GBUFFER: 1") ||
+               !materialPreviewHlsl.contains("Texture2D<float4> beginnerAlbedoMap   : register(t0);") ||
+               !materialPreviewHlsl.contains("Texture2D<float4> beginnerNormalMap   : register(t2);") ||
+               !materialPreviewHlsl.contains("GBufferPixelOutput ps_main") ||
+               !materialPreviewHlsl.contains("GBuffer_CalculateNormalGloss") ||
+               !materialPreviewHlsl.contains("GBuffer_CalculateReflectanceOcclusion"))
+                return "Beginner Material preview is missing the live texture/GBuffer contract required by APE Match.";
+            QString materialPreviewCompileDiagnostics;
+            if(!compileGlslValidationHlsl(materialPreviewHlsl, materialPreviewCompileDiagnostics, true))
+                return "Beginner Material APE/GBuffer preview HLSL failed FXC validation: " + materialPreviewCompileDiagnostics;
             if(!materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: OPAQUE") ||
                materialHlsl.contains("BO3_PREVIEWER_MATERIAL_SURFACE: SCENE_EFFECT"))
                 return "Beginner Material coverage no longer matches the opaque non-SSR material contract.";
@@ -3612,6 +3623,17 @@ private:
         previewModeCombo_->setVisible(!beginnerUiMode_);
 
         const PreviewMode selected = selectedPreviewMode();
+        if(previewMaterialProfileGroup_)
+        {
+            const bool materialPreview =
+                (beginnerUiMode_ && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::Material) ||
+                selected == PreviewMode::ForwardMaterial ||
+                selected == PreviewMode::DeferredGBuffer ||
+                (detectedPreviewModeValid_ &&
+                    (detectedPreviewMode_ == PreviewMode::ForwardMaterial ||
+                     detectedPreviewMode_ == PreviewMode::DeferredGBuffer));
+            previewMaterialProfileGroup_->setVisible(materialPreview);
+        }
         const QString detectedName = detectedPreviewModeValid_
             ? previewModeName(detectedPreviewMode_) : "Unknown";
         if(previewDetectedModeLabel_)
@@ -16822,6 +16844,35 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         previewBasicsForm->addRow(previewModeHelpLabel_);
         settingsOuter->addWidget(previewBasicsGroup);
 
+        previewMaterialProfileGroup_ = new QGroupBox("Material Preview");
+        auto* materialProfileForm = new QFormLayout(previewMaterialProfileGroup_);
+        materialProfileForm->setContentsMargins(8,10,8,8);
+        materialProfileForm->setHorizontalSpacing(8);
+        previewMaterialProfileCombo_ = new QComboBox();
+        previewMaterialProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
+        previewMaterialProfileCombo_->setCurrentIndex(1);
+        previewMaterialProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral mirrors APE's No Lighting view.");
+        materialProfileForm->addRow("Profile", previewMaterialProfileCombo_);
+        previewApeLightingPresetCombo_ = new QComboBox();
+        previewApeLightingPresetCombo_->addItems(QStringList{"Morning", "Day", "Sunset", "Night"});
+        previewApeLightingPresetCombo_->setCurrentIndex(1);
+        previewApeLightingPresetCombo_->setEnabled(false);
+        previewApeLightingPresetCombo_->setToolTip("Exact default SSI presets recovered from source_data/ssi.gdt, paired with the original local Treyarch HDR environments.");
+        materialProfileForm->addRow("APE lighting", previewApeLightingPresetCombo_);
+        auto* materialProfileHelp = new QLabel("APE Match reproduces APE's material-preview environment. Neutral mirrors Rendering -> No Lighting.");
+        materialProfileHelp->setWordWrap(true);
+        materialProfileHelp->setObjectName("InspectorHelp");
+        materialProfileForm->addRow(materialProfileHelp);
+        settingsOuter->addWidget(previewMaterialProfileGroup_);
+
+        connect(previewMaterialProfileCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
+            applyMaterialPreviewProfile(index);
+        });
+        connect(previewApeLightingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
+            if (previewMaterialProfileCombo_ && previewMaterialProfileCombo_->currentIndex() == 0)
+                applyApeLightingPreset(index);
+        });
+
         // Keep the Beginner-visible reset action above the Advanced-only container.
         // The Direct3D preview is a native child window, so moving an overlaid Qt
         // button when Advanced controls are hidden can leave stale pixels behind
@@ -16999,6 +17050,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
 
         scenePanel_ = buildScenePanel();
+        updatePreviewModeInspector(); // preview-settings material controls now exist; apply correct target visibility
         sourceValuesPanel_ = buildSourceValuesPanel();
         shaderParamsPanel_ = buildShaderParametersPanel();
         materialTexturesPanel_ = buildMaterialTexturesPanel();
@@ -19519,10 +19571,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             setCompileStatusBadge(QString::fromUtf8("✕ HLSL FAIL"), "#FF7070");
             return;
         }
-        const QString originalSource =
-            (beginnerUiMode_ && beginnerProjectActive_ && !beginnerPreviewHlsl_.isEmpty())
-                ? beginnerPreviewHlsl_
-                : editor_->toPlainText();
+        const bool untouchedGeneratedBeginnerSource =
+            beginnerProjectActive_ && !beginnerPreviewHlsl_.isEmpty() &&
+            (beginnerUiMode_ || editor_->toPlainText() == beginnerGeneratedHlsl_);
+        const QString originalSource = untouchedGeneratedBeginnerSource
+            ? beginnerPreviewHlsl_
+            : editor_->toPlainText();
         const fs::path nativePath = shaderPath_.isEmpty() ? fs::path() : fs::path(shaderPath_.toStdWString());
         const fs::path nativeRoot = includeRoot_.isEmpty() ? fs::path() : fs::path(includeRoot_.toStdWString());
         const PreviewMode activeMode = selectedPreviewMode();
@@ -20242,15 +20296,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         if (!preview_) return;
         const MaterialPreviewProfile profile = preview_->renderer().GetMaterialPreviewProfile();
+        const int profileIndex = profile == MaterialPreviewProfile::ApeMatch ? 0 :
+                                 profile == MaterialPreviewProfile::Neutral ? 2 : 1;
         if (materialPreviewProfileCombo_)
         {
             QSignalBlocker blocker(materialPreviewProfileCombo_);
-            const int profileIndex = profile == MaterialPreviewProfile::ApeMatch ? 0 :
-                                     profile == MaterialPreviewProfile::Neutral ? 2 : 1;
             materialPreviewProfileCombo_->setCurrentIndex(profileIndex);
+        }
+        if (previewMaterialProfileCombo_)
+        {
+            QSignalBlocker blocker(previewMaterialProfileCombo_);
+            previewMaterialProfileCombo_->setCurrentIndex(profileIndex);
         }
         if (apeLightingPresetCombo_)
             apeLightingPresetCombo_->setEnabled(profile == MaterialPreviewProfile::ApeMatch);
+        if (previewApeLightingPresetCombo_)
+            previewApeLightingPresetCombo_->setEnabled(profile == MaterialPreviewProfile::ApeMatch);
         const bool manualLookdev = profile == MaterialPreviewProfile::LookDev;
         if (lightingPresetCombo_) lightingPresetCombo_->setEnabled(manualLookdev);
         if (lightingModeCombo_) lightingModeCombo_->setEnabled(manualLookdev);
@@ -20538,7 +20599,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             refreshMaterialTextureUi();
             return false;
         }
+        if (logicalSlot == 0 && beginnerProjectActive_ &&
+            beginnerProject_.target == beginner::Target::Material)
+        {
+            const QColor base(beginnerProject_.settings.value("baseColor").toString());
+            const QColor defaultBlue("#2F78D0");
+            if (base.isValid() && base == defaultBlue)
+            {
+                // The historical blue exists only to make a blank sphere obvious.
+                // Once a real albedo is supplied it should not silently tint the
+                // imported material blue. Users can still choose any tint after.
+                beginnerProject_.settings["baseColor"] = "#FFFFFF";
+                markBeginnerProjectModified();
+                rebuildBeginnerBaseAppearance();
+                applyBeginnerProjectToEditor(false);
+            }
+        }
         refreshMaterialTextureUi();
+        if (preview_) preview_->renderNow();
         statusBar()->showMessage(QString("Loaded %1 into %2").arg(QFileInfo(path).fileName()).arg(MaterialTextureSlotName(logicalSlot)), 3000);
         return true;
     }
@@ -20821,13 +20899,28 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void applyMaterialPreviewProfile(int index)
     {
         if (!preview_) return;
+        if (materialPreviewProfileCombo_ && materialPreviewProfileCombo_->currentIndex() != index)
+        {
+            QSignalBlocker blocker(materialPreviewProfileCombo_);
+            materialPreviewProfileCombo_->setCurrentIndex(index);
+        }
+        if (previewMaterialProfileCombo_ && previewMaterialProfileCombo_->currentIndex() != index)
+        {
+            QSignalBlocker blocker(previewMaterialProfileCombo_);
+            previewMaterialProfileCombo_->setCurrentIndex(index);
+        }
+        const bool apeMatch = index == 0;
+        if (apeLightingPresetCombo_) apeLightingPresetCombo_->setEnabled(apeMatch);
+        if (previewApeLightingPresetCombo_) previewApeLightingPresetCombo_->setEnabled(apeMatch);
         auto& r = preview_->renderer();
         if (index == 0)
         {
             r.SetMaterialPreviewProfile(MaterialPreviewProfile::ApeMatch);
             r.SetFulbright(false);
-            if (apeLightingPresetCombo_) apeLightingPresetCombo_->setEnabled(true);
-            applyApeLightingPreset(apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            const int apeIndex = previewApeLightingPresetCombo_
+                ? previewApeLightingPresetCombo_->currentIndex()
+                : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            applyApeLightingPreset(apeIndex);
             statusBar()->showMessage("APE Match enabled - recovered TOOLSGFX/SSI lighting is active", 3500);
         }
         else if (index == 2)
@@ -20863,6 +20956,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void applyApeLightingPreset(int index)
     {
         if (!preview_) return;
+        if (apeLightingPresetCombo_ && apeLightingPresetCombo_->currentIndex() != index)
+        {
+            QSignalBlocker blocker(apeLightingPresetCombo_);
+            apeLightingPresetCombo_->setCurrentIndex(index);
+        }
+        if (previewApeLightingPresetCombo_ && previewApeLightingPresetCombo_->currentIndex() != index)
+        {
+            QSignalBlocker blocker(previewApeLightingPresetCombo_);
+            previewApeLightingPresetCombo_->setCurrentIndex(index);
+        }
         QString initError;
         if (!preview_->ensureInitialized(initError))
         {
@@ -21205,6 +21308,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QLabel* previewDetectedModeLabel_ = nullptr;
     QLabel* previewModeOverrideLabel_ = nullptr;
     QLabel* previewModeHelpLabel_ = nullptr;
+    QGroupBox* previewMaterialProfileGroup_ = nullptr;
+    QComboBox* previewMaterialProfileCombo_ = nullptr;
+    QComboBox* previewApeLightingPresetCombo_ = nullptr;
     QToolButton* previewSettingsToggleButton_ = nullptr;
     QToolButton* beginnerModeButton_ = nullptr;
     QToolButton* advancedModeButton_ = nullptr;
