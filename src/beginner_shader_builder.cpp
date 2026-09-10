@@ -3324,7 +3324,8 @@ Texture2D<float4> beginnerSpecularMap : register(t4);
 Texture2D<float4> beginnerGlossMap    : register(t5);
 Texture2D<float4> beginnerAOMap       : register(t6);
 Texture2D<float4> beginnerEmissiveMap : register(t7);
-SamplerState beginnerMaterialSampler  : register(s0);
+SamplerState beginnerColorSampler     : register(s0);
+SamplerState beginnerMaterialSampler  : register(s1);
 
 struct BeginnerMaterialInput
 {
@@ -3366,14 +3367,19 @@ GBufferPixelOutput ps_main(const BeginnerMaterialInput input, const uint isFront
     float3 surfaceViewDir = normalize(Transform_GetCameraWorldPosition() - input.worldPosition.xyz);
     float t = GetTime();
 
-    float4 beginnerAlbedoSample = beginnerAlbedoMap.Sample(beginnerMaterialSampler, uv);
-    float3 color = beginnerAlbedoSample.rgb * %3;
+    float4 beginnerAlbedoSample = beginnerAlbedoMap.Sample(beginnerColorSampler, uv);
+    // Stock Geometry/lit uses USE_COLOR_TINT and applies the sRGB->linear tint
+    // through the diffuse texture alpha. Most ordinary color maps have alpha 1,
+    // but preserving the lerp matters for exact APE/TOOLSGFX behavior.
+    float3 beginnerColorTint = SRGBToLinear(%3);
+    float3 color = beginnerAlbedoSample.rgb * lerp(float3(1.0, 1.0, 1.0), beginnerColorTint, beginnerAlbedoSample.a);
 %4
     color = max(color, 0.0);
 
     // Match BO3's deferred material contract so APE Match can apply the same
     // environment/direct-light stage instead of showing Beginner materials as
-    // an unlit flat color.
+    // an unlit flat color. The renderer supplies stock Geometry/lit fallbacks:
+    // identity normal, 0.04 dielectric reflectance, gloss 13/17 and AO 1.
     float4 beginnerBump = GBuffer_DecodeNormal(
         beginnerNormalMap.Sample(beginnerMaterialSampler, uv).xyz, 1.0);
     float beginnerGloss = saturate(beginnerGlossMap.Sample(beginnerMaterialSampler, uv).r);
@@ -3381,7 +3387,8 @@ GBufferPixelOutput ps_main(const BeginnerMaterialInput input, const uint isFront
     float3 beginnerSpecular = saturate(beginnerSpecularMap.Sample(beginnerMaterialSampler, uv).rgb);
     float3 beginnerEmissive = max(beginnerEmissiveMap.Sample(beginnerMaterialSampler, uv).rgb, 0.0);
 
-    float4 beginnerAlbedo = float4(color + beginnerEmissive, beginnerAlbedoSample.a);
+    // ToolsGfx gbuffer_calculate_albedo forces output alpha to 1 after tinting.
+    float4 beginnerAlbedo = float4(color + beginnerEmissive, 1.0);
     float4 beginnerNormalGloss = GBuffer_CalculateNormalGloss(
         input.normal.xyz, input.tangent.xyz, input.biTangent.xyz,
         isFrontFace, beginnerBump, beginnerGloss, float2(0.0, 17.0));

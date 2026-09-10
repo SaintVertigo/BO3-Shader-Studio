@@ -1556,11 +1556,19 @@ public:
         hr = converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data());
         if (FAILED(hr)) return false;
 
+        // BO3 image semantics are not all linear. APE converts diffuse/effect
+        // color maps (and specular color maps) through an sRGB resource view,
+        // while normals/gloss/AO/height remain linear. Material Textures uses a
+        // fixed logical contract, so preserve that distinction in the preview.
+        const bool srgb = logicalSlot == 0 || logicalSlot == 3 || logicalSlot == 6;
         ComPtr<ID3D11ShaderResourceView> srv;
-        if (!CreateTextureSRV(pixels.data(), w, h, srv, error)) return false;
+        if (!CreateMipmappedTextureSRV(pixels.data(), w, h, srv, error, srgb)) return false;
 
         materialTextureSRVs_[static_cast<size_t>(logicalSlot)] = srv;
         materialTexturePaths_[static_cast<size_t>(logicalSlot)] = path;
+        materialTextureWidths_[static_cast<size_t>(logicalSlot)] = w;
+        materialTextureHeights_[static_cast<size_t>(logicalSlot)] = h;
+        materialTextureSrgb_[static_cast<size_t>(logicalSlot)] = srgb;
         return true;
     }
 
@@ -1569,6 +1577,9 @@ public:
         if (logicalSlot < 0 || logicalSlot >= kMaterialTextureSlotCount) return;
         materialTextureSRVs_[static_cast<size_t>(logicalSlot)].Reset();
         materialTexturePaths_[static_cast<size_t>(logicalSlot)].clear();
+        materialTextureWidths_[static_cast<size_t>(logicalSlot)] = 0;
+        materialTextureHeights_[static_cast<size_t>(logicalSlot)] = 0;
+        materialTextureSrgb_[static_cast<size_t>(logicalSlot)] = false;
     }
 
     void SetMaterialTextureBinding(int logicalSlot, UINT bindSlot)
@@ -1587,6 +1598,24 @@ public:
     {
         if (logicalSlot < 0 || logicalSlot >= kMaterialTextureSlotCount) return L"";
         return materialTexturePaths_[static_cast<size_t>(logicalSlot)].wstring();
+    }
+
+    UINT GetMaterialTextureWidth(int logicalSlot) const
+    {
+        if (logicalSlot < 0 || logicalSlot >= kMaterialTextureSlotCount) return 0;
+        return materialTextureWidths_[static_cast<size_t>(logicalSlot)];
+    }
+
+    UINT GetMaterialTextureHeight(int logicalSlot) const
+    {
+        if (logicalSlot < 0 || logicalSlot >= kMaterialTextureSlotCount) return 0;
+        return materialTextureHeights_[static_cast<size_t>(logicalSlot)];
+    }
+
+    bool GetMaterialTextureIsSrgb(int logicalSlot) const
+    {
+        if (logicalSlot < 0 || logicalSlot >= kMaterialTextureSlotCount) return false;
+        return materialTextureSrgb_[static_cast<size_t>(logicalSlot)];
     }
 
     void SetMaterialUvScale(float u, float v)
@@ -3926,6 +3955,7 @@ private:
         std::array<ID3D11SamplerState*, 16> samplers{};
         ID3D11SamplerState* geometrySampler = materialWrapSampler_.Get() ? materialWrapSampler_.Get() : sampler_.Get();
         samplers.fill(geometrySampler);
+        if (materialColorSampler_.Get()) samplers[0] = materialColorSampler_.Get();
         context_->PSSetSamplers(0, static_cast<UINT>(samplers.size()), samplers.data());
         if (vertexOnlyShader_)
             context_->VSSetSamplers(0, static_cast<UINT>(samplers.size()), samplers.data());
@@ -4118,14 +4148,15 @@ private:
         UpdateEnvironmentCameraBuffer(vp);
         ID3D11Buffer* deferredCB = deferredLightBuffer_.Get();
         context_->PSSetConstantBuffers(13, 1, &deferredCB);
-        ID3D11ShaderResourceView* composeSrvs[6] = {
+        ID3D11ShaderResourceView* composeSrvs[7] = {
             gbufferSRVs_[0].Get(), gbufferSRVs_[1].Get(), gbufferSRVs_[2].Get(), gbufferSRVs_[3].Get(), materialDepthSRV_.Get(),
-            environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get()
+            environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get(),
+            materialTextureSRVs_[0].Get() ? materialTextureSRVs_[0].Get() : neutralSRV_.Get()
         };
-        context_->PSSetShaderResources(0, 6, composeSrvs);
+        context_->PSSetShaderResources(0, 7, composeSrvs);
         context_->Draw(3, 0);
-        ID3D11ShaderResourceView* nullCompose[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-        context_->PSSetShaderResources(0, 6, nullCompose);
+        ID3D11ShaderResourceView* nullCompose[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+        context_->PSSetShaderResources(0, 7, nullCompose);
     }
 
     bool CreateBuiltInVertexShaders(std::wstring& error)
@@ -4666,6 +4697,7 @@ Texture2D gbuffer2 : register(t2);
 Texture2D gbuffer3 : register(t3);
 Texture2D depthTexture : register(t4);
 Texture2D previewEnvironment : register(t5);
+Texture2D previewMaterialAlbedoInput : register(t6);
 SamplerState previewSampler : register(s0);
 
 cbuffer PreviewCamera : register(b0)
@@ -4760,15 +4792,28 @@ float3 EnvironmentAt(float2 uv)
     return previewEnvironment.Sample(previewSampler, DirectionToEquirect(ray)).rgb;
 }
 
+float LinearToDisplay1(float x)
+{
+    x = max(x, 0.0);
+    return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+
+float3 LinearToDisplay(float3 color)
+{
+    return float3(LinearToDisplay1(color.r), LinearToDisplay1(color.g), LinearToDisplay1(color.b));
+}
+
 float3 ApplyLookdev(float3 color)
 {
     int profile = (int)(previewDebugSettings.y + 0.5);
     color = max(color, 0.0);
 
-    // APE's No Lighting path is intentionally diagnostic: do not run HDR
-    // environment exposure or a filmic curve over the raw material response.
+    // APE's No Lighting path is diagnostic, but its diffuse texture is still
+    // sampled from an sRGB resource into linear shader space. Encode the final
+    // linear material response for the UNORM desktop swapchain so a raw color
+    // map visually matches APE instead of appearing artificially dark.
     if (profile == 2)
-        return saturate(color);
+        return saturate(LinearToDisplay(color));
 
     color *= exp2(previewLookdevSettings.x);
     int mode = (int)(previewLookdevSettings.y + 0.5);
@@ -4783,7 +4828,13 @@ float3 ApplyLookdev(float3 color)
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
-    return color;
+
+    // The swapchain is R8G8B8A8_UNORM rather than *_SRGB. APE/TOOLSGFX output
+    // is display-referred, so APE Match must explicitly apply the display OETF.
+    // Preserve legacy Look Dev output for now; this correction is parity-scoped.
+    if (profile == 0)
+        color = LinearToDisplay(color);
+    return saturate(color);
 }
 
 float3 EnvironmentDirection(float3 direction)
@@ -4811,6 +4862,13 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float d = saturate(depth);
         float v = 1.0 - pow(d, 0.22);
         return float4(v, v, v, 1.0);
+    }
+    if (debugMode == 12)
+    {
+        // Direct resource diagnostic: bypass mesh UVs and the GBuffer entirely.
+        // The albedo SRV is sRGB-aware, so encode its linear sample back to the
+        // UNORM desktop target for an apples-to-apples view of the source image.
+        return float4(saturate(LinearToDisplay(previewMaterialAlbedoInput.Sample(previewSampler, uv).rgb)), 1.0);
     }
 
     float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -4853,10 +4911,18 @@ float4 ps_main(VS_OUT i) : SV_Target0
 
     float3 albedo = max(rt0.rgb, 0.0);
     float3 emissive = max(rt3.rgb, 0.0); // preview-only fallback; BO3 opaque GBuffer has no emissive MRT
+    const int materialProfile = (int)(previewDebugSettings.y + 0.5);
 
     // Semantic inspector views decode the actual BO3 GBuffer contract instead
     // of displaying packed channels as though they were ordinary RGB textures.
-    if (debugMode == 6) return float4(saturate(albedo), 1.0); // Albedo
+    if (debugMode == 6)
+    {
+        // RT0 stores linear albedo. APE Match/Neutral are presented through an
+        // UNORM desktop swapchain, so encode for display when inspecting the
+        // semantic albedo channel.
+        const bool apeDisplay = materialProfile == 0 || materialProfile == 2;
+        return float4(saturate(apeDisplay ? LinearToDisplay(albedo) : albedo), 1.0);
+    }
     if (debugMode == 7)
     {
         float3 debugNormal = DecodeBo3GBufferNormal(rt1);
@@ -4879,7 +4945,6 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
     if (debugMode == 11) return float4(max(rt3.rgb, 0.0), 1.0);
 
-    const int materialProfile = (int)(previewDebugSettings.y + 0.5);
     if (previewLightColorFulbright.w > 0.5 || materialProfile == 2)
         return float4(ApplyLookdev(albedo + emissive), 1.0);
 
@@ -5127,6 +5192,20 @@ float4 ps_main(VS_OUT i) : SV_Target0
             error = L"Create material UV wrap sampler failed.";
             return false;
         }
+
+        // Stock Geometry/lit's Color sampler defaults to `aniso2x (mip linear)`
+        // with tiled U/V. Keep a dedicated s0 sampler so the parity test case
+        // uses the same basic filtering without forcing normal/gloss/AO maps to
+        // the color-map filter.
+        D3D11_SAMPLER_DESC colorDesc = wrapDesc;
+        colorDesc.Filter = D3D11_FILTER_ANISOTROPIC;
+        colorDesc.MaxAnisotropy = 2;
+        hr = device_->CreateSamplerState(&colorDesc, materialColorSampler_.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"Create material color anisotropic sampler failed.";
+            return false;
+        }
         return true;
     }
 
@@ -5188,7 +5267,12 @@ float4 ps_main(VS_OUT i) : SV_Target0
         const std::array<uint8_t, 4> neutralNormal{128, 128, 255, 255};
         const std::array<uint8_t, 4> neutralBlack{0, 0, 0, 255};
         const std::array<uint8_t, 4> neutralSpecular{10, 10, 10, 255};
-        const std::array<uint8_t, 4> neutralGloss{89, 89, 89, 255};
+        // Stock Geometry/lit BASE_TEXTURES uses glossRange.y directly. APE's
+        // material default is 13 on BO3's absolute 0..17 gloss scale, so the
+        // optional Studio gloss slot must fall back to 13/17 rather than the
+        // older arbitrary ~0.35 value.
+        const uint8_t stockLitGloss = static_cast<uint8_t>(std::lround((13.0f / 17.0f) * 255.0f));
+        const std::array<uint8_t, 4> neutralGloss{stockLitGloss, stockLitGloss, stockLitGloss, 255};
         if (!CreateTextureSRV(neutralWhite.data(), 1, 1, neutralSRV_, error)) return false;
         if (!CreateTextureSRV(neutralDepth.data(), 1, 1, neutralDepthSRV_, error)) return false;
         if (!CreateTextureSRV(neutralNormal.data(), 1, 1, neutralNormalSRV_, error)) return false;
@@ -5211,14 +5295,15 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
 
     bool CreateMipmappedTextureSRV(const uint8_t* rgba, UINT w, UINT h,
-                                   ComPtr<ID3D11ShaderResourceView>& out, std::wstring& error)
+                                   ComPtr<ID3D11ShaderResourceView>& out, std::wstring& error,
+                                   bool srgb = false)
     {
         D3D11_TEXTURE2D_DESC td{};
         td.Width = w;
         td.Height = h;
         td.MipLevels = 0;
         td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.Format = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -6255,6 +6340,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     ComPtr<ID3D11PixelShader> deferredLightPixelShader_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11SamplerState> materialWrapSampler_;
+    ComPtr<ID3D11SamplerState> materialColorSampler_;
     ComPtr<ID3D11RasterizerState> materialRasterizerState_;
     ComPtr<ID3D11RasterizerState> materialWireframeRasterizerState_;
     ComPtr<ID3D11RasterizerState> comparisonScissorRasterizer_;
@@ -6279,6 +6365,9 @@ float4 ps_main(VS_OUT i) : SV_Target0
     std::array<ComPtr<ID3D11ShaderResourceView>, 4> gbufferSRVs_{};
     std::array<ComPtr<ID3D11ShaderResourceView>, kMaterialTextureSlotCount> materialTextureSRVs_{};
     std::array<fs::path, kMaterialTextureSlotCount> materialTexturePaths_{};
+    std::array<UINT, kMaterialTextureSlotCount> materialTextureWidths_{};
+    std::array<UINT, kMaterialTextureSlotCount> materialTextureHeights_{};
+    std::array<bool, kMaterialTextureSlotCount> materialTextureSrgb_{};
     std::array<UINT, kMaterialTextureSlotCount> materialTextureBindings_{{0,2,3,4,5,6,7,8}};
     std::array<ComPtr<ID3D11ShaderResourceView>, kShadertoyChannelCount> shadertoyChannelSRVs_{};
     std::array<fs::path, kShadertoyChannelCount> shadertoyChannelPaths_{};
@@ -6502,6 +6591,21 @@ UINT PreviewRenderer::GetMaterialTextureBinding(int logicalSlot) const
 std::wstring PreviewRenderer::GetMaterialTexturePath(int logicalSlot) const
 {
     return impl_->GetMaterialTexturePath(logicalSlot);
+}
+
+UINT PreviewRenderer::GetMaterialTextureWidth(int logicalSlot) const
+{
+    return impl_->GetMaterialTextureWidth(logicalSlot);
+}
+
+UINT PreviewRenderer::GetMaterialTextureHeight(int logicalSlot) const
+{
+    return impl_->GetMaterialTextureHeight(logicalSlot);
+}
+
+bool PreviewRenderer::GetMaterialTextureIsSrgb(int logicalSlot) const
+{
+    return impl_->GetMaterialTextureIsSrgb(logicalSlot);
 }
 
 void PreviewRenderer::SetMaterialUvScale(float u, float v)

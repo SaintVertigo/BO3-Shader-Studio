@@ -16741,8 +16741,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. APE Match uses Treyarch's local APE sphere/cube/plane geometry when available. Custom Model supports OBJ, ASCII FBX, XMODEL_EXPORT, and BO3 XMODEL_BIN.");
         loadModelQuickButton_ = new QPushButton("Load Model...");
         loadModelQuickButton_->setToolTip("Import a custom OBJ, ASCII FBX, XMODEL_EXPORT, or BO3 XMODEL_BIN preview mesh.");
-        gbufferViewCombo_ = new QComboBox(); gbufferViewCombo_->addItems(QStringList{"Final Lit", "RT0", "RT1", "RT2", "RT3", "Depth", "Albedo", "Normal", "Specular", "Gloss", "AO", "Emissive"});
-        gbufferViewCombo_->setToolTip("Choose the final lit result or inspect an individual GBuffer channel.");
+        gbufferViewCombo_ = new QComboBox(); gbufferViewCombo_->addItems(QStringList{"Final Lit", "RT0", "RT1", "RT2", "RT3", "Depth", "Albedo", "Normal", "Specular", "Gloss", "AO", "Emissive", "Input Albedo (t0)"});
+        gbufferViewCombo_->setToolTip("Choose the final lit result, inspect a GBuffer channel, or verify the texture arriving at t0 before material evaluation.");
         lightingQuickMode_ = new QComboBox(); lightingQuickMode_->addItems(QStringList{"Lit", "Fulbright"});
 
         auto* showQuickButton = new QToolButton();
@@ -17421,7 +17421,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             preview_->renderer().SetPreviewMesh(static_cast<PreviewMesh>(std::clamp(index,0,4))); updateCameraUi();
         });
         connect(loadModelQuickButton_, &QPushButton::clicked, this, [this]{ chooseCustomModel(); });
-        connect(gbufferViewCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){ preview_->renderer().SetGBufferView(static_cast<GBufferView>(std::clamp(index,0,11))); });
+        connect(gbufferViewCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){ preview_->renderer().SetGBufferView(static_cast<GBufferView>(std::clamp(index,0,12))); });
 
         QSettings uiSettings("OpenAI", "BO3HLSLPreviewer");
         const bool beginnerMode = uiSettings.value("ui/experienceMode", "Beginner").toString() != "Advanced";
@@ -20617,7 +20617,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         refreshMaterialTextureUi();
         if (preview_) preview_->renderNow();
-        statusBar()->showMessage(QString("Loaded %1 into %2").arg(QFileInfo(path).fileName()).arg(MaterialTextureSlotName(logicalSlot)), 3000);
+        const UINT loadedW = preview_->renderer().GetMaterialTextureWidth(logicalSlot);
+        const UINT loadedH = preview_->renderer().GetMaterialTextureHeight(logicalSlot);
+        const QString loadedTransfer = preview_->renderer().GetMaterialTextureIsSrgb(logicalSlot) ? "sRGB" : "Linear";
+        statusBar()->showMessage(QString("Loaded %1 into %2 — %3×%4 %5")
+            .arg(QFileInfo(path).fileName()).arg(MaterialTextureSlotName(logicalSlot))
+            .arg(loadedW).arg(loadedH).arg(loadedTransfer), 4000);
         return true;
     }
 
@@ -20660,9 +20665,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 }
                 else
                 {
-                    materialTexturePathLabels_[i]->setText(QString("✓  %1").arg(QFileInfo(path).fileName()));
+                    const UINT w = preview_->renderer().GetMaterialTextureWidth(i);
+                    const UINT h = preview_->renderer().GetMaterialTextureHeight(i);
+                    const bool srgb = preview_->renderer().GetMaterialTextureIsSrgb(i);
+                    const QString transfer = srgb ? "sRGB" : "Linear";
+                    materialTexturePathLabels_[i]->setText(QString("✓  %1  (%2×%3, %4)")
+                        .arg(QFileInfo(path).fileName()).arg(w).arg(h).arg(transfer));
                     materialTexturePathLabels_[i]->setStyleSheet("QLabel { color:#DCE7F3; border:1px solid #3D6A8A; border-radius:5px; background:#18232B; }");
-                    materialTexturePathLabels_[i]->setToolTip(QDir::toNativeSeparators(path));
+                    materialTexturePathLabels_[i]->setToolTip(QString("%1\nPreview transfer: %2")
+                        .arg(QDir::toNativeSeparators(path), transfer));
                 }
             }
         }

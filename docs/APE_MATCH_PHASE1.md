@@ -102,3 +102,50 @@ When the user's configured BO3 Mod Tools install contains the stock preview asse
 Look Dev intentionally keeps the Studio's procedural primitives so this compatibility pass does not silently change existing artist-preview projects. If a stock APE reference model is unavailable, APE Match falls back to the existing Studio primitive rather than bundling Treyarch assets.
 
 The ordinary **Load Model** workflow also accepts `.XMODEL_BIN`, so additional local BO3 models can be inspected without converting them to OBJ/XMODEL_EXPORT first. The Phase 1d reader is intentionally scoped to the stable static-token layout used by the shipped APE preview models; unsupported token variants fail with an explicit error instead of guessing their payload layout.
+
+## Phase 1e — stock `Geometry/lit` material contract and color-space correction
+
+Reverse-engineering the shipped APE/GDT/ToolsGfx data removed several guesses from the first material pass.
+
+The stock `script_wall` material used for parity testing is present in Treyarch's `gdt.db` as:
+
+- category: `Geometry`
+- material type: `lit`
+- color map: `core_script_wall_c`
+- color tint: `1 1 1 1`
+- no normal map
+- no gloss map
+- no specular map
+- no AO map
+- normal height: `1`
+- gloss range: `0 .. 13`
+- color sampler: `tile both*`, `aniso2x (mip linear)`
+
+The corresponding image record marks `core_script_wall_c` as `diffuseMap` / `sRGB3chAlpha`, with source `art_assets\\t6_legacy\\texture_assets\\core\\core_script_wall_c.tif`.
+
+The shipped `ToolsGfx/gbuffer_common.hlsl` also confirms that `BASE_TEXTURES` does not read an arbitrary specular/gloss/AO texture for stock `Geometry/lit`: reflectance is the fixed dielectric value `0.04`, occlusion is `1`, and gloss comes directly from `glossRange.y`. The Studio's neutral material fallbacks now reproduce that contract (default gloss `13/17`) while still allowing explicitly loaded optional maps for custom Studio materials.
+
+Material texture uploads are now semantic-aware:
+
+- Color / Albedo: sRGB
+- Normal: linear
+- Height / POM: linear
+- Specular Color: sRGB
+- Gloss: linear
+- AO: linear
+- Emissive Color: sRGB
+- Opacity / Mask: linear
+
+The material texture loader now generates mipmaps as well, matching APE's ordinary mip-filtered color workflow more closely. The Material Textures panel reports the decoded width/height and whether the GPU view is sRGB or linear so a successful file load is no longer ambiguous.
+
+Because the D3D preview swapchain is `R8G8B8A8_UNORM`, APE Match now explicitly applies the linear-to-sRGB display transfer after tonemapping. Neutral / No Lighting and the semantic Albedo inspector also display-encode linear albedo. This fixes the previous mismatch where physically correct sRGB texture decoding would otherwise make APE-oriented material output appear too dark on screen.
+
+A new **Input Albedo (t0)** debug view samples the loaded material resource directly before mesh UVs or GBuffer evaluation. It distinguishes three failure classes immediately:
+
+1. input texture decode/binding is wrong -> Input Albedo is wrong;
+2. input is correct but semantic Albedo is wrong -> mesh UV/material shader path is wrong;
+3. both are correct but Final Lit is wrong -> lighting/probe/tonemap parity is wrong.
+
+### APE executable pipeline confirmation
+
+Analysis of `asseteditor_modtools.exe` / the supplied IDA database also confirms that APE's real-lighting material viewport is a multi-pass ToolsGfx pipeline. The executable names/asserts stages including `GBuffer Opaque`, `SSAO`, `Light Culling`, and `Deferred Lighting`, and contains separate GI debug variants for diffuse and specular contribution. `LightingNone` is a distinct lighting mode rather than a zero-intensity version of the real-lighting path. This supports keeping **APE Match** and **Neutral / No Lighting** as separate renderer modes and makes probe convolution / GI separation the next major renderer-parity target.

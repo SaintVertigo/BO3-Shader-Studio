@@ -69,7 +69,8 @@ enum class GBufferView
     Specular,
     Gloss,
     AO,
-    Emissive
+    Emissive,
+    InputAlbedo
 };
 
 enum class DisplayFitMode
@@ -162,6 +163,9 @@ public:
     void SetMaterialTextureBinding(int logicalSlot, UINT bindSlot);
     UINT GetMaterialTextureBinding(int logicalSlot) const;
     std::wstring GetMaterialTexturePath(int logicalSlot) const;
+    UINT GetMaterialTextureWidth(int logicalSlot) const;
+    UINT GetMaterialTextureHeight(int logicalSlot) const;
+    bool GetMaterialTextureIsSrgb(int logicalSlot) const;
     void SetMaterialUvScale(float u, float v);
     float MaterialUvScaleU() const;
     float MaterialUvScaleV() const;
