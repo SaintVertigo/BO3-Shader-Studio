@@ -1183,19 +1183,29 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, saturate(%2_oil), %3);\n")
                 .arg(definition->name, tag, strength, detail, relief, paintSpec, vignette);
         }
-
-
         else if(effect.typeId == "pencil_sketch" && project.target == Target::PostFx && hasUv)
         {
             const QString strength = parameterExpr(project, effect, *definition, "strength");
             const QString scale = parameterExpr(project, effect, *definition, "scale");
             const QString grain = parameterExpr(project, effect, *definition, "grain");
-            const QString paper = parameterExpr(project, effect, *definition, "paper");
+            const QString drawingAmount = parameterExpr(project, effect, *definition, "drawing_amount");
+            const QString colorAmount = parameterExpr(project, effect, *definition, "color_amount");
+            const QString depthContour = parameterExpr(project, effect, *definition, "depth_contour");
+            const QString edgeWhite = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
-            out += QString("    // %1 - gamma-correct colored-pencil drawing based on the approved reference look\n"
-                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), max(%7, 0.0));\n"
+            out += QString("    // %1 - BO3_BEGINNER_PENCIL_REFERENCE / BO3_BEGINNER_PENCIL_GAMMA_CORRECT: approved colored-pencil look; camera movement removed\n"
+                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), saturate(%8), saturate(%9), max(%10, 0.0));\n"
                            "    color = lerp(color, %2_pencil, %3);\n")
-                .arg(definition->name, tag, strength, scale, grain, paper, vignette);
+                .arg(definition->name)
+                .arg(tag)
+                .arg(strength)
+                .arg(scale)
+                .arg(grain)
+                .arg(drawingAmount)
+                .arg(colorAmount)
+                .arg(depthContour)
+                .arg(edgeWhite)
+                .arg(vignette);
         }
         else if(effect.typeId == "red_paint_splatter" && project.target == Target::PostFx && hasUv && hasTime)
         {
@@ -1753,7 +1763,8 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
            typeId == QStringLiteral("depth_heatmap") ||
            typeId == QStringLiteral("depth_isolation") ||
            typeId == QStringLiteral("contact_shadows") ||
-           typeId == QStringLiteral("ascii_depth");
+           typeId == QStringLiteral("ascii_depth") ||
+           typeId == QStringLiteral("pencil_sketch");
 }
 
 bool projectRequiresSceneDepth(const Project& project)
@@ -2154,9 +2165,11 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
     if(projectUsesEffect(project, "pencil_sketch"))
     {
         out += QStringLiteral(R"HLSL(
-// BO3_BEGINNER_PENCIL: reference-faithful colored-pencil drawing adapted from
-// the approved standalone HLSL. The Shadertoy drawing math is intentionally
-// evaluated in display/sRGB-like space, then converted back to BO3 linear.
+// BO3_BEGINNER_PENCIL_REFERENCE
+// BO3_BEGINNER_PENCIL_GAMMA_CORRECT
+// Reference-faithful colored-pencil reconstruction adapted from the approved
+// standalone HLSL. The Shadertoy math is evaluated in display/sRGB-like space,
+// then converted back to BO3 linear. Camera movement removed; paper is not forced.
 float BO3BeginnerPencilLinearToSrgb1(float x)
 {
     x = max(x, 0.0);
@@ -2278,7 +2291,8 @@ float4 BO3BeginnerPencilGetColHT(float2 pos, float2 rt, float grainAmount, float
     return smoothstep(
         0.95.xxxx,
         1.05.xxxx,
-        BO3BeginnerPencilGetCol(pos, rt, edgeWhite) * 0.8 + 0.2.xxxx + BO3BeginnerPencilRand(pos * 0.7, rt, grainAmount));
+        BO3BeginnerPencilGetCol(pos, rt, edgeWhite) * 0.8 + 0.2.xxxx +
+        BO3BeginnerPencilRand(pos * 0.7, rt, grainAmount));
 }
 
 float BO3BeginnerPencilGetVal(float2 pos, float2 rt, float edgeWhite)
@@ -2292,7 +2306,8 @@ float2 BO3BeginnerPencilGetGrad(float2 pos, float eps, float2 rt, float edgeWhit
     float2 d = float2(eps, 0.0);
     return float2(
         BO3BeginnerPencilGetVal(pos + d.xy, rt, edgeWhite) - BO3BeginnerPencilGetVal(pos - d.xy, rt, edgeWhite),
-        BO3BeginnerPencilGetVal(pos + d.yx, rt, edgeWhite) - BO3BeginnerPencilGetVal(pos - d.yx, rt, edgeWhite)) / max(eps * 2.0, 1e-6);
+        BO3BeginnerPencilGetVal(pos + d.yx, rt, edgeWhite) - BO3BeginnerPencilGetVal(pos - d.yx, rt, edgeWhite)) /
+        max(eps * 2.0, 1e-6);
 }
 
 float BO3BeginnerPencilDepthContour(float2 uv)
@@ -2304,10 +2319,13 @@ float BO3BeginnerPencilDepthContour(float2 uv)
     float dU = DepthSampler.Sample(bilinearClampler, saturate(uv - float2(0.0, texel.y))).x;
     float dD = DepthSampler.Sample(bilinearClampler, saturate(uv + float2(0.0, texel.y))).x;
     float edge = abs(dC - dL) + abs(dC - dR) + abs(dC - dU) + abs(dC - dD);
-    return smoothstep(0.005, 0.040, edge) * 0.10;
+    return smoothstep(0.005, 0.040, edge);
 }
 
-float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount, float edgeWhite, float vignetteAmount)
+float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount,
+                                  float drawingAmount, float colorAmount,
+                                  float depthContourAmount, float edgeWhite,
+                                  float vignetteAmount)
 {
     const int angleNum = 3;
     const int sampNum = 16;
@@ -2367,11 +2385,13 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
 
     float3 src = BO3BeginnerPencilSceneDisplay(uv);
     float srcLum = BO3BeginnerPencilLuma(src);
-    float targetLum = lerp(srcLum, sketchLum, 0.86);
+    float targetLum = lerp(srcLum, sketchLum, saturate(drawingAmount));
     float3 sourcePigment = BO3BeginnerPencilAdjustSaturation(src, 1.08);
-    float3 art = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
+    float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
+    float3 monoArt = targetLum.xxx;
+    float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
 
-    float depthContour = BO3BeginnerPencilDepthContour(uv);
+    float depthContour = BO3BeginnerPencilDepthContour(uv) * saturate(depthContourAmount);
     art = lerp(art, art * 0.42, depthContour);
 
     if(vignetteAmount > 0.0001)
@@ -3415,13 +3435,16 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
-        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like an artistic colored-pencil drawing with directional hand-drawn strokes while keeping BO3 readable. Based on the approved reference-faithful GLSL conversion, with camera movement removed and gamma corrected for BO3.", "Stylized Screen",
+        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z is only used as subtle contour support.", "Stylized Screen",
                   {Target::PostFx},
-                  {FloatParam("strength", "Strength", "How strongly the colored-pencil drawing replaces the original scene.", 0.0, 1.0, 0.01, 0.94),
-                   FloatParam("scale", "Stroke Scale", "Overall size of the directional colored-pencil strokes.", 0.25, 3.0, 0.01, 1.0),
-                   FloatParam("grain", "Graphite Grain", "Monochrome grain used inside the drawing reconstruction. 0 is cleaner; higher values add more pencil breakup.", 0.0, 1.5, 0.01, 0.70),
-                   FloatParam("paper", "Edge White", "Optional white outside-frame fade from the reference look. Set this to 0 for no white border.", 0.0, 1.5, 0.01, 0.0),
-                   FloatParam("vignette", "Vignette", "Optional dark vignette around the image. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),
+                  {FloatParam("strength", "Strength", "Blend between the original BO3 scene and the colored-pencil reconstruction.", 0.0, 1.0, 0.01, 0.94),
+                   FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes. 1.0 matches the approved standalone shader.", 0.25, 3.0, 0.01, 1.0),
+                   FloatParam("grain", "Graphite Grain", "Monochrome random texture contribution used by the reference drawing algorithm.", 0.0, 1.5, 0.01, 0.70),
+                   FloatParam("drawing_amount", "Drawing Amount", "How strongly the directional pencil reconstruction controls scene luminance.", 0.0, 1.0, 0.01, 0.86),
+                   FloatParam("color_amount", "Color Amount", "Blend between monochrome graphite and the original BO3 scene colors.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("depth_contour", "Depth Contour", "Subtle Float-Z silhouette reinforcement. Keep low so depth supports the drawing instead of becoming a cartoon outline.", 0.0, 0.5, 0.01, 0.10),
+                   FloatParam("paper", "Edge White", "Optional white outside-frame fade from the original reference. 0 disables it.", 0.0, 1.0, 0.01, 0.0),
+                   FloatParam("vignette", "Vignette", "Optional edge darkening. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),
         // Keep the legacy id so existing projects that used Red Paint Splatter
         // transparently upgrade to the new Rain Drops implementation.
         EffectDef("red_paint_splatter", "Rain Drops", "Layer animated rain droplets, gravity streaks, glass refraction and soft wet blur over the scene. The cinematic zoom/lightning from the reference shader is intentionally omitted.", "Water & Weather",
