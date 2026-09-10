@@ -1617,6 +1617,9 @@ public:
                !postHlsl.contains("BO3_BEGINNER_PENCIL_REFERENCE") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_GAMMA_CORRECT") ||
                !postHlsl.contains("Pencil Sketch") ||
+               !postHlsl.contains("BO3_BEGINNER_STRUCTURE_TONE") ||
+               !postHlsl.contains("BO3BeginnerStructureToneGather") ||
+               !postHlsl.contains("Structure & Tone") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
                !postHlsl.contains("Luminance Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
@@ -1635,6 +1638,20 @@ public:
                postHlsl.contains("BO3BeginnerPencilSkyMask") ||
                !postHlsl.contains("paperWhitenessAmount"))
                 return "Beginner Pencil Sketch is missing the approved reconstruction, Paper Whiteness response, or the new stroke/paper styling controls.";
+
+            const beginner::EffectDefinition* structureToneDefinition = beginner::effectDefinition(QStringLiteral("structure_tone"));
+            if(!structureToneDefinition)
+                return "Beginner Structure & Tone effect definition is missing.";
+            QStringList structureToneKeys;
+            for(const beginner::ParameterDefinition& parameter : structureToneDefinition->parameters)
+                structureToneKeys << parameter.key;
+            if(!structureToneKeys.contains(QStringLiteral("strength")) ||
+               !structureToneKeys.contains(QStringLiteral("structure")) ||
+               !structureToneKeys.contains(QStringLiteral("tone")) ||
+               !structureToneKeys.contains(QStringLiteral("material_response")) ||
+               !structureToneKeys.contains(QStringLiteral("contact_shading")) ||
+               !structureToneKeys.contains(QStringLiteral("denoise")))
+                return "Beginner Structure & Tone controls are incomplete.";
 
             const beginner::EffectDefinition* pencilDefinition = beginner::effectDefinition(QStringLiteral("pencil_sketch"));
             if(!pencilDefinition)

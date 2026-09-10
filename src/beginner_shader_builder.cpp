@@ -1183,6 +1183,31 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, saturate(%2_oil), %3);\n")
                 .arg(definition->name, tag, strength, detail, relief, paintSpec, vignette);
         }
+        else if(effect.typeId == "structure_tone" && project.target == Target::PostFx && hasUv)
+        {
+            const QString targetScope = parameterExpr(project, effect, *definition, "target_scope");
+            const QString strength = parameterExpr(project, effect, *definition, "strength");
+            const QString structure = parameterExpr(project, effect, *definition, "structure");
+            const QString tone = parameterExpr(project, effect, *definition, "tone");
+            const QString materialResponse = parameterExpr(project, effect, *definition, "material_response");
+            const QString contactShading = parameterExpr(project, effect, *definition, "contact_shading");
+            const QString denoise = parameterExpr(project, effect, *definition, "denoise");
+            out += QString("    // %1 - BO3_BEGINNER_STRUCTURE_TONE / multi-scale perceptual reconstruction\n"
+                           "    float3 %2_structureToneBase = color;\n"
+                           "    float3 %2_structureTone = BO3BeginnerStructureTone(uv, %2_structureToneBase, max(%4, 0.0), max(%5, 0.0), saturate(%6), saturate(%7), saturate(%8));\n"
+                           "    float %2_structureToneTarget = BO3BeginnerTargetMask(BO3BeginnerSampleRawDepthPoint(uv), %9);\n"
+                           "    float3 %2_structureToneMixed = lerp(%2_structureToneBase, %2_structureTone, saturate(%3));\n"
+                           "    color = lerp(%2_structureToneBase, %2_structureToneMixed, %2_structureToneTarget);\n")
+                .arg(definition->name)
+                .arg(tag)
+                .arg(strength)
+                .arg(structure)
+                .arg(tone)
+                .arg(materialResponse)
+                .arg(contactShading)
+                .arg(denoise)
+                .arg(targetScope);
+        }
         else if(effect.typeId == "pencil_sketch" && project.target == Target::PostFx && hasUv)
         {
             const QString strength = parameterExpr(project, effect, *definition, "strength");
@@ -1776,7 +1801,8 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
            typeId == QStringLiteral("depth_isolation") ||
            typeId == QStringLiteral("contact_shadows") ||
            typeId == QStringLiteral("ascii_depth") ||
-           typeId == QStringLiteral("pencil_sketch");
+           typeId == QStringLiteral("pencil_sketch") ||
+           typeId == QStringLiteral("structure_tone");
 }
 
 bool projectRequiresSceneDepth(const Project& project)
@@ -2169,6 +2195,280 @@ float BO3BeginnerSSAOPair(float centerDepth, float sampleA, float sampleB, float
     float meanDepth = (sampleA + sampleB) * 0.5;
     float curvature = saturate((centerDepth - meanDepth - depthBias) / max(depthRange * 0.72, 0.0001)) * validA * validB;
     return saturate(paired * 0.72 + strongest * pairBalance * 0.18 + curvature * 0.46);
+}
+)HLSL");
+    }
+
+
+    if(projectUsesEffect(project, "structure_tone"))
+    {
+        out += QStringLiteral(R"HLSL(
+// BO3_BEGINNER_STRUCTURE_TONE
+// Structure & Tone -- high-quality deterministic screen-space reconstruction.
+// Derived from the tested Revision 6 standalone experiment. This is not neural
+// inference: it uses three edge-aware spatial scales plus optional packed
+// Float-Z cues. Approximate cost: 49 scene samples + 49 point depth loads/pixel.
+float BO3BeginnerStructureToneLuma(float3 c)
+{
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+float BO3BeginnerStructureToneLog(float3 c)
+{
+    return log2(0.003 + BO3BeginnerStructureToneLuma(c));
+}
+
+float3 BO3BeginnerStructureToneChroma(float3 c)
+{
+    return c / (0.06 + BO3BeginnerStructureToneLuma(c));
+}
+
+float3 BO3BeginnerStructureToneScene(float2 sampleUv)
+{
+    return max(PostFx_NormalizeColor(frameBuffer.SampleLevel(
+        bilinearClampler, saturate(sampleUv), 0.0).rgb), 0.0);
+}
+
+// x = decoded inverse distance, y = world/viewmodel class, z = validity.
+// Invalid/white fallback depth degrades cleanly to image-only reconstruction.
+float3 BO3BeginnerStructureToneDepth(float2 sampleUv, float2 size)
+{
+    int2 p = int2(clamp(floor(saturate(sampleUv) * size), float2(0.0, 0.0), size - 1.0));
+    float raw = DepthSampler.Load(int3(p, 0)).r;
+    if(!(raw > 0.000001 && raw < 0.999999))
+        return float3(1.0, 0.0, 0.0);
+    return float3(FloatZ_Process(raw), step(BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT, raw), 1.0);
+}
+
+float BO3BeginnerStructureToneDepthWeight(float3 a, float3 b)
+{
+    if(a.z < 0.5) return 1.0;
+    if(b.z < 0.5 || abs(a.y - b.y) > 0.5) return 0.0;
+    float difference = abs(a.x - b.x) / max(max(a.x, b.x), 0.000001);
+    return 1.0 - smoothstep(0.025, 0.16, difference);
+}
+
+static const float2 BO3_BEGINNER_STRUCTURE_TONE_DIRECTIONS[8] =
+{
+    float2(1.0, 0.0),
+    float2(0.0, 1.0),
+    float2(0.707107, 0.707107),
+    float2(0.707107, -0.707107),
+    float2(0.923880, 0.382683),
+    float2(0.382683, 0.923880),
+    float2(0.923880, -0.382683),
+    float2(0.382683, -0.923880)
+};
+
+struct BO3BeginnerStructureToneScale
+{
+    float3 color;
+    float logMean;
+    float variance;
+    float low;
+    float high;
+    float coherence;
+    float contact;
+    float boundary;
+    float support;
+    float pairedPeak;
+    float pairedContrast;
+};
+
+BO3BeginnerStructureToneScale BO3BeginnerStructureToneGather(
+    float2 uv, float2 px, float2 depthSize, float radius,
+    float3 center, float3 dc, float rangeWidth)
+{
+    BO3BeginnerStructureToneScale s;
+    float lc = BO3BeginnerStructureToneLog(center);
+    float3 cc = BO3BeginnerStructureToneChroma(center);
+    float weight = 2.0;
+    float3 sum = center * weight;
+    float sumLog = lc * weight;
+    float sumSquare = lc * lc * weight;
+    s.low = lc;
+    s.high = lc;
+    float3 tensor = 0.0.xxx;
+    float contact = 0.0;
+    float boundary = 0.0;
+    float support = 0.0;
+    float peak = 0.0;
+    float pairedContrast = 0.0;
+
+    [unroll]
+    for(int i = 0; i < 8; ++i)
+    {
+        float2 offset = BO3_BEGINNER_STRUCTURE_TONE_DIRECTIONS[i] * radius * px;
+        float3 a = BO3BeginnerStructureToneScene(uv + offset);
+        float3 b = BO3BeginnerStructureToneScene(uv - offset);
+        float3 da = BO3BeginnerStructureToneDepth(uv + offset, depthSize);
+        float3 db = BO3BeginnerStructureToneDepth(uv - offset, depthSize);
+        float ga = BO3BeginnerStructureToneDepthWeight(dc, da);
+        float gb = BO3BeginnerStructureToneDepthWeight(dc, db);
+        float la = BO3BeginnerStructureToneLog(a);
+        float lb = BO3BeginnerStructureToneLog(b);
+        float3 ca = BO3BeginnerStructureToneChroma(a) - cc;
+        float3 cb = BO3BeginnerStructureToneChroma(b) - cc;
+        float wa = ga * exp2(-abs(la - lc) / rangeWidth - 2.5 * dot(ca, ca));
+        float wb = gb * exp2(-abs(lb - lc) / rangeWidth - 2.5 * dot(cb, cb));
+
+        sum += a * wa + b * wb;
+        sumLog += la * wa + lb * wb;
+        sumSquare += la * la * wa + lb * lb * wb;
+        weight += wa + wb;
+
+        if(ga > 0.5) { s.low = min(s.low, la); s.high = max(s.high, la); }
+        if(gb > 0.5) { s.low = min(s.low, lb); s.high = max(s.high, lb); }
+
+        float g = (la - lb) * 0.5;
+        float2 n = BO3_BEGINNER_STRUCTURE_TONE_DIRECTIONS[i];
+        tensor += float3(n.x * n.x, n.y * n.y, n.x * n.y) * g * g;
+        support += wa + wb;
+        peak += max(min(lc - la, lc - lb), 0.0) * min(ga, gb);
+        pairedContrast += min(abs(la - lc), abs(lb - lc))
+                        * step(0.0, (la - lc) * (lb - lc)) * min(ga, gb);
+        boundary = max(boundary, 1.0 - min(ga, gb));
+
+        float curvature = (da.x + db.x - 2.0 * dc.x) / max(dc.x, 0.000001);
+        float validPair = dc.z * da.z * db.z * min(ga, gb);
+        contact += smoothstep(0.008, 0.065, curvature) * validPair;
+    }
+
+    s.color = sum / max(weight, 0.000001);
+    s.logMean = sumLog / max(weight, 0.000001);
+    s.variance = max(sumSquare / max(weight, 0.000001) - s.logMean * s.logMean, 0.0);
+    float trace = tensor.x + tensor.y;
+    s.coherence = saturate(sqrt((tensor.x - tensor.y) * (tensor.x - tensor.y)
+                               + 4.0 * tensor.z * tensor.z) / (trace + 0.0001));
+    s.contact = contact * 0.125;
+    s.boundary = boundary;
+    s.support = saturate(support / 16.0);
+    s.pairedPeak = peak * 0.125;
+    s.pairedContrast = pairedContrast * 0.125;
+    return s;
+}
+
+float3 BO3BeginnerStructureTone(
+    float2 uv, float3 sourceColor, float structureAmount, float toneAmount,
+    float materialResponseAmount, float contactStrengthAmount, float denoiseAmount)
+{
+    float structure = clamp(structureAmount, 0.0, 3.0);
+    float tone = clamp(toneAmount, 0.0, 2.0);
+    if(structure <= 0.0001 && tone <= 0.0001)
+        return sourceColor;
+
+    float2 size = max(PostFx_GetRenderTargetSize().xy, float2(1.0, 1.0));
+    float2 px = 1.0 / size;
+    float3 src = max(sourceColor, 0.0);
+    float y = BO3BeginnerStructureToneLuma(src);
+    float lc = BO3BeginnerStructureToneLog(src);
+    float3 dc = BO3BeginnerStructureToneDepth(uv, size);
+    float radius = clamp(size.y / 1080.0, 0.75, 2.0);
+
+    BO3BeginnerStructureToneScale fine = BO3BeginnerStructureToneGather(uv, px, size, radius, src, dc, 0.65);
+    BO3BeginnerStructureToneScale mid = BO3BeginnerStructureToneGather(uv, px, size, 4.0 * radius, src, dc, 1.25);
+    BO3BeginnerStructureToneScale wide = BO3BeginnerStructureToneGather(uv, px, size, 14.0 * radius, src, dc, 1.85);
+
+    float f = fine.logMean;
+    float m = lerp(f, mid.logMean, 0.78);
+    float base = lerp(m, wide.logMean, 0.82);
+    float micro = lc - f;
+    float material = f - m;
+    float localLight = m - base;
+    float sigma = sqrt(max(fine.variance, 0.0));
+    float edge = smoothstep(0.35, 1.15, fine.high - fine.low) * fine.coherence;
+    float protection = (1.0 - 0.80 * edge) * (1.0 - fine.boundary);
+    float textureEvidence = smoothstep(0.025, 0.18, sigma) * (1.0 - 0.75 * edge);
+    float nearDetail = lerp(1.0, 0.65 + 0.35 * smoothstep(0.0002, 0.015, dc.x), dc.z);
+    float noiseGate = (1.0 - smoothstep(0.012, 0.075, sigma)) * fine.support;
+
+    float materialSigma = sqrt(max(mid.variance, 0.0));
+    float materialEvidence = smoothstep(0.015, 0.12, materialSigma);
+    float materialEdge = mid.coherence * smoothstep(0.75, 2.0, mid.high - mid.low);
+    float materialGuard = (1.0 - 0.85 * materialEdge) * (1.0 - fine.boundary);
+    float stepEdge = smoothstep(0.70, 1.80, mid.high - mid.low)
+                   * (1.0 - smoothstep(0.02, 0.12, mid.pairedContrast));
+    materialGuard *= 1.0 - stepEdge;
+    protection *= 1.0 - stepEdge;
+
+    float microDelta = 0.55 * micro * textureEvidence;
+    float microLimit = 0.025 + 0.40 * sigma;
+    microDelta = microDelta / (1.0 + abs(microDelta) / max(microLimit, 0.000001));
+    float materialDelta = 2.40 * material * materialEvidence;
+    float materialLimit = 0.04 + 0.70 * materialSigma;
+    materialDelta = materialDelta / (1.0 + abs(materialDelta) / max(materialLimit, 0.000001));
+
+    float detailStops = structure * nearDetail * (
+        protection * (microDelta - saturate(denoiseAmount) * noiseGate * micro)
+        + materialGuard * materialDelta);
+    detailStops = clamp(detailStops, -0.65 * structure, 0.65 * structure);
+
+    float reconstructed = lc + detailStops;
+    float newY = max(exp2(reconstructed) - 0.003, 0.0);
+    float3 result = src * ((newY + 0.00001) / (y + 0.00001));
+
+    float contact = (0.65 * mid.contact + 0.35 * wide.contact)
+                  * (1.0 - fine.boundary) * (1.0 - 0.75 * mid.boundary);
+    result *= exp2(-0.40 * structure * saturate(contactStrengthAmount) * contact);
+
+    float3 chroma = BO3BeginnerStructureToneChroma(src);
+    float chromaRange = max(chroma.r, max(chroma.g, chroma.b))
+                      - min(chroma.r, min(chroma.g, chroma.b));
+    float neutral = 1.0 - smoothstep(0.35, 1.05, chromaRange);
+    float compact = smoothstep(0.025, 0.30, fine.pairedPeak + mid.pairedPeak * 0.5);
+    float highlight = smoothstep(0.0005, 0.008, y);
+    float relativeHighlight = smoothstep(0.025, 0.28, max(lc - m, 0.0));
+    float sheen = compact * (0.35 + 0.65 * neutral) * highlight * materialGuard;
+    float response = structure * saturate(materialResponseAmount);
+    float reflectionBand = clamp(lc - m, -0.65, 0.65);
+    float reflectionEvidence = (0.35 + 0.65 * neutral) * highlight
+                             * materialEvidence * materialGuard;
+    float reflectionStops = reflectionEvidence * reflectionBand * 0.65
+                          + sheen * relativeHighlight * 0.20;
+    result *= exp2(response * reflectionStops);
+
+    float warm = smoothstep(0.05, 0.35, chroma.r - chroma.b)
+               * smoothstep(0.0, 0.22, chroma.g - chroma.b)
+               * (1.0 - smoothstep(0.45, 0.95, chroma.r - chroma.g));
+    float skin = warm * smoothstep(0.025, 0.10, y) * (1.0 - smoothstep(0.6, 1.1, y))
+               * (1.0 - smoothstep(0.15, 0.55, sigma));
+    float green = smoothstep(0.035, 0.30, chroma.g - max(chroma.r, chroma.b));
+    float nearbyLight = saturate((BO3BeginnerStructureToneLuma(mid.color) - y) / (0.08 + y));
+    float thin = smoothstep(0.025, 0.18, max(-micro, 0.0)) * fine.support;
+    float transportGuard = protection * min(mid.support, wide.support);
+    float3 incoming = max(mid.color - src, 0.0);
+    result += incoming * float3(0.16, 0.065, 0.025) * skin * nearbyLight
+            * response * transportGuard;
+    result += incoming * float3(0.07, 0.14, 0.035) * green * thin
+            * response * transportGuard;
+
+    float baseOffset = base - log2(0.003 + 0.10);
+    float baseStops = 0.60 * baseOffset / (1.0 + abs(baseOffset));
+    float lightingGuard = (1.0 - mid.boundary) * (1.0 - stepEdge);
+    float localStops = -0.85 * localLight / (1.0 + abs(localLight) / 0.60);
+    float stops = baseStops + localStops * lightingGuard;
+    result *= exp2(tone * stops);
+
+    float ry = BO3BeginnerStructureToneLuma(result);
+    float wy = BO3BeginnerStructureToneLuma(wide.color);
+    float incomingEvidence = saturate((wy - y) / (0.025 + y));
+    float3 bounceTarget = wide.color * (ry / max(wy, 0.00001));
+    result = lerp(result, bounceTarget,
+                  0.08 * tone * incomingEvidence * lightingGuard * wide.support
+                  * smoothstep(0.0001, 0.005, wy));
+
+    float3 clean = fine.color * ((BO3BeginnerStructureToneLuma(result) + 0.00001)
+                               / (BO3BeginnerStructureToneLuma(fine.color) + 0.00001));
+    result = lerp(result, clean,
+                  saturate(saturate(denoiseAmount) * noiseGate * 0.12 * structure));
+
+    float peak = max(result.r, max(result.g, result.b));
+    float excess = max(peak - 0.72, 0.0);
+    float shoulder = 0.72 + excess / (1.0 + excess / 0.28);
+    float mapped = lerp(peak, min(peak, shoulder), saturate(tone * 0.50));
+    result *= mapped / max(peak, 0.00001);
+
+    return max(result, 0.0);
 }
 )HLSL");
     }
@@ -3196,6 +3496,14 @@ const QVector<EffectDefinition>& effectDefinitions()
         EffectDef("invert", "Invert Colors", "Invert the current colors, with adjustable strength.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Strength", "0 is unchanged; 1 is fully inverted.", 0.0, 1.0, 0.01, 1.0)}),
+        EffectDef("structure_tone", "Structure & Tone", "High-quality multi-scale screen-space reconstruction for stronger material structure, local lighting separation, contact shading and tonal depth. Uses BO3 Float-Z automatically when valid. This is a heavy effect and is best placed near the top of a PostFX stack.", "Color & Look",
+                  {Target::PostFx},
+                  {FloatParam("strength", "Strength", "Blend between the incoming BO3 frame and the reconstructed result.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("structure", "Structure", "Controls multi-scale detail reconstruction, material-frequency separation and structural response.", 0.0, 3.0, 0.01, 2.0),
+                   FloatParam("tone", "Tone", "Controls broad tonal separation, local lighting reconstruction, shadow response and highlight rolloff.", 0.0, 2.0, 0.01, 1.25),
+                   FloatParam("material_response", "Material Response", "Strength of evidence-driven sheen, pseudo-specular response and soft material light transport.", 0.0, 1.0, 0.01, 1.0),
+                   FloatParam("contact_shading", "Contact Shading", "Float-Z-driven contact/curvature shading. Invalid or missing depth automatically falls back to image-only reconstruction.", 0.0, 1.0, 0.01, 0.65),
+                   FloatParam("denoise", "Denoise", "Suppress low-contrast fine residuals in flatter regions while preserving edge and material structure.", 0.0, 1.0, 0.01, 0.20)}),
 
         EffectDef("vignette", "Vignette", "Darken the edges of a screen effect while keeping the center clear.", "Atmosphere",
                   {Target::PostFx},
