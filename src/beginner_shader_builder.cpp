@@ -1192,7 +1192,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString colorAmount = parameterExpr(project, effect, *definition, "color_amount");
             const QString contrast = parameterExpr(project, effect, *definition, "contrast");
             const QString brightness = parameterExpr(project, effect, *definition, "brightness");
-            const QString skyWhiteness = parameterExpr(project, effect, *definition, "sky_whiteness");
+            const QString paperWhiteness = parameterExpr(project, effect, *definition, "paper_whiteness");
             const QString depthContour = parameterExpr(project, effect, *definition, "depth_contour");
             const QString edgeWhite = parameterExpr(project, effect, *definition, "paper");
             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
@@ -1208,7 +1208,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                 .arg(colorAmount)
                 .arg(contrast)
                 .arg(brightness)
-                .arg(skyWhiteness)
+                .arg(paperWhiteness)
                 .arg(depthContour)
                 .arg(edgeWhite)
                 .arg(vignette);
@@ -2328,22 +2328,10 @@ float BO3BeginnerPencilDepthContour(float2 uv)
     return smoothstep(0.005, 0.040, edge);
 }
 
-float BO3BeginnerPencilSkyMask(float2 uv)
-{
-    // BO3 clear-sky pixels sit at the extreme far end of Float-Z. Keep the
-    // threshold high enough that ordinary distant map geometry is not treated
-    // as paper sky, and always reject the depth-hack/viewmodel class.
-    float rawDepth = BO3BeginnerSampleRawDepthPoint(uv);
-    float worldMask = 1.0 - BO3BeginnerViewmodelMask(rawDepth);
-    float safeRaw = min(rawDepth, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001);
-    float depth01 = BO3BeginnerNormalizedDepth(safeRaw);
-    return smoothstep(0.94, 0.995, depth01) * worldMask;
-}
-
 float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount,
                                   float drawingAmount, float colorAmount,
                                   float contrastAmount, float brightnessAmount,
-                                  float skyWhitenessAmount,
+                                  float paperWhitenessAmount,
                                   float depthContourAmount, float edgeWhite,
                                   float vignetteAmount)
 {
@@ -2400,7 +2388,13 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
     col.x = 1.0 - col.x;
     col.x *= col.x * col.x;
 
-    float3 sketch = saturate(col.x * col2);
+    // In the original hand-drawn shader, areas with little directional ink
+    // naturally read as exposed white paper. col.x is already that inverse-ink
+    // response: it approaches 1 in broad/flat regions and falls near strokes.
+    // Paper Whiteness restores that behavior WITHOUT consulting Float-Z.
+    float paperMask = smoothstep(0.42, 0.92, saturate(col.x));
+    float3 pencilBase = lerp(col2, 1.0.xxx, paperMask * saturate(paperWhitenessAmount));
+    float3 sketch = saturate(col.x * pencilBase);
     float sketchLum = saturate(BO3BeginnerPencilLuma(sketch));
 
     float3 src = BO3BeginnerPencilSceneDisplay(uv);
@@ -2415,12 +2409,6 @@ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmoun
     float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
     float3 monoArt = targetLum.xxx;
     float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
-
-    // Sky Whiteness restores the paper-white background character of the older
-    // pencil shader without lifting the whole scene. Float-Z selects only the
-    // extreme-far world background; geometry and the viewmodel stay untouched.
-    float skyMask = BO3BeginnerPencilSkyMask(uv);
-    art = lerp(art, 1.0.xxx, skyMask * saturate(skyWhitenessAmount));
 
     float depthContour = BO3BeginnerPencilDepthContour(uv) * saturate(depthContourAmount);
     art = lerp(art, art * 0.42, depthContour);
@@ -3473,7 +3461,7 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
-        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z supports subtle contours plus optional paper-white skies.", "Stylized Screen",
+        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z is used only for the optional depth contour.", "Stylized Screen",
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "Blend between the original BO3 scene and the colored-pencil reconstruction.", 0.0, 1.0, 0.01, 0.94),
                    FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes. 1.0 matches the approved standalone shader.", 0.25, 3.0, 0.01, 1.0),
@@ -3482,7 +3470,7 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("color_amount", "Color", "0 is pure graphite; 1 restores the approved colored-pencil pigment.", 0.0, 1.0, 0.01, 1.0),
                    FloatParam("contrast", "Contrast", "Final drawing contrast. 1.0 preserves the approved current look.", 0.25, 2.5, 0.01, 1.0),
                    FloatParam("brightness", "Brightness", "Final drawing brightness. 1.0 preserves the approved current look.", 0.25, 2.0, 0.01, 1.0),
-                   FloatParam("sky_whiteness", "Sky Whiteness", "Push only the extreme-far Float-Z sky/background toward white paper. 0 preserves the current look; 1 gives the strongest old-style white sky.", 0.0, 1.0, 0.01, 0.0),
+                   FloatParam("paper_whiteness", "Paper Whiteness", "Restore the old pencil shader's white-paper response in low-ink, low-detail regions. This is stroke-driven, not depth-driven; skies often become much lighter because they contain less pencil ink.", 0.0, 1.0, 0.01, 0.0),
                    FloatParam("depth_contour", "Depth Contour", "Subtle Float-Z silhouette reinforcement. Keep low so depth supports the drawing instead of becoming a cartoon outline.", 0.0, 0.5, 0.01, 0.10),
                    FloatParam("paper", "Edge White", "Optional white outside-frame fade from the original reference. 0 disables it.", 0.0, 1.0, 0.01, 0.0),
                    FloatParam("vignette", "Vignette", "Optional edge darkening. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),
@@ -4018,15 +4006,24 @@ bool projectFromJson(const QJsonObject& object, Project& project, QString& error
             const QJsonObject parameters = item.value("parameters").toObject();
             for(const ParameterDefinition& parameter : definition->parameters)
             {
-                if(!parameters.contains(parameter.key)) continue;
+                // Pencil Sketch migration: early builds exposed the paper-response
+                // control under the misleading key sky_whiteness. Preserve saved
+                // projects while moving the UI/runtime name to paper_whiteness.
+                QString sourceKey = parameter.key;
+                if(typeId == QStringLiteral("pencil_sketch") &&
+                   parameter.key == QStringLiteral("paper_whiteness") &&
+                   !parameters.contains(sourceKey) &&
+                   parameters.contains(QStringLiteral("sky_whiteness")))
+                    sourceKey = QStringLiteral("sky_whiteness");
+                if(!parameters.contains(sourceKey)) continue;
                 if(parameter.kind == ParameterKind::Color)
                 {
-                    const QColor candidate(parameters.value(parameter.key).toString());
+                    const QColor candidate(parameters.value(sourceKey).toString());
                     if(candidate.isValid()) effect.parameters[parameter.key] = candidate.name(QColor::HexRgb);
                 }
                 else
                 {
-                    const double candidate = parameters.value(parameter.key).toDouble(parameter.defaultValue);
+                    const double candidate = parameters.value(sourceKey).toDouble(parameter.defaultValue);
                     effect.parameters[parameter.key] = std::clamp(candidate, parameter.minimum, parameter.maximum);
                 }
             }
