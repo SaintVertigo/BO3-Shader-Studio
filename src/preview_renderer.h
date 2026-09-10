@@ -143,6 +143,8 @@ public:
     bool Fulbright() const;
     void SetMaterialPreviewProfile(MaterialPreviewProfile profile);
     MaterialPreviewProfile GetMaterialPreviewProfile() const;
+    void SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
+                                   float sunIrradianceScale, float probeExposure);
     void SetLightColor(float r, float g, float b);
     std::array<float,3> LightColor() const;
     void ResetLightColorToEnvironment();

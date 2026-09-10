@@ -44,3 +44,13 @@ The original BO3 Shader Studio 0.1 bridge release should remain on GitHub so use
 - Added `Input Albedo (t0)` to isolate image decode/binding from mesh UV and GBuffer issues.
 - Material Textures now reports decoded dimensions and whether each preview resource is sRGB or linear.
 - Added source-derived APE reverse-engineering notes separating confirmed behavior from remaining approximations.
+
+## APE Match Phase 1g
+- Replaced APE Match's broad cone-sampled environment lighting with CPU-generated Lambert-convolved SH9 diffuse probe lighting.
+- APE HDR environment textures now keep a GPU mip chain for roughness-dependent reflection-probe filtering.
+- Separated APE probe exposure, diffuse-probe scale, specular-probe scale, sun irradiance, and display exposure so a bright sky no longer masks an under-lit material.
+- Added a conservative four-bounce/local-probe fill approximation based on the recovered APE `assetviewer.led` / SSI setup.
+- Added mild average-probe chroma adaptation so Day lighting does not cast the raw blue/green HDR sky directly onto diffuse materials.
+- Corrected Preview Reset so APE Match restores its calibrated 26.7-degree reference camera pitch.
+- APE preset diagnostics now state whether the native Treyarch preview mesh or the Studio fallback mesh is active.
+- No Treyarch HDR/model assets are bundled; APE Match continues to read them from the user's own BO3 Mod Tools install.

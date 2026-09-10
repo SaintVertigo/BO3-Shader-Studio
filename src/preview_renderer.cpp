@@ -740,11 +740,13 @@ public:
             }
 
             ComPtr<ID3D11ShaderResourceView> srv;
-            if (!CreateFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error))
+            if (!CreateFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
             {
                 std::free(exrPixels);
                 return false;
             }
+            ComputeEnvironmentDiffuseSH(uploadPixels, uploadW, uploadH);
+            environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(uploadW, uploadH)))));
 
             if (totalWeight > 0.0)
             {
@@ -845,6 +847,8 @@ public:
             };
         }
         environmentSunColor_ = brightest;
+        environmentDiffuseSHValid_ = false;
+        environmentMipCount_ = 1u;
         environmentSRV_ = srv;
         environmentPath_ = path;
         environmentEnabled_ = true;
@@ -1015,7 +1019,9 @@ public:
         }
 
         ComPtr<ID3D11ShaderResourceView> srv;
-        if (!CreateFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error)) return false;
+        if (!CreateFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error, true)) return false;
+        ComputeEnvironmentDiffuseSH(equirect.data(), outputWidth, outputHeight);
+        environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(outputWidth, outputHeight)))));
         if (totalWeight > 0.0)
         {
             environmentAverageColor_ = {
@@ -1114,6 +1120,8 @@ public:
         environmentPath_ = fs::path(L"<Built-in Studio Sky>");
         environmentAverageColor_ = {0.72f, 0.77f, 0.84f};
         environmentSunColor_ = {1.0f, 0.97f, 0.92f};
+        environmentDiffuseSHValid_ = false;
+        environmentMipCount_ = 1u;
         environmentEnabled_ = true;
         environmentIsEXR_ = false;
         return true;
@@ -1125,6 +1133,8 @@ public:
         environmentPath_.clear();
         environmentAverageColor_ = {0.18f, 0.18f, 0.18f};
         environmentSunColor_ = {1.0f, 1.0f, 1.0f};
+        environmentDiffuseSHValid_ = false;
+        environmentMipCount_ = 1u;
         environmentEnabled_ = false;
         environmentIsEXR_ = false;
         std::wstring error;
@@ -1326,6 +1336,14 @@ public:
     bool Fulbright() const { return fulbright_; }
     void SetMaterialPreviewProfile(MaterialPreviewProfile profile) { materialPreviewProfile_ = profile; }
     MaterialPreviewProfile GetMaterialPreviewProfile() const { return materialPreviewProfile_; }
+    void SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
+                                   float sunIrradianceScale, float probeExposure)
+    {
+        apeDiffuseProbeScale_ = std::clamp(diffuseProbeScale, 0.0f, 8.0f);
+        apeSpecularProbeScale_ = std::clamp(specularProbeScale, 0.0f, 4.0f);
+        apeSunIrradianceScale_ = std::clamp(sunIrradianceScale, 0.0f, 16.0f);
+        apeProbeExposure_ = std::clamp(probeExposure, 0.0f, 8.0f);
+    }
     void SetLightColor(float r, float g, float b)
     {
         lightColor_ = {std::max(0.0f, r), std::max(0.0f, g), std::max(0.0f, b)};
@@ -3354,7 +3372,7 @@ private:
     bool CreateDeferredLightBuffer(std::wstring& error)
     {
         D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = 128;
+        desc.ByteWidth = 288; // 18 float4s: core preview lighting + APE probe calibration + SH9 irradiance
         desc.Usage = D3D11_USAGE_DYNAMIC;
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3380,6 +3398,8 @@ private:
             DirectX::XMFLOAT4 lookdevSettings;
             DirectX::XMFLOAT4 debugSettings;
             DirectX::XMFLOAT4 apeSettings;
+            DirectX::XMFLOAT4 apeLightingCalibration;
+            DirectX::XMFLOAT4 apeDiffuseSH[9];
         } data{};
         const float ly = DirectX::XMConvertToRadians(lightYawDegrees_);
         const float lp = DirectX::XMConvertToRadians(lightPitchDegrees_);
@@ -3401,7 +3421,21 @@ private:
         data.backgroundColor = {backgroundColor_[0], backgroundColor_[1], backgroundColor_[2], 1.0f};
         data.lookdevSettings = {lookdevExposureEV_, static_cast<float>(toneMapMode_), groundEnabled_ ? 1.0f : 0.0f, contactShadowStrength_};
         data.debugSettings = {static_cast<float>(gbufferView_), static_cast<float>(materialPreviewProfile_), 0.0f, 0.0f};
-        data.apeSettings = {environmentRotationDegrees_ * (3.14159265358979323846f / 180.0f), 0.0f, 0.0f, 0.0f};
+        data.apeSettings = {
+            environmentRotationDegrees_ * (3.14159265358979323846f / 180.0f),
+            static_cast<float>(environmentMipCount_ > 0 ? environmentMipCount_ - 1u : 0u),
+            environmentDiffuseSHValid_ ? 1.0f : 0.0f,
+            0.0f
+        };
+        data.apeLightingCalibration = {
+            apeDiffuseProbeScale_, apeSpecularProbeScale_, apeSunIrradianceScale_, apeProbeExposure_
+        };
+        for (size_t i = 0; i < environmentDiffuseSH_.size(); ++i)
+        {
+            data.apeDiffuseSH[i] = {
+                environmentDiffuseSH_[i][0], environmentDiffuseSH_[i][1], environmentDiffuseSH_[i][2], 0.0f
+            };
+        }
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(context_->Map(deferredLightBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
@@ -4717,7 +4751,9 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewBackgroundColor;     // preview clear/background color
     float4 previewLookdevSettings;     // x exposure EV, y tone map, z ground, w contact shadow
     float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
-    float4 previewApeSettings;         // x = environment yaw rotation in radians
+    float4 previewApeSettings;         // x env yaw radians, y max environment mip, z SH9 valid
+    float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
+    float4 previewApeDiffuseSH[9];      // Lambert-convolved environment irradiance, Y-up SH9
 };
 
 struct VS_OUT
@@ -4766,18 +4802,23 @@ float DecodeBo3Gloss(float packedGloss)
     return saturate((packedGloss - 0.00146627566) / 0.49755621);
 }
 
-float2 DirectionToEquirect(float3 direction)
+float3 RotateEnvironmentDirection(float3 direction)
 {
     float3 d = normalize(direction);
     // APE/BO3's asset-preview environment uses the opposite horizontal
-    // handedness from the Studio camera frame. Keep this isolated to APE Match
-    // so Look Dev and user-authored environment orientation remain unchanged.
+    // handedness from the Studio camera frame. Keep this isolated to APE Match.
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
         d.x = -d.x;
     float angle = previewApeSettings.x;
     float s = sin(angle), c = cos(angle);
     d.xz = float2(d.x * c - d.z * s, d.x * s + d.z * c);
+    return normalize(d);
+}
+
+float2 DirectionToEquirect(float3 direction)
+{
+    float3 d = RotateEnvironmentDirection(direction);
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
@@ -4789,7 +4830,7 @@ float3 EnvironmentAt(float2 uv)
     float3 ray = previewCameraForward.xyz +
                  previewCameraRight.xyz * (ndc.x * previewCameraParams.x * previewCameraParams.y) +
                  previewCameraUp.xyz * (ndc.y * previewCameraParams.y);
-    return previewEnvironment.Sample(previewSampler, DirectionToEquirect(ray)).rgb;
+    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(ray), 0.0).rgb;
 }
 
 float LinearToDisplay1(float x)
@@ -4808,10 +4849,7 @@ float3 ApplyLookdev(float3 color)
     int profile = (int)(previewDebugSettings.y + 0.5);
     color = max(color, 0.0);
 
-    // APE's No Lighting path is diagnostic, but its diffuse texture is still
-    // sampled from an sRGB resource into linear shader space. Encode the final
-    // linear material response for the UNORM desktop swapchain so a raw color
-    // map visually matches APE instead of appearing artificially dark.
+    // APE's No Lighting path remains a distinct diagnostic renderer mode.
     if (profile == 2)
         return saturate(LinearToDisplay(color));
 
@@ -4821,17 +4859,13 @@ float3 ApplyLookdev(float3 color)
         color = color / (1.0 + color); // Reinhard
     else if (mode == 2 || profile == 0)
     {
-        // APE Match currently uses the same compact shoulder/toe curve while
-        // keeping the recovered SSI exposure and HDR environment separate.
-        // This is deliberately isolated so screenshot calibration can refine
-        // the display transform without changing Look Dev.
+        // The exact ToolsGfx TonemapLUT is still a parity target. Keep the
+        // display curve isolated from probe/sun energy so lighting can be
+        // matched independently of the visible HDR background.
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
 
-    // The swapchain is R8G8B8A8_UNORM rather than *_SRGB. APE/TOOLSGFX output
-    // is display-referred, so APE Match must explicitly apply the display OETF.
-    // Preserve legacy Look Dev output for now; this correction is parity-scoped.
     if (profile == 0)
         color = LinearToDisplay(color);
     return saturate(color);
@@ -4839,32 +4873,37 @@ float3 ApplyLookdev(float3 color)
 
 float3 EnvironmentDirection(float3 direction)
 {
-    return previewEnvironment.Sample(previewSampler, DirectionToEquirect(direction)).rgb;
+    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(direction), 0.0).rgb;
 }
 
-// APE does not feed the raw sky texture straight into glossy materials. Its
-// ToolsGfx deferred path evaluates diffuse/specular probe lighting after the
-// GBuffer pass. We do not yet have Treyarch's full probe convolution kernel,
-// but this cone filter removes the obviously-wrong mirror projection while
-// preserving the recovered HDR environment and SSI lighting direction.
-float3 EnvironmentCone(float3 direction, float radius)
+float3 EnvironmentDirectionLod(float3 direction, float lod)
 {
-    float3 d = normalize(direction);
-    float3 helper = abs(d.y) < 0.92 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-    float3 t = normalize(cross(helper, d));
-    float3 b = normalize(cross(d, t));
-    float r = max(radius, 0.0001);
+    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(direction),
+        clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
+}
 
-    float3 sum = EnvironmentDirection(d) * 4.0;
-    sum += EnvironmentDirection(normalize(d + t * r));
-    sum += EnvironmentDirection(normalize(d - t * r));
-    sum += EnvironmentDirection(normalize(d + b * r));
-    sum += EnvironmentDirection(normalize(d - b * r));
-    sum += EnvironmentDirection(normalize(d + (t + b) * (r * 0.70710678)));
-    sum += EnvironmentDirection(normalize(d + (t - b) * (r * 0.70710678)));
-    sum += EnvironmentDirection(normalize(d + (-t + b) * (r * 0.70710678)));
-    sum += EnvironmentDirection(normalize(d - (t + b) * (r * 0.70710678)));
-    return sum * (1.0 / 12.0);
+float3 EvaluateApeDiffuseIrradiance(float3 direction)
+{
+    if (previewApeSettings.z < 0.5)
+        return max(previewEnvironmentAmbient.rgb * 3.14159265, 0.0);
+
+    float3 d = RotateEnvironmentDirection(direction);
+    float x = d.x, y = d.y, z = d.z;
+    float basis[9] = {
+        0.2820947918,
+        0.4886025119 * z,
+        0.4886025119 * y,
+        0.4886025119 * x,
+        1.0925484306 * x * z,
+        1.0925484306 * z * y,
+        0.3153915653 * (3.0 * y * y - 1.0),
+        1.0925484306 * x * y,
+        0.5462742153 * (x * x - z * z)
+    };
+    float3 irradiance = 0.0;
+    [unroll] for (int sh = 0; sh < 9; ++sh)
+        irradiance += previewApeDiffuseSH[sh].rgb * basis[sh];
+    return max(irradiance, 0.0);
 }
 
 float4 ps_main(VS_OUT i) : SV_Target0
@@ -5007,13 +5046,29 @@ float4 ps_main(VS_OUT i) : SV_Target0
     {
         if (materialProfile == 0)
         {
-            // APE's GI diffuse is probe-convolved/low-frequency. Sampling the
-            // raw lat-long at N projected recognizable mountains/clouds onto
-            // the sphere and was the main cause of the chrome-ball look. Blend
-            // a broad cone with the recovered environment average instead.
-            float3 probeDiffuse = EnvironmentCone(N, 0.85);
-            float3 lowFreqEnv = lerp(ambientTint, probeDiffuse, 0.20);
-            ambient = albedo * lowFreqEnv * (previewAmbientShadow.x * 1.20) * ao;
+            // APE's ToolsGfx scene constants expose a global probe exposure and
+            // average probe color, while its renderer runs a dedicated diffuse
+            // probe compute stage before deferred lighting. Evaluate the local
+            // HDR environment through Lambert-convolved SH9 rather than using
+            // the background image itself as material lighting.
+            float3 irradiance = EvaluateApeDiffuseIrradiance(N) * previewApeLightingCalibration.w;
+            // The assetviewer LED was baked with four bounces and local probes.
+            // A sky-only SH projection has almost no energy in directions facing
+            // the preview floor, so retain a conservative global-probe floor from
+            // avgCubeColor to represent that bounced/local-probe contribution.
+            float3 bounceFloor = max(ambientTint, 0.0) * (3.14159265 * 0.42) *
+                                 previewApeLightingCalibration.w;
+            irradiance = max(irradiance, bounceFloor);
+            // APE's probe structures carry avgCubeColor separately from probe
+            // exposure. Use the recovered environment average as a mild chroma
+            // adaptation term so blue/green HDR skies do not color-cast diffuse
+            // GI as strongly as a raw lat-long sample would. Directional color
+            // variation remains in the SH signal; this only normalizes the mean.
+            float probeMean = dot(max(ambientTint, 0.0), float3(0.2126, 0.7152, 0.0722));
+            float3 probeBalance = probeMean / max(ambientTint, float3(0.025, 0.025, 0.025));
+            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.55);
+            ambient = albedo * (irradiance / 3.14159265) *
+                      previewApeLightingCalibration.x * previewAmbientShadow.x * ao;
         }
         else
         {
@@ -5023,7 +5078,9 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
     float3 diffuse = albedo * (1.0 - F) * (NdotL / 3.14159265);
     float shadowTerm = lerp(1.0, smoothstep(0.0, 0.35, NdotL), previewAmbientShadow.y);
-    float3 direct = (diffuse + specular) * previewLightColorFulbright.rgb * previewLightDirIntensity.w * shadowTerm;
+    float sunScale = materialProfile == 0 ? previewApeLightingCalibration.z : 1.0;
+    float3 direct = (diffuse + specular) * previewLightColorFulbright.rgb *
+                    previewLightDirIntensity.w * sunScale * shadowTerm;
 
     float3 envSpec = 0.0;
     if (previewAmbientShadow.w > 0.5 && previewAmbientShadow.z > 0.5)
@@ -5031,13 +5088,17 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float3 R = reflect(-V, N);
         if (materialProfile == 0)
         {
-            // First probe-specular approximation. Gloss still controls the
-            // lobe, but the environment is convolved and energy-reduced instead
-            // of copied one-for-one as a sharp HDR mirror reflection.
-            float cone = lerp(0.055, 0.72, roughness * roughness + roughness * 0.35);
-            float3 env = EnvironmentCone(R, cone);
-            float probeEnergy = lerp(0.34, 0.075, roughness);
-            envSpec = env * F * probeEnergy * ao;
+            // APE feeds deferred specular from filtered reflection probes. Use
+            // the HDR mip pyramid as the probe prefilter approximation. Gloss
+            // controls LOD; a separate low-energy probe scale prevents the raw
+            // sky from turning stock dielectric materials into chrome.
+            float maxLod = max(0.0, previewApeSettings.y);
+            float lodFraction = saturate(roughness * 1.70);
+            float lod = lodFraction * maxLod;
+            float3 env = EnvironmentDirectionLod(R, lod);
+            float3 fresnelEnv = specColor + (1.0 - specColor) * pow(1.0 - NdotV, 5.0);
+            envSpec = env * fresnelEnv * previewApeLightingCalibration.y *
+                      previewApeLightingCalibration.w * ao;
         }
         else
         {
@@ -5386,8 +5447,79 @@ float4 ps_main(VS_OUT i) : SV_Target0
         return true;
     }
 
+    void ComputeEnvironmentDiffuseSH(const float* rgba, UINT w, UINT h)
+    {
+        for (auto& coefficient : environmentDiffuseSH_)
+            coefficient = {0.0f, 0.0f, 0.0f};
+        environmentDiffuseSHValid_ = false;
+        if (!rgba || w == 0 || h == 0) return;
+
+        // Integrate a modest subset of very large APE HDR lat-longs. The source
+        // is already linear. SH basis uses Y-up to match the Studio/ToolsGfx
+        // world frame. Coefficients are convolved with the Lambert cosine kernel
+        // here, so the shader evaluates irradiance directly at the surface normal.
+        constexpr double kPi = 3.14159265358979323846;
+        constexpr double c0 = 0.28209479177387814;
+        constexpr double c1 = 0.4886025119029199;
+        constexpr double c2a = 1.0925484305920792;
+        constexpr double c2b = 0.31539156525252005;
+        constexpr double c2c = 0.5462742152960396;
+        const UINT stepX = std::max<UINT>(1u, w / 512u);
+        const UINT stepY = std::max<UINT>(1u, h / 256u);
+        const double dPhi = (2.0 * kPi / static_cast<double>(w)) * static_cast<double>(stepX);
+        const double dTheta = (kPi / static_cast<double>(h)) * static_cast<double>(stepY);
+        double coeff[9][3]{};
+
+        for (UINT y = 0; y < h; y += stepY)
+        {
+            const double theta = (static_cast<double>(y) + 0.5 * stepY) / static_cast<double>(h) * kPi;
+            const double sinTheta = std::sin(theta);
+            const double cy = std::cos(theta); // Y-up
+            const double solidAngle = std::max(0.0, sinTheta) * dTheta * dPhi;
+            for (UINT x = 0; x < w; x += stepX)
+            {
+                const double phi = ((static_cast<double>(x) + 0.5 * stepX) / static_cast<double>(w) - 0.5) * (2.0 * kPi);
+                const double cx = sinTheta * std::cos(phi);
+                const double cz = sinTheta * std::sin(phi);
+                const double basis[9] = {
+                    c0,
+                    c1 * cz,
+                    c1 * cy,
+                    c1 * cx,
+                    c2a * cx * cz,
+                    c2a * cz * cy,
+                    c2b * (3.0 * cy * cy - 1.0),
+                    c2a * cx * cy,
+                    c2c * (cx * cx - cz * cz)
+                };
+                const size_t i = (static_cast<size_t>(y) * w + x) * 4u;
+                const double rgb[3] = {
+                    std::max(0.0f, rgba[i + 0]),
+                    std::max(0.0f, rgba[i + 1]),
+                    std::max(0.0f, rgba[i + 2])
+                };
+                for (int sh = 0; sh < 9; ++sh)
+                    for (int channel = 0; channel < 3; ++channel)
+                        coeff[sh][channel] += rgb[channel] * basis[sh] * solidAngle;
+            }
+        }
+
+        // Clamped-cosine convolution factors by SH band: A0=pi,
+        // A1=2pi/3, A2=pi/4. This turns radiance SH into diffuse irradiance SH.
+        const double bandScale[9] = {
+            kPi,
+            2.0 * kPi / 3.0, 2.0 * kPi / 3.0, 2.0 * kPi / 3.0,
+            kPi / 4.0, kPi / 4.0, kPi / 4.0, kPi / 4.0, kPi / 4.0
+        };
+        for (int sh = 0; sh < 9; ++sh)
+            for (int channel = 0; channel < 3; ++channel)
+                environmentDiffuseSH_[sh][channel] = static_cast<float>(coeff[sh][channel] * bandScale[sh]);
+        environmentDiffuseSHValid_ = true;
+    }
+
     bool CreateFloatTextureSRV(const float* rgba, UINT w, UINT h,
-                               ComPtr<ID3D11ShaderResourceView>& out, std::wstring& error)
+                               ComPtr<ID3D11ShaderResourceView>& out, std::wstring& error,
+                               bool generateMips = false)
     {
         if (!rgba || w == 0 || h == 0)
         {
@@ -5398,29 +5530,39 @@ float4 ps_main(VS_OUT i) : SV_Target0
         D3D11_TEXTURE2D_DESC td{};
         td.Width = w;
         td.Height = h;
-        td.MipLevels = 1;
+        td.MipLevels = generateMips ? 0u : 1u;
         td.ArraySize = 1;
         td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_IMMUTABLE;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.Usage = generateMips ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (generateMips ? D3D11_BIND_RENDER_TARGET : 0u);
+        td.MiscFlags = generateMips ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0u;
         D3D11_SUBRESOURCE_DATA init{};
         init.pSysMem = rgba;
         init.SysMemPitch = w * sizeof(float) * 4u;
 
         ComPtr<ID3D11Texture2D> tex;
-        HRESULT hr = device_->CreateTexture2D(&td, &init, tex.GetAddressOf());
+        HRESULT hr = device_->CreateTexture2D(&td, generateMips ? nullptr : &init, tex.GetAddressOf());
         if (FAILED(hr))
         {
             error = L"CreateTexture2D failed for floating-point HDR source.";
             return false;
         }
-        hr = device_->CreateShaderResourceView(tex.Get(), nullptr, out.ReleaseAndGetAddressOf());
+        if (generateMips)
+            context_->UpdateSubresource(tex.Get(), 0, nullptr, rgba, w * sizeof(float) * 4u, 0);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = td.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MostDetailedMip = 0;
+        sd.Texture2D.MipLevels = generateMips ? static_cast<UINT>(-1) : 1u;
+        hr = device_->CreateShaderResourceView(tex.Get(), &sd, out.ReleaseAndGetAddressOf());
         if (FAILED(hr))
         {
             error = L"CreateShaderResourceView failed for floating-point HDR source.";
             return false;
         }
+        if (generateMips) context_->GenerateMips(out.Get());
         return true;
     }
 
@@ -6313,6 +6455,17 @@ float4 ps_main(VS_OUT i) : SV_Target0
     std::array<float, 3> backgroundColor_{0.0f, 0.0f, 0.0f};
     std::array<float, 3> environmentAverageColor_{0.72f, 0.77f, 0.84f};
     std::array<float, 3> environmentSunColor_{1.0f, 0.97f, 0.92f};
+    // APE's ToolsGfx path evaluates environment lighting through processed
+    // probes. Store a Lambert-convolved SH9 representation of the locally
+    // loaded HDR source so diffuse GI is smooth and directionally faithful
+    // without projecting recognizable sky features onto the material.
+    std::array<std::array<float, 3>, 9> environmentDiffuseSH_{};
+    bool environmentDiffuseSHValid_ = false;
+    UINT environmentMipCount_ = 1;
+    float apeDiffuseProbeScale_ = 1.0f;
+    float apeSpecularProbeScale_ = 1.0f;
+    float apeSunIrradianceScale_ = 1.0f;
+    float apeProbeExposure_ = 1.0f;
     fs::path environmentPath_{};
     bool environmentEnabled_ = false;
     bool environmentIsEXR_ = false;
@@ -6542,6 +6695,12 @@ void PreviewRenderer::SetMaterialPreviewProfile(MaterialPreviewProfile profile)
 MaterialPreviewProfile PreviewRenderer::GetMaterialPreviewProfile() const
 {
     return impl_->GetMaterialPreviewProfile();
+}
+
+void PreviewRenderer::SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
+                                                 float sunIrradianceScale, float probeExposure)
+{
+    impl_->SetApeLightingCalibration(diffuseProbeScale, specularProbeScale, sunIrradianceScale, probeExposure);
 }
 
 void PreviewRenderer::SetLightColor(float r, float g, float b)

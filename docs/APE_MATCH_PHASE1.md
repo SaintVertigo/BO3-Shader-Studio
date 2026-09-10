@@ -149,3 +149,19 @@ A new **Input Albedo (t0)** debug view samples the loaded material resource dire
 ### APE executable pipeline confirmation
 
 Analysis of `asseteditor_modtools.exe` / the supplied IDA database also confirms that APE's real-lighting material viewport is a multi-pass ToolsGfx pipeline. The executable names/asserts stages including `GBuffer Opaque`, `SSAO`, `Light Culling`, and `Deferred Lighting`, and contains separate GI debug variants for diffuse and specular contribution. `LightingNone` is a distinct lighting mode rather than a zero-intensity version of the real-lighting path. This supports keeping **APE Match** and **Neutral / No Lighting** as separate renderer modes and makes probe convolution / GI separation the next major renderer-parity target.
+
+## Phase 1g — APE probe/deferred lighting pass
+
+Phase 1g supersedes the earlier Phase-1 direct-light/probe approximation above. The recovered SSI records are still the source of truth, but the Studio no longer derives sun energy by subtracting `EV` from `stops` and no longer cone-samples the visible HDR background for material GI.
+
+APE Match now keeps three stages separate:
+
+1. **Visible HDR environment** — mip 0 of the local BO3 EXR, used for the viewport background.
+2. **Processed probe lighting** — the HDR source is projected to Lambert-convolved SH9 for diffuse irradiance and uploaded with a mip pyramid used as the first reflection-probe prefilter approximation.
+3. **Direct sun + display transform** — recovered SSI sun color/direction drives the key light; separate APE-only calibration values represent unresolved ToolsGfx sun/probe exposure while the display curve remains isolated.
+
+This mirrors the architecture evidenced by APE more closely: the tool has distinct diffuse-probe/reflection-probe, light-culling, deferred-lighting, probe-exposure/average-cube, and tonemap stages instead of using the sky image as a single lighting texture.
+
+The Day preset is intentionally calibrated much brighter at the material-lighting stage without brightening the background by the same amount. This targets the regression where the local Day HDR looked plausible while the material sphere remained nearly black.
+
+`Reset` now restores APE Match's calibrated camera instead of the generic zero-pitch Studio camera, and the preset diagnostic line reports whether a native APE preview mesh or a Studio fallback primitive is active.

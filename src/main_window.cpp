@@ -17312,7 +17312,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(preview_) preview_->renderNow();
         });
         connect(previewMaxButton_, &QPushButton::toggled, this, [this](bool enabled){ setPreviewMaximized(enabled); });
-        connect(resetCamera, &QPushButton::clicked, this, [this]{ preview_->renderer().ResetCamera(); updateCameraUi(); });
+        connect(resetCamera, &QPushButton::clicked, this, [this]{
+            if (!preview_) return;
+            auto& renderer = preview_->renderer();
+            renderer.ResetCamera();
+            if (renderer.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+                renderer.RotateCamera(0.0f, 26.7f);
+            updateCameraUi();
+        });
 
         editor_->setAcceptDrops(true); editor_->viewport()->setAcceptDrops(true); preview_->setAcceptDrops(true);
         editor_->installEventFilter(this); editor_->viewport()->installEventFilter(this); preview_->installEventFilter(this);
@@ -19066,7 +19073,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
         add("Focus Preview", [this]{ if (previewDock_) { previewDock_->show(); previewDock_->raise(); preview_->setFocus(); } });
         add("Focus Editor", [this]{ editor_->setFocus(); });
-        add("Reset Camera", [this]{ if (preview_) { preview_->renderer().ResetCamera(); updateCameraUi(); } });
+        add("Reset Camera", [this]{
+            if (!preview_) return;
+            auto& renderer = preview_->renderer();
+            renderer.ResetCamera();
+            if (renderer.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+                renderer.RotateCamera(0.0f, 26.7f);
+            updateCameraUi();
+        });
     }
 
     void showBo3LearningGuide(int requestedChapter = -1)
@@ -21018,18 +21032,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             float ambient;
             float shadow;
             float environmentRotation;
+            float diffuseProbeScale;
+            float specularProbeScale;
+            float sunIrradianceScale;
+            float probeExposure;
         };
 
-        // Source of truth: Treyarch's shipped source_data/ssi.gdt. The direct-light
-        // scale normalizes the recovered Stops/EV relationship so default_day is 1.
-        // previewExposureEv is intentionally a calibration value for APE's display
-        // transform; keeping it separate prevents screenshot tuning from corrupting
-        // the recovered SSI data.
+        // Source of truth for the SSI fields is Treyarch's shipped source_data/ssi.gdt.
+        // The final four values are intentionally kept as an APE-Match calibration
+        // layer. They approximate ToolsGfx's processed global/reflection-probe energy
+        // and sun irradiance while preserving the recovered SSI values verbatim.
+        // Phase 1g no longer subtracts EV from Stops to invent a light intensity: APE
+        // exposes probe exposure and sun intensity as separate scene constants.
         static constexpr ApePreset presets[] = {
-            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.25f, 0.34f, 0.48f, 120.0f},
-            {"Day",     1.0f,      0.9764f,   0.9490f,   125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.55f, 0.34f, 0.55f, 120.0f},
-            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.65f, 0.30f, 0.55f, 120.0f},
-            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  5.00f, 0.20f, 0.66f, 120.0f}
+            // name       sun RGB                         SSI pitch/yaw   stops          EV    cmp   range       pen  display  ambient shadow envYaw  diffGI specGI sunGI probeExp
+            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.15f, 0.95f, 0.48f, 120.0f, 1.35f, 0.20f, 2.6f, 0.85f},
+            {"Day",     1.0f,      0.9764f,   0.9490f,   125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.15f, 1.00f, 0.50f, 120.0f, 1.65f, 0.22f, 3.6f, 1.05f},
+            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.45f, 0.20f, 3.2f, 0.95f},
+            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.40f, 0.90f, 0.60f, 120.0f, 1.20f, 0.16f, 2.2f, 0.55f}
         };
         const ApePreset& p = presets[std::clamp(index, 0, 3)];
         auto& r = preview_->renderer();
@@ -21054,8 +21074,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const float elevation = std::clamp(180.0f - p.ssiPitch, -89.0f, 89.0f);
         const float studioYaw = std::fmod(p.ssiYaw + 90.0f, 360.0f);
         r.SetLightAngles(studioYaw, elevation);
-        const float directScale = std::clamp(std::pow(2.0f, p.stops - p.ev + p.evComp + 1.0f), 0.0f, 4.0f);
-        r.SetLightIntensity(directScale);
+        // ToolsGfx keeps sun and probe energy separate from display exposure.
+        // Keep the ordinary light intensity at unity and apply the APE-specific
+        // irradiance/probe calibration in the deferred compositor instead.
+        r.SetLightIntensity(1.0f);
+        r.SetApeLightingCalibration(p.diffuseProbeScale, p.specularProbeScale,
+                                    p.sunIrradianceScale, p.probeExposure);
         r.SetAmbientIntensity(p.ambient);
         r.SetShadowStrength(p.shadow);
         r.SetContactShadowStrength(0.0f);
@@ -21065,11 +21089,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const bool environmentLoaded = loadApeEnvironmentForPreset(index, environmentSource, environmentFailure);
         if (apePresetInfoLabel_)
         {
+            const PreviewMesh activeMesh = r.GetPreviewMesh();
+            const bool nativeApeMesh = r.HasApeReferenceMesh(activeMesh);
             const QString truth = QString("APE %1 | SSI Pitch %2 / Yaw %3 | Stops %4 | EV %5 | EV Comp %6 | EV range %7..%8 | calibrated camera")
                 .arg(QString::fromLatin1(p.name))
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
-                .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1);
+                .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
+                QString(" | %1 | SH9 diffuse + mip-filtered spec probes")
+                    .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
                 apePresetInfoLabel_->setText(truth + " | Local HDR source loaded");
