@@ -1,0 +1,173 @@
+--- a/src/beginner_shader_builder.cpp
++++ b/src/beginner_shader_builder.cpp
+@@ -1190,17 +1190,14 @@
+             const QString grain = parameterExpr(project, effect, *definition, "grain");
+             const QString drawingAmount = parameterExpr(project, effect, *definition, "drawing_amount");
+             const QString colorAmount = parameterExpr(project, effect, *definition, "color_amount");
+-            const QString saturation = parameterExpr(project, effect, *definition, "saturation");
+             const QString contrast = parameterExpr(project, effect, *definition, "contrast");
+             const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+-            const QString monochrome = parameterExpr(project, effect, *definition, "monochrome");
+-            const QString tintStrength = parameterExpr(project, effect, *definition, "tint_strength");
+-            const QColor tintColor = parameterColor(effect, *definition, "tint_color");
++            const QString skyWhiteness = parameterExpr(project, effect, *definition, "sky_whiteness");
+             const QString depthContour = parameterExpr(project, effect, *definition, "depth_contour");
+             const QString edgeWhite = parameterExpr(project, effect, *definition, "paper");
+             const QString vignette = parameterExpr(project, effect, *definition, "vignette");
+             out += QString("    // %1 - BO3_BEGINNER_PENCIL_REFERENCE / BO3_BEGINNER_PENCIL_GAMMA_CORRECT / BO3_BEGINNER_PENCIL_STYLE_CONTROLS\n"
+-                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), max(%8, 0.0), max(%9, 0.05), max(%10, 0.0), saturate(%11), saturate(%12), %13, saturate(%14), saturate(%15), max(%16, 0.0));\n"
++                           "    float3 %2_pencil = BO3BeginnerPencilReference(uv, max(%4, 0.05), saturate(%5), saturate(%6), saturate(%7), max(%8, 0.05), max(%9, 0.0), saturate(%10), saturate(%11), saturate(%12), max(%13, 0.0));\n"
+                            "    color = lerp(color, %2_pencil, %3);\n")
+                 .arg(definition->name)
+                 .arg(tag)
+@@ -1209,12 +1206,9 @@
+                 .arg(grain)
+                 .arg(drawingAmount)
+                 .arg(colorAmount)
+-                .arg(saturation)
+                 .arg(contrast)
+                 .arg(brightness)
+-                .arg(monochrome)
+-                .arg(tintStrength)
+-                .arg(colorLiteral(tintColor))
++                .arg(skyWhiteness)
+                 .arg(depthContour)
+                 .arg(edgeWhite)
+                 .arg(vignette);
+@@ -2334,11 +2328,22 @@
+     return smoothstep(0.005, 0.040, edge);
+ }
+ 
++float BO3BeginnerPencilSkyMask(float2 uv)
++{
++    // BO3 clear-sky pixels sit at the extreme far end of Float-Z. Keep the
++    // threshold high enough that ordinary distant map geometry is not treated
++    // as paper sky, and always reject the depth-hack/viewmodel class.
++    float rawDepth = BO3BeginnerSampleRawDepthPoint(uv);
++    float worldMask = 1.0 - BO3BeginnerViewmodelMask(rawDepth);
++    float safeRaw = min(rawDepth, BO3_BEGINNER_FLOATZ_DEPTHHACK_SPLIT - 0.000001);
++    float depth01 = BO3BeginnerNormalizedDepth(safeRaw);
++    return smoothstep(0.94, 0.995, depth01) * worldMask;
++}
++
+ float3 BO3BeginnerPencilReference(float2 uv, float strokeScale, float grainAmount,
+                                   float drawingAmount, float colorAmount,
+-                                  float saturationAmount, float contrastAmount,
+-                                  float brightnessAmount, float monochromeAmount,
+-                                  float tintStrength, float3 tintColor,
++                                  float contrastAmount, float brightnessAmount,
++                                  float skyWhitenessAmount,
+                                   float depthContourAmount, float edgeWhite,
+                                   float vignetteAmount)
+ {
+@@ -2401,11 +2406,22 @@
+     float3 src = BO3BeginnerPencilSceneDisplay(uv);
+     float srcLum = BO3BeginnerPencilLuma(src);
+     float targetLum = lerp(srcLum, sketchLum, saturate(drawingAmount));
+-    float3 sourcePigment = BO3BeginnerPencilAdjustSaturation(src, saturationAmount);
++
++    // Keep the approved Pencil Sketch default pigment internally instead of
++    // exposing several overlapping color controls. Color Amount alone now
++    // spans pure graphite (0) to the approved colored-pencil pigment (1).
++    const float BO3_BEGINNER_PENCIL_APPROVED_SATURATION = 1.08;
++    float3 sourcePigment = BO3BeginnerPencilAdjustSaturation(src, BO3_BEGINNER_PENCIL_APPROVED_SATURATION);
+     float3 coloredArt = BO3BeginnerPencilSetLum(sourcePigment, targetLum);
+     float3 monoArt = targetLum.xxx;
+     float3 art = lerp(monoArt, coloredArt, saturate(colorAmount));
+ 
++    // Sky Whiteness restores the paper-white background character of the older
++    // pencil shader without lifting the whole scene. Float-Z selects only the
++    // extreme-far world background; geometry and the viewmodel stay untouched.
++    float skyMask = BO3BeginnerPencilSkyMask(uv);
++    art = lerp(art, 1.0.xxx, skyMask * saturate(skyWhitenessAmount));
++
+     float depthContour = BO3BeginnerPencilDepthContour(uv) * saturate(depthContourAmount);
+     art = lerp(art, art * 0.42, depthContour);
+ 
+@@ -2417,15 +2433,8 @@
+     }
+ 
+     // BO3_BEGINNER_PENCIL_STYLE_CONTROLS
+-    // New defaults are neutral except saturation=1.08, which is the exact
+-    // saturation used by the approved current Pencil Sketch look.
+-    float artLum = BO3BeginnerPencilLuma(art);
+-    art = lerp(art, artLum.xxx, saturate(monochromeAmount));
+-
+-    float tintLum = BO3BeginnerPencilLuma(art);
+-    float3 tintPigment = BO3BeginnerPencilSetLum(saturate(tintColor), tintLum);
+-    art = lerp(art, tintPigment, saturate(tintStrength));
+-
++    // Contrast and brightness remain independent finishing controls. The old
++    // Saturation / Black & White / Tint controls were redundant with Color.
+     art = (art - 0.5.xxx) * max(contrastAmount, 0.05) + 0.5.xxx;
+     art *= max(brightnessAmount, 0.0);
+     art = saturate(art);
+@@ -3464,19 +3473,16 @@
+                    FloatParam("relief", "Surface Relief", "How raised and embossed the paint surface appears before lighting is applied.", 20.0, 260.0, 1.0, 150.0),
+                    FloatParam("paint_spec", "Paint Specular", "Intensity of the glossy oil-paint highlight.", 0.0, 1.0, 0.01, 0.15),
+                    FloatParam("vignette", "Canvas Vignette", "Darken edges and corners like the original reference shader.", 0.0, 1.6, 0.01, 0.65)}),
+-        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z is only used as subtle contour support.", "Stylized Screen",
++        EffectDef("pencil_sketch", "Pencil Sketch", "Render the game like the approved reference-faithful colored-pencil drawing while keeping BO3 readable. The drawing math is gamma-corrected for BO3, camera movement is removed, and Float-Z supports subtle contours plus optional paper-white skies.", "Stylized Screen",
+                   {Target::PostFx},
+                   {FloatParam("strength", "Strength", "Blend between the original BO3 scene and the colored-pencil reconstruction.", 0.0, 1.0, 0.01, 0.94),
+                    FloatParam("scale", "Stroke Scale", "Overall size of the directional pencil strokes. 1.0 matches the approved standalone shader.", 0.25, 3.0, 0.01, 1.0),
+                    FloatParam("grain", "Graphite Grain", "Monochrome random texture contribution used by the reference drawing algorithm.", 0.0, 1.5, 0.01, 0.70),
+                    FloatParam("drawing_amount", "Drawing Amount", "How strongly the directional pencil reconstruction controls scene luminance.", 0.0, 1.0, 0.01, 0.86),
+-                   FloatParam("color_amount", "Color Amount", "Blend between monochrome graphite and the original BO3 scene colors.", 0.0, 1.0, 0.01, 1.0),
+-                   FloatParam("saturation", "Saturation", "Color saturation inside the pencil pigment. 1.08 preserves the approved current look; 0 removes color.", 0.0, 2.0, 0.01, 1.08),
++                   FloatParam("color_amount", "Color", "0 is pure graphite; 1 restores the approved colored-pencil pigment.", 0.0, 1.0, 0.01, 1.0),
+                    FloatParam("contrast", "Contrast", "Final drawing contrast. 1.0 preserves the approved current look.", 0.25, 2.5, 0.01, 1.0),
+                    FloatParam("brightness", "Brightness", "Final drawing brightness. 1.0 preserves the approved current look.", 0.25, 2.0, 0.01, 1.0),
+-                   FloatParam("monochrome", "Black & White", "Blend the final colored-pencil result toward a true black-and-white drawing. 0 keeps the approved colored look; 1 is fully monochrome.", 0.0, 1.0, 0.01, 0.0),
+-                   FloatParam("tint_strength", "Tint Strength", "Blend the drawing toward the selected Tint Color while preserving pencil luminance.", 0.0, 1.0, 0.01, 0.0),
+-                   ColorParam("tint_color", "Tint Color", "Optional drawing tint. Tint Strength 0 leaves the approved colors untouched.", "#FFFFFF"),
++                   FloatParam("sky_whiteness", "Sky Whiteness", "Push only the extreme-far Float-Z sky/background toward white paper. 0 preserves the current look; 1 gives the strongest old-style white sky.", 0.0, 1.0, 0.01, 0.0),
+                    FloatParam("depth_contour", "Depth Contour", "Subtle Float-Z silhouette reinforcement. Keep low so depth supports the drawing instead of becoming a cartoon outline.", 0.0, 0.5, 0.01, 0.10),
+                    FloatParam("paper", "Edge White", "Optional white outside-frame fade from the original reference. 0 disables it.", 0.0, 1.0, 0.01, 0.0),
+                    FloatParam("vignette", "Vignette", "Optional edge darkening. 0 disables it.", 0.0, 2.0, 0.01, 0.0)}),
+--- a/src/main_window.cpp
++++ b/src/main_window.cpp
+@@ -1625,9 +1625,24 @@
+                !postHlsl.contains("const int sampNum = 16") ||
+                !postHlsl.contains("BO3BeginnerPencilSrgbToLinear") ||
+                !postHlsl.contains("BO3_BEGINNER_PENCIL_STYLE_CONTROLS") ||
+-               !postHlsl.contains("monochromeAmount") ||
+-               !postHlsl.contains("tintStrength"))
+-                return "Beginner Pencil Sketch is missing the approved gamma-correct reconstruction or its style controls.";
++               !postHlsl.contains("BO3_BEGINNER_PENCIL_APPROVED_SATURATION = 1.08") ||
++               !postHlsl.contains("BO3BeginnerPencilSkyMask") ||
++               !postHlsl.contains("skyWhitenessAmount"))
++                return "Beginner Pencil Sketch is missing the approved reconstruction, simplified color model, or Sky Whiteness support.";
++
++            const beginner::EffectDefinition* pencilDefinition = beginner::effectDefinition(QStringLiteral("pencil_sketch"));
++            if(!pencilDefinition)
++                return "Beginner Pencil Sketch effect definition is missing.";
++            QStringList pencilParameterKeys;
++            for(const beginner::ParameterDefinition& parameter : pencilDefinition->parameters)
++                pencilParameterKeys << parameter.key;
++            if(!pencilParameterKeys.contains(QStringLiteral("color_amount")) ||
++               !pencilParameterKeys.contains(QStringLiteral("sky_whiteness")) ||
++               pencilParameterKeys.contains(QStringLiteral("saturation")) ||
++               pencilParameterKeys.contains(QStringLiteral("monochrome")) ||
++               pencilParameterKeys.contains(QStringLiteral("tint_strength")) ||
++               pencilParameterKeys.contains(QStringLiteral("tint_color")))
++                return "Beginner Pencil Sketch controls did not simplify to Color + Sky Whiteness as expected.";
+             if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
+                beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
+                beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||
+--- a/PATCH_NOTES.md
++++ b/PATCH_NOTES.md
+@@ -27,3 +27,13 @@
+ - Added `filters::enable_filter_persistent()` so Studio PostFX no longer participates in the legacy single-current-filter ownership path. Temporary stock effects can enable/disable without clearing the Studio filter.
+ - Kept the original `filters::enable_filter()` behavior unchanged for compatibility with existing LG-RZ-style scripts.
+ - Generated `POSTFX_INTEGRATION.txt` now uses the persistent path automatically. Existing maps that pasted an older integration snippet should regenerate/re-merge that snippet.
++
++## Pencil Sketch control cleanup + Sky Whiteness
++
++- Removed the redundant Pencil Sketch `Saturation`, `Black & White`, `Tint Strength`, and `Tint Color` controls.
++- Renamed `Color Amount` to the simpler `Color`; `0` is graphite/monochrome and `1` is the approved colored-pencil pigment.
++- Preserved the approved current default color internally with a fixed 1.08 pigment saturation, so removing the old saturation slider does not change the default look.
++- Added `Sky Whiteness` (0..1, default 0). It uses BO3 Float-Z to isolate only the extreme-far world background and pushes that region toward white paper without brightening the viewmodel or ordinary map geometry.
++- Kept `Contrast`, `Brightness`, `Depth Contour`, `Edge White`, and `Vignette` as independent finishing controls.
++- Updated the PostFX regression contract to verify the simplified Pencil controls and the new Float-Z sky mask.
++- The uploaded CI log came from commit `3ff4f01` and failed on the stale `camera movement removed` text assertion; that assertion is already absent in the current baseline (the follow-up `8f1740f` fix is included here).

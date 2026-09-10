@@ -1625,9 +1625,24 @@ public:
                !postHlsl.contains("const int sampNum = 16") ||
                !postHlsl.contains("BO3BeginnerPencilSrgbToLinear") ||
                !postHlsl.contains("BO3_BEGINNER_PENCIL_STYLE_CONTROLS") ||
-               !postHlsl.contains("monochromeAmount") ||
-               !postHlsl.contains("tintStrength"))
-                return "Beginner Pencil Sketch is missing the approved gamma-correct reconstruction or its style controls.";
+               !postHlsl.contains("BO3_BEGINNER_PENCIL_APPROVED_SATURATION = 1.08") ||
+               !postHlsl.contains("BO3BeginnerPencilSkyMask") ||
+               !postHlsl.contains("skyWhitenessAmount"))
+                return "Beginner Pencil Sketch is missing the approved reconstruction, simplified color model, or Sky Whiteness support.";
+
+            const beginner::EffectDefinition* pencilDefinition = beginner::effectDefinition(QStringLiteral("pencil_sketch"));
+            if(!pencilDefinition)
+                return "Beginner Pencil Sketch effect definition is missing.";
+            QStringList pencilParameterKeys;
+            for(const beginner::ParameterDefinition& parameter : pencilDefinition->parameters)
+                pencilParameterKeys << parameter.key;
+            if(!pencilParameterKeys.contains(QStringLiteral("color_amount")) ||
+               !pencilParameterKeys.contains(QStringLiteral("sky_whiteness")) ||
+               pencilParameterKeys.contains(QStringLiteral("saturation")) ||
+               pencilParameterKeys.contains(QStringLiteral("monochrome")) ||
+               pencilParameterKeys.contains(QStringLiteral("tint_strength")) ||
+               pencilParameterKeys.contains(QStringLiteral("tint_color")))
+                return "Beginner Pencil Sketch controls did not simplify to Color + Sky Whiteness as expected.";
             if(beginner::effectDefinition(QStringLiteral("screen_space_reflections")) ||
                beginner::effectDefinition(QStringLiteral("wet_ground_reflections")) ||
                beginner::effectDefinition(QStringLiteral("material_screen_space_reflections")) ||
