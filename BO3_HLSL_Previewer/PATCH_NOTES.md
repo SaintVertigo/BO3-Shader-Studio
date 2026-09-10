@@ -1,3 +1,10 @@
+# APE Match Phase 1g.3 — MSVC Shader Resource Fix
+
+- Fixes persistent MSVC `C2026: string too big, trailing characters truncated` in `preview_renderer.cpp`.
+- Moves the ~16.6 KiB APE deferred-light HLSL out of C++ string literals and into the Qt resource bundle (`:/preview/ape_deferred_lighting.hlsl`).
+- Runtime shader source is byte-for-byte the same HLSL assembled by Phase 1g.2; APE lighting math/calibration is unchanged.
+- Adds explicit startup errors if the embedded shader resource is missing or empty.
+
 # APE Match Phase 1f — Probe Lighting Pass 1
 
 - Keeps all Phase 1d native APE preview mesh/XMODEL_BIN support and Phase 1e color-space/material diagnostics in one cumulative source tree.
