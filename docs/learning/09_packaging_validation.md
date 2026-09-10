@@ -59,7 +59,7 @@ without the exported package containing duplicate `postfx/`, `lib/`, `gfxcore/`,
 
 A validated PostFX package describes shader/material resources, but BO3 still needs client script code to enable the filter on the local player.
 
-The exporter no longer generates a shader-specific startup CSC or `.zpkg`. Instead, each PostFX export creates `source_data/<namespace>/<base>_POSTFX_INTEGRATION.txt`. Merge that code into the usermap/mod client CSC that already owns local-player initialization.
+The exporter no longer generates a shader-specific startup CSC or `.zpkg`. The complete activation steps and exact copy/merge-ready CSC code are written directly into the package's main `00_README_FIRST.txt` (or the direct-install `*_INSTALL_README.txt`). A duplicate backup copy is also created at `source_data/<namespace>/<base>_POSTFX_INTEGRATION.txt`. Merge that code into the usermap/mod client CSC that already owns local-player initialization.
 
 The zone entries are:
 
@@ -68,7 +68,7 @@ include,filters
 material,<exported material name>
 ```
 
-The generated integration uses `callback::on_localplayer_spawned`, accepts `localClientNum`, waits 3 seconds, creates the filter/pass from the export's actual base/material names, and enables it through `filters::enable_filter`. If the CSC already has `on_player_spawned`, merge the generated thread call instead of defining/registering a duplicate callback.
+The generated integration uses `callback::on_localplayer_spawned`, accepts `localClientNum`, waits 3 seconds, creates the filter/pass from the export's actual base/material names, and enables it through `filters::enable_filter_persistent()` on reserved filter slot 6. This keeps the Studio filter alive when temporary stock/gameplay PostFX uses slot 0. If the CSC already has `on_player_spawned`, merge the generated thread call instead of defining/registering a duplicate callback.
 
 The optional **Include shared _filters support files (first install only)** setting packages the shared `_filters.csc`, `_filters.gsh`, and `filters.zpkg` dependency. It is off by default so repeated exports do not overwrite a customized working copy. No shader-specific `.zpkg` is created. The looping `postfxbundle` export remains available as a separate manual workflow.
 

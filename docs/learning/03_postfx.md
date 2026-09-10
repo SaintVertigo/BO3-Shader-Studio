@@ -87,13 +87,13 @@ Change the vignette strength in the sample, compile, and watch the Preview updat
 
 The exporter no longer creates a shader-specific auto-start CSC or `.zpkg`. Real BO3 testing showed that the standalone auto-start package path could fail to run even when the shader/material itself was valid.
 
-Every PostFX export now creates:
+Every PostFX export writes the complete activation instructions directly into the package's main `00_README_FIRST.txt` (or the direct-install `*_INSTALL_README.txt`). It also creates a duplicate backup copy at:
 
 ```text
 source_data/<namespace>/<base>_POSTFX_INTEGRATION.txt
 ```
 
-Open that file and merge the generated code into the **client CSC that already runs for your usermap or mod**. For a normal usermap, this is the map `.csc` that calls `zm_usermap::main()`. For a mod, use the client `.csc` that owns your local-player initialization/spawn callback.
+Merge the generated code into the **client CSC that already runs for your usermap or mod**. For a normal usermap, this is the map `.csc` that calls `zm_usermap::main()`. For a mod, use the client `.csc` that owns your local-player initialization/spawn callback.
 
 The generated instructions add/merge these imports:
 
@@ -109,7 +109,7 @@ Register the local-player callback from `main()` if your CSC does not already do
 callback::on_localplayer_spawned( &on_player_spawned );
 ```
 
-Then merge the shader-specific thread call into your existing `on_player_spawned(localClientNum)` or use the generated example. The generated function names come from the export **Base name**, while the pass uses the exact **Material** name selected in the exporter.
+Then merge the shader-specific thread call into your existing `on_player_spawned(localClientNum)` or use the generated example. The generated function names come from the export **Base name**, while the pass uses the exact **Material** name selected in the exporter. The final enable call uses `filters::enable_filter_persistent()` and reserved filter slot 6, so temporary stock/gameplay PostFX on slot 0 can run without clearing the Studio filter.
 
 Add only these entries to the usermap/mod zone:
 

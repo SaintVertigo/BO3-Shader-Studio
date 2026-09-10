@@ -2037,6 +2037,27 @@ float4 ps_main(PixelInput input) : SV_TARGET
             return {};
         });
 
+        run("export suggested names discard capture/debug artifacts", [&]() -> QString
+        {
+            const QString generatedPencil = QString::fromUtf8(R"HLSL(
+// BO3_BEGINNER_PROJECT: 1
+// BO3_BEGINNER_TARGET: POSTFX
+// BO3_BEGINNER_EFFECT_STACK: Pencil Sketch
+float4 ps_main(float4 p : SV_POSITION) : SV_TARGET { return 1.0; }
+)HLSL");
+            if(cleanSuggestedExportBaseName("floatz_capture", 0, generatedPencil) != "pencil_sketch")
+                return "Float-Z capture filename leaked into the suggested Pencil export base";
+            if(cleanSuggestedExportBaseName("bo3_depth_shadows_of_evil_capture", 0) != "shadows_of_evil")
+                return "BO3 depth capture wrapper was not removed from the suggested base";
+            if(cleanSuggestedExportBaseName("pencil_sketch_ape_deadbeef", 0) != "pencil_sketch")
+                return "generated APE hash suffix was not removed from the suggested base";
+            if(cleanSuggestedExportBaseName("New Screen Effect", 0, generatedPencil) != "pencil_sketch")
+                return "generic Beginner project name did not collapse to the authored effect name";
+            if(cleanSuggestedExportBaseName("my_custom_pencil", 0, generatedPencil) != "my_custom_pencil")
+                return "explicit friendly export name was rewritten unexpectedly";
+            return {};
+        });
+
         run("Shadertoy PostFX export preserves channel roles and 2d image usage", [&]() -> QString
         {
             const QString shadertoySource = QString::fromUtf8(R"HLSL(
@@ -2473,10 +2494,23 @@ float4 ps_main(const PixelInput input) : SV_TARGET0
                !rootReadme.contains("Copy/merge the ZIP's `share` folder") ||
                !rootReadme.contains("Copy/merge the ZIP's `source_data` folder") ||
                !rootReadme.contains("restart Mod Tools") ||
+               !rootReadme.contains("POSTFX ACTIVATION - REQUIRED") ||
+               !rootReadme.contains("CLIENT CSC CODE - COPY / MERGE") ||
+               !rootReadme.contains("function on_player_spawned( localClientNum )") ||
+               !rootReadme.contains("enable_filter_persistent") ||
                !rootReadme.contains("include,filters") ||
                !rootReadme.contains("material,mtl_custom_paint") ||
                rootReadme.contains("include,custom_paint_autostart"))
-                return "root package README does not contain the manual CSC/zone integration instructions";
+                return "root package README does not contain the inline CSC/zone integration instructions";
+
+            const QString installReadme = createBo3DirectInstallInstructions(
+                0, "custom_paint", "custom_paint", materialName, QString(), "_custom", true, "C:/BO3");
+            if(!installReadme.contains("CLIENT CSC CODE - COPY / MERGE") ||
+               !installReadme.contains("function on_player_spawned( localClientNum )") ||
+               !installReadme.contains("enable_filter_persistent") ||
+               !installReadme.contains("include,filters") ||
+               !installReadme.contains("material,mtl_custom_paint"))
+                return "direct-install README does not contain the inline PostFX activation instructions";
             return {};
         });
 
@@ -3946,6 +3980,76 @@ finally {
         if(!value.isEmpty() && !value.front().isLetter())
             value.prepend("a_");
         return value;
+    }
+
+    QString cleanSuggestedExportBaseName(QString value, int exportType, const QString& source = QString()) const
+    {
+        QString clean = sanitizeBo3Name(value);
+
+        // Export defaults should describe the shader, not whichever preview/capture
+        // file happened to be involved while authoring it.  In particular, early
+        // Float-Z testing often left names such as floatz_capture or
+        // bo3_depth_<map>_capture in the editor path, which then leaked into every
+        // generated HLSL, techset, material, bundle and ZIP name.
+        const QString lower = clean.toLower();
+        const bool looksLikeCaptureArtifact =
+            (lower.contains("floatz") && lower.contains("capture")) ||
+            (lower.contains("float_z") && lower.contains("capture")) ||
+            (lower.contains("depth") && lower.contains("capture")) ||
+            lower == "capture";
+        const bool looksGenericSuggestedName =
+            lower == "new_screen_effect" || lower == "new_material" || lower == "new_sky" ||
+            lower == "effect" || lower == "surface" || lower == "sky" || lower == "shader";
+
+        // Generated Beginner HLSL carries the human-readable effect stack. If the
+        // current filename is only a capture/debug artifact or a generic untouched
+        // project name, use the first authored effect as the friendly export base.
+        // This turns a Pencil Sketch export into pencil_sketch instead of
+        // floatz_capture (or new_screen_effect) everywhere.
+        if((looksLikeCaptureArtifact || looksGenericSuggestedName) && !source.isEmpty())
+        {
+            const QRegularExpression markerRe(
+                R"(^\s*//\s*BO3_BEGINNER_EFFECT_STACK:\s*([^\r\n]+))",
+                QRegularExpression::MultilineOption);
+            const QRegularExpressionMatch marker = markerRe.match(source);
+            if(marker.hasMatch())
+            {
+                const QString firstEffect = marker.captured(1).section("->", 0, 0).trimmed();
+                const QString friendly = sanitizeBo3Name(firstEffect);
+                if(!friendly.isEmpty() && friendly != "none") return friendly;
+            }
+        }
+
+        // Also clean names produced by opening an already-exported/generated source
+        // and exporting it again. These transformations affect only the suggested
+        // default shown in the Export dialog; an explicitly typed Base name is never
+        // rewritten behind the user's back.
+        clean.remove(QRegularExpression(R"(_ape_[0-9a-f]{6,64}$)", QRegularExpression::CaseInsensitiveOption));
+        clean.remove(QRegularExpression(R"(_(?:toolsgfx|runtime|preview)$)", QRegularExpression::CaseInsensitiveOption));
+        clean.remove(QRegularExpression(R"(^(?:postfx|mtl)_)", QRegularExpression::CaseInsensitiveOption));
+
+        if(looksLikeCaptureArtifact)
+        {
+            clean.replace(QRegularExpression(R"(^bo3_(?:floatz|float_z|depth)_)", QRegularExpression::CaseInsensitiveOption), "");
+            clean.replace(QRegularExpression(R"(^(?:floatz|float_z|depth)_capture_)", QRegularExpression::CaseInsensitiveOption), "");
+            clean.replace(QRegularExpression(R"(_(?:floatz|float_z|depth)_capture$)", QRegularExpression::CaseInsensitiveOption), "");
+            clean.replace(QRegularExpression(R"(_capture$)", QRegularExpression::CaseInsensitiveOption), "");
+            clean.replace(QRegularExpression(R"(^capture_)", QRegularExpression::CaseInsensitiveOption), "");
+            while(clean.contains("__")) clean.replace("__", "_");
+            while(clean.startsWith('_')) clean.remove(0, 1);
+            while(clean.endsWith('_')) clean.chop(1);
+        }
+
+        if(clean.isEmpty() || clean == "floatz" || clean == "float_z" || clean == "depth")
+        {
+            switch(exportType)
+            {
+                case 1: return QStringLiteral("surface");
+                case 2: return QStringLiteral("sky");
+                default: return QStringLiteral("effect");
+            }
+        }
+        return clean;
     }
 
     QString sanitizeBo3Folder(QString value) const
@@ -6800,7 +6904,7 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
                                                  bool includeFilterSupport) const
     {
         QString out;
-        out += "BO3 HLSL Previewer - PostFX Manual CSC Integration\n";
+        out += "BO3 Shader Studio - PostFX Integration\n";
         out += "===================================================\n\n";
         out += "The old shader-specific auto-start CSC/ZPKG workflow is intentionally not used.\n";
         out += "Put the generated integration directly in the usermap/mod client CSC that already runs for the local player.\n";
@@ -6856,7 +6960,7 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
                                        bool includeFilterSupport) const
     {
         QString out;
-        out += "BO3 HLSL Previewer - READ ME FIRST\n";
+        out += "BO3 Shader Studio - READ ME FIRST\n";
         out += "================================\n\n";
         out += "This ZIP is already shaped like the Black Ops III install root. Start here before copying any folder.\n\n";
         out += "PACKAGE LAYOUT\n";
@@ -6887,13 +6991,16 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         if(exportType == 2)
             out += QString("%1. Copy/merge the ZIP's `texture_assets` folder into the BO3 root.\n").arg(nextInstallStep++);
         out += QString("%1. Start/restart Mod Tools after copying. New or changed techsetdefs may not register in APE until Mod Tools is restarted.\n").arg(nextInstallStep++);
-        out += QString("%1. Open the generated GDT/material in APE and verify its generated image assignments before linking the map.\n\n").arg(nextInstallStep++);
+        out += QString("%1. Open the generated GDT/material in APE and verify its generated image assignments before linking the map.\n").arg(nextInstallStep++);
+        if(exportType == 0)
+            out += QString("%1. Complete the POSTFX ACTIVATION - REQUIRED section below: add the zone lines, merge the provided client CSC code, then re-link/build the usermap or mod.\n").arg(nextInstallStep++);
+        out += "\n";
 
         if(exportType == 0)
         {
             out += "POSTFX PACKAGE\n";
             out += QString("- Runtime HLSL: share/raw/shaders_stable/%1.hlsl\n").arg(baseName);
-            out += QString("- TOOLSGFX HLSL: share/raw/shaders_stable_toolsgfx/<prefix>_%1_ape_<hash>.hlsl\n").arg(baseName);
+            out += QString("- TOOLSGFX HLSL: share/raw/shaders_stable_toolsgfx/%1_ape_<hash>.hlsl\n").arg(baseName);
             out += QString("- Runtime techset: share/raw/techsetdefs_stable/postfx/%1.techsetdef\n").arg(techsetName);
             out += QString("- TOOLSGFX techset: share/raw/techsetdefs_stable_toolsgfx/postfx/%1.techsetdef\n").arg(techsetName);
             out += QString("- APE/GDT: source_data/%1/%2.gdt\n").arg(namespaceFolder, baseName);
@@ -6904,17 +7011,20 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
             out += "Scene-backed channels appear as Preview Scene on colorMap00 and use BO3's stock zm_zod_scene. Converted Shadertoy auxiliary textures remain under Shader Textures.\n";
             out += "The separate TOOLSGFX shader/techset follows the proven APE path (sceneTexture at t0, converted iChannel0 alias, vs_generic, s0 bilinear sampler, PostFx_FixPreviewResolution, LinearToSRGB). Its content hash changes the HLSL filename when generated source changes, avoiding stale APE shader bytecode.\n\n";
 
-            out += "RUNTIME INTEGRATION - USERMAP / MOD CSC\n";
-            out += "The shader-specific auto-start CSC/ZPKG workflow has been removed. Paste/merge the generated integration into the client CSC that already owns your local-player startup.\n";
-            out += "For a normal usermap, this is the map client .csc that calls zm_usermap::main(). For a mod, use the mod client .csc that owns the local-player spawn callback.\n";
-            out += "Do not create or include a shader-specific autostart .zpkg.\n\n";
-            out += "Add these entries to the usermap/mod zone:\n\n";
+            out += "POSTFX ACTIVATION - REQUIRED\n";
+            out += "Applying the PostFX is part of the normal install now; you do not need to hunt through a second README. The separate POSTFX_INTEGRATION.txt is still included as a backup copy.\n\n";
+            out += "1. Add these entries to the usermap/mod zone:\n\n";
             out += "   include,filters\n";
             out += QString("   material,%1\n\n").arg(materialName);
+            out += "2. Open the CLIENT .csc that already runs for the local player. For a normal usermap, use the map client .csc that calls zm_usermap::main(). For a mod, use the mod client .csc that owns local-player startup.\n";
+            out += "3. Copy/merge the code below. If your CSC already imports callbacks/_filters or already has on_player_spawned, do not duplicate them; merge only the missing lines and the generated thread call.\n";
+            out += "4. Re-link/build the usermap or mod. The Studio filter uses persistent slot 6 so temporary stock PostFX on slot 0 can run without replacing it.\n\n";
             out += includeFilterSupport
                 ? "Shared _filters support is included in this ZIP. If your BO3 install already has a customized working _filters copy, keep it instead of overwriting it.\n\n"
                 : "Shared _filters support is NOT included. Keep/use your existing scripts/postfx/_filters.csc, _filters.gsh, and filters zone package.\n\n";
-            out += "The full merge-safe CSC example is in the generated POSTFX_INTEGRATION.txt file. It uses callback::on_localplayer_spawned, waits 3 seconds, creates the filter/pass with the exported names, and calls filters::enable_filter.\n\n";
+            out += "CLIENT CSC CODE - COPY / MERGE\n\n";
+            out += createPostFxCscIntegrationSnippet(baseName, materialName);
+            out += "\nDo NOT create or include a shader-specific autostart CSC/ZPKG. No shader-specific .zpkg is generated.\n\n";
 
             if(!bundleName.isEmpty())
             {
@@ -6951,7 +7061,7 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
                                                bool includeFilterSupport, const QString& installRoot) const
     {
         QString out;
-        out += "BO3 HLSL Previewer - DIRECT INSTALL INSTRUCTIONS\n";
+        out += "BO3 Shader Studio - DIRECT INSTALL INSTRUCTIONS\n";
         out += "===============================================\n\n";
         out += "The Previewer already copied this export directly into your Black Ops III install.\n";
         out += "You do NOT need to copy the share/source_data folders again.\n\n";
@@ -6964,16 +7074,18 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
         {
             out += QString("3. Open material '%1'. It should be Category 2d and Material Type '%2'. Right-click the APE viewport and set Rendering -> No Lighting and Shape -> Plane. Verify Preview Scene / Shader Textures before linking.\n")
                 .arg(materialName, techsetName);
-            out += "4. Open the generated manual integration guide:\n";
-            out += QString("   source_data/%1/%2_POSTFX_INTEGRATION.txt\n").arg(namespaceFolder, baseName);
-            out += "5. Merge its imports/callback/thread/functions into your usermap or mod CLIENT .csc. Do not use a standalone shader-specific autostart CSC/ZPKG.\n";
-            out += "6. Add these entries to the usermap/mod zone:\n\n";
+            out += "4. Add these entries to the usermap/mod zone:\n\n";
             out += "   include,filters\n";
             out += QString("   material,%1\n\n").arg(materialName);
+            out += "5. Open the CLIENT .csc that already runs for the local player and copy/merge the exact code under CLIENT CSC CODE below. If callbacks/_filters or on_player_spawned already exist, merge only the missing lines and generated thread call.\n";
+            out += "6. Re-link/build the usermap or mod. The Studio filter uses persistent slot 6 so temporary stock PostFX on slot 0 does not replace it.\n";
             out += includeFilterSupport
                 ? "7. Shared _filters support was requested. Direct Install preserves an existing _filters.csc/_filters.gsh/filters.zpkg instead of replacing it.\n"
                 : "7. Shared _filters support was not installed. Keep/use your existing scripts/postfx/_filters.csc, _filters.gsh, and filters zone package.\n";
-            out += "8. Re-link/build the usermap or mod.\n";
+            out += "\nCLIENT CSC CODE - COPY / MERGE\n\n";
+            out += createPostFxCscIntegrationSnippet(baseName, materialName);
+            out += QString("\nA duplicate backup copy is also saved at source_data/%1/%2_POSTFX_INTEGRATION.txt. Do not use a standalone shader-specific autostart CSC/ZPKG.\n")
+                .arg(namespaceFolder, baseName);
             if(!bundleName.isEmpty())
                 out += QString("\nOPTIONAL BUNDLE\nA looping postfxbundle named '%1' was also installed. It remains a manual alternative and is not used for automatic startup.\n").arg(bundleName);
             out += QString("\nRUNTIME FILES\n- HLSL: share/raw/shaders_stable/%1.hlsl\n").arg(baseName);
@@ -12681,12 +12793,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         };
 
         auto* folder = new QLineEdit(savedNamespace);
-        const QString baseGuess = sanitizeBo3Name(
-            beginnerProjectActive_
-                ? beginnerProject_.name
-                : (shaderPath_.isEmpty()
-                    ? defaultBaseForType(type->currentIndex())
-                    : QFileInfo(shaderPath_).completeBaseName()));
+        const QString rawBaseGuess = beginnerProjectActive_
+            ? beginnerProject_.name
+            : (shaderPath_.isEmpty()
+                ? defaultBaseForType(type->currentIndex())
+                : QFileInfo(shaderPath_).completeBaseName());
+        const QString baseGuess = cleanSuggestedExportBaseName(
+            rawBaseGuess, type->currentIndex(), activeExportSource);
         const QString initialStem = makeAssetStem(savedPrefix, baseGuess);
         auto* base = new QLineEdit(baseGuess);
         auto* prefix = new QLineEdit(savedPrefix);
@@ -12937,7 +13050,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             {
                 text += QString("Runtime shader: share/raw/shaders_stable/geometry/%1.hlsl\nRuntime techset: share/raw/techsetdefs_stable/geometry/%2.techsetdef\nAPE techset: share/raw/techsetdefs_stable_toolsgfx/geometry/%2.techsetdef\nAPE shader: stock techsetdef_sky_latlong_hdr.hlsl / ps_sky (same as Aurora)\nAPE Material Type: %2\nGDT: source_data/%3/%1.gdt")
                     .arg(bn,tn,ns);
-                const QString skyAsset = sanitizeBo3Name(QString("%1_%2_skybox").arg(pref,bn));
+                const QString skyAsset = sanitizeBo3Name(makeAssetStem(pref, bn) + "_skybox");
                 text += QString("\nReflection EXR: texture_assets/%1/%2_reflection_bake.exr\nSky XModel + SSI: %3\nMaterial override: mtl_skybox_default → %4")
                     .arg(ns,bn,skyAsset,mat);
             }
@@ -12977,8 +13090,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             }
             else
             {
-                const QString apeStemPreview = sanitizeBo3Name(QString("%1_%2").arg(pref, bn));
-                text += QString("Runtime shader: share/raw/shaders_stable/%1.hlsl\nAPE shader: share/raw/shaders_stable_toolsgfx/%4_ape_<hash>.hlsl\nTechset: share/raw/techsetdefs_stable/postfx/%2.techsetdef + toolsgfx copy\nAPE Material Type: %2\nGDT: source_data/%3/%1.gdt\nRuntime PostFX stays at the shader root; APE uses a content-addressed root-level source name so changed generated shaders cannot hit stale TOOLSGFX bytecode while stock postfx includes remain BO3-linker-safe.")
+                const QString apeStemPreview = bn;
+                text += QString("Runtime shader: share/raw/shaders_stable/%1.hlsl\nAPE shader: share/raw/shaders_stable_toolsgfx/%4_ape_<hash>.hlsl\nTechset: share/raw/techsetdefs_stable/postfx/%2.techsetdef + toolsgfx copy\nAPE Material Type: %2\nGDT: source_data/%3/%1.gdt\nRuntime PostFX stays at the shader root; APE uses a clean content-addressed root-level source name so changed generated shaders cannot hit stale TOOLSGFX bytecode while stock postfx includes remain BO3-linker-safe.")
                     .arg(bn,tn,ns,apeStemPreview);
                 text += QString("\n\nRuntime integration: MANUAL usermap/mod client CSC\nGuide: source_data/%1/%2_POSTFX_INTEGRATION.txt\nZone entries: `include,filters` and `material,%3`\nNo shader-specific autostart CSC or ZPKG is generated.")
                     .arg(ns,bn,mat);
@@ -13047,9 +13160,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
         connect(resetNames,&QPushButton::clicked,&dlg,[&]
         {
-            const QString cleanBase = sanitizeBo3Name(shaderPath_.isEmpty()
-                ? defaultBaseForType(type->currentIndex())
-                : QFileInfo(shaderPath_).completeBaseName());
+            const QString resetRawBase = beginnerProjectActive_
+                ? beginnerProject_.name
+                : (shaderPath_.isEmpty()
+                    ? defaultBaseForType(type->currentIndex())
+                    : QFileInfo(shaderPath_).completeBaseName());
+            const QString cleanBase = cleanSuggestedExportBaseName(
+                resetRawBase, type->currentIndex(), activeExportSource);
             const QString stem = makeAssetStem(QStringLiteral("custom"), cleanBase);
             folder->setText("_custom");
             prefix->setText("custom");
@@ -13085,6 +13202,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const QString ns=sanitizeBo3Folder(folder->text());
         const QString bn=sanitizeBo3Name(base->text());
         const QString pref=sanitizeBo3Name(prefix->text());
+        const QString assetStem=makeAssetStem(pref, bn);
         const QString mat=sanitizeBo3Name(materialName->text());
         const QString bundle=sanitizeBo3Name(bundleName->text());
         const QString tech=sanitizeBo3Name(techsetName->text());
@@ -13254,7 +13372,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     exportedShaderSource, exportedPostFxMappings, &apeNotes);
                 postFxExportNotes.append(apeNotes);
                 toolsgfxShaderRel = postFxToolsgfxShaderRelativePath(
-                    QString("%1_%2").arg(pref, bn), exportedToolsgfxShaderSourceForPackage);
+                    bn, exportedToolsgfxShaderSourceForPackage);
                 shaderOutTools = QDir(stableTools).filePath(toolsgfxShaderRel);
                 shaderDirTools = QFileInfo(shaderOutTools).absolutePath();
                 QDir().mkpath(shaderDirTools);
@@ -13328,7 +13446,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                                          : ns+"/"+bn+".hlsl";
             if(exportType == 0 && toolsgfxShaderRel.isEmpty())
                 toolsgfxShaderRel = postFxToolsgfxShaderRelativePath(
-                    QString("%1_%2").arg(pref, bn), exportedToolsgfxShaderSourceForPackage);
+                    bn, exportedToolsgfxShaderSourceForPackage);
             exportedShaderSourceForPackage = exportedShaderSource;
             if(exportType == 0 && exportedToolsgfxShaderSourceForPackage.isEmpty())
                 exportedToolsgfxShaderSourceForPackage = exportedShaderSource;
@@ -13366,7 +13484,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             // Every exported PostFX Texture semantic is "2d". A generated 2d
             // fallback prevents BO3 from falling through to $white_diffuse,
             // whose diffuseMap usage is incompatible with these texture slots.
-            const QString postFxNeutralAsset = sanitizeBo3Name(QString("i_%1_%2_neutral2d").arg(pref,bn));
+            const QString postFxNeutralAsset = sanitizeBo3Name("i_" + assetStem + "_neutral2d");
             const QString postFxApePreviewAsset = "zm_zod_scene";
             const QString runtimeTechText = makePostFxTechset(
                 exportedShaderSourceForPackage, shaderRel, bindings, sceneSource->currentData().toString(),
@@ -13486,7 +13604,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     if(ext.isEmpty()) ext = "png";
                     const QString safeTextureName = sanitizeBo3Name(texture.name);
                     const QString imgAsset = sanitizeBo3Name(
-                        QString("i_%1_%2_%3").arg(pref,bn,safeTextureName));
+                        QString("i_%1_%2").arg(assetStem, safeTextureName));
                     const QString dst = QDir(imgDir).filePath(
                         QString("%1_%2.%3").arg(bn,safeTextureName,ext));
                     if(!copyFileOverwrite(sourcePath, dst, err))
@@ -13578,8 +13696,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 const bool hasLoadedAlbedo =
                     !loadedAlbedoPath.isEmpty() && QFileInfo::exists(loadedAlbedoPath);
                 const QString toolsgfxEditorColorAsset = hasLoadedAlbedo
-                    ? sanitizeBo3Name(QString("i_%1_%2_c").arg(pref,bn))
-                    : sanitizeBo3Name(QString("i_%1_%2_ape_editor_color").arg(pref,bn));
+                    ? sanitizeBo3Name("i_" + assetStem + "_c")
+                    : sanitizeBo3Name("i_" + assetStem + "_ape_editor_color");
 
                 const QString techText=makeMaterialTechset(
                     exportedShaderSourceForPackage, shaderRel, bindings, customMaterialSurface,
@@ -13640,10 +13758,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 {
                     const QString src=ToQString(preview_->renderer().GetMaterialTexturePath(materialSlot.index));
                     if(src.isEmpty() || !QFileInfo::exists(src)) continue;
-                    const QString imgAsset=sanitizeBo3Name(QString("i_%1_%2_%3").arg(pref,bn,QString::fromLatin1(materialSlot.suffix)));
+                    const QString imgAsset=sanitizeBo3Name(QString("i_%1_%2").arg(assetStem, QString::fromLatin1(materialSlot.suffix)));
                     QString ext=QFileInfo(src).suffix().toLower();
                     if(ext.isEmpty()) ext="png";
-                    const QString dst=QDir(imgDir).filePath(QString("%1_%2_%3.%4").arg(pref,bn,QString::fromLatin1(materialSlot.fileLabel),ext));
+                    const QString dst=QDir(imgDir).filePath(QString("%1_%2.%3").arg(assetStem, QString::fromLatin1(materialSlot.fileLabel), ext));
                     if(!copyFileOverwrite(src,dst,err))
                     {
                         QApplication::restoreOverrideCursor();
@@ -13771,8 +13889,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     const QString src=ToQString(preview_->renderer().GetMaterialTexturePath(materialSlot.index));
                     if(src.isEmpty()||!QFileInfo::exists(src)) continue;
 
-                    const QString imgAsset=sanitizeBo3Name(QString("i_%1_%2_%3").arg(pref,bn,QString::fromLatin1(materialSlot.suffix)));
-                    QString dstName=QString("%1_%2_%3").arg(pref,bn,QString::fromLatin1(materialSlot.fileLabel));
+                    const QString imgAsset=sanitizeBo3Name(QString("i_%1_%2").arg(assetStem, QString::fromLatin1(materialSlot.suffix)));
+                    QString dstName=QString("%1_%2").arg(assetStem, QString::fromLatin1(materialSlot.fileLabel));
                     QString dst;
                     if(materialSlot.index==4 && roughnessToGloss)
                     {
@@ -13876,7 +13994,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             }
             generated<<techOut<<techOutTools;
 
-            const QString joinedPrefix = pref.isEmpty() ? bn : pref+"_"+bn;
+            const QString joinedPrefix = assetStem;
             const QString reflectionAsset=sanitizeBo3Name(joinedPrefix+"_reflection_bake");
             const QString skyAsset=sanitizeBo3Name(joinedPrefix+"_skybox");
             const QString textureDir=QDir(rootPath).filePath("texture_assets/"+ns);
@@ -13957,7 +14075,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             generated << packageReadmePath;
 
             QString zipPath, zipError;
-            const QString packageName = QString("%1_%2_BO3_package").arg(pref.isEmpty() ? QString("custom") : pref, bn);
+            const QString packageName = QString("%1_bo3").arg(bn);
             if(!createShareableBo3Zip(rootPath, generated, packageName, zipPath, zipError))
             {
                 if(!zipError.isEmpty())
@@ -14069,16 +14187,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const QString apeRootPath = QDir(requestedInstallRoot).filePath("share/raw/shaders_stable_toolsgfx");
             QDir apeRoot(apeRootPath);
             const QString currentApeFile = QFileInfo(toolsgfxShaderRel).fileName();
-            const QString apePrefix = sanitizeBo3Name(QString("%1_%2").arg(pref, bn)) + "_ape_";
+            const QString cleanApePrefix = sanitizeBo3Name(bn) + "_ape_";
+            const QString legacyPrefixedApePrefix = sanitizeBo3Name(assetStem) + "_ape_";
+            QStringList apePatterns{cleanApePrefix + "*.hlsl"};
+            if(legacyPrefixedApePrefix.compare(cleanApePrefix, Qt::CaseInsensitive) != 0)
+                apePatterns << (legacyPrefixedApePrefix + "*.hlsl");
             const QFileInfoList staleApeFiles = apeRoot.entryInfoList(
-                QStringList() << (apePrefix + "*.hlsl"), QDir::Files | QDir::NoSymLinks);
+                apePatterns, QDir::Files | QDir::NoSymLinks);
             for(const QFileInfo& info : staleApeFiles)
                 if(info.fileName().compare(currentApeFile, Qt::CaseInsensitive) != 0)
                     QFile::remove(info.absoluteFilePath());
 
             QDir legacyNestedApeDir(QDir(apeRootPath).filePath("postfx"));
             const QFileInfoList legacyNestedApeFiles = legacyNestedApeDir.entryInfoList(
-                QStringList() << (apePrefix + "*.hlsl"), QDir::Files | QDir::NoSymLinks);
+                apePatterns, QDir::Files | QDir::NoSymLinks);
             for(const QFileInfo& info : legacyNestedApeFiles)
                 QFile::remove(info.absoluteFilePath());
         }
@@ -14187,8 +14309,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(exportType == 0)
         {
             installedText += "\n\nRestart Mod Tools / APE before opening the newly installed PostFX Material Type; APE can keep the old techset registry while it is already running.";
-            installedText += QString("\n\nManual runtime integration is required. Merge the generated CSC instructions into your usermap/mod client CSC.\nZone entries:\ninclude,filters\nmaterial,%1").arg(mat);
-            installedText += QString("\nIntegration guide: source_data/%1/%2_POSTFX_INTEGRATION.txt").arg(ns,bn);
+            installedText += QString("\n\nPostFX activation is required. The Open Instructions button opens the main install README, which now contains the exact zone entries and full copy/merge-ready client CSC code.\nZone entries:\ninclude,filters\nmaterial,%1").arg(mat);
+            installedText += QString("\nBackup integration copy: source_data/%1/%2_POSTFX_INTEGRATION.txt").arg(ns,bn);
             installedText += exportPostFxFilterSupport
                 ? "\nShared _filters support was requested; any existing copy was preserved."
                 : "\nShared _filters support was not installed/replaced; keep your existing _filters support.";
