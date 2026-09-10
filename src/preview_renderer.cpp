@@ -4842,6 +4842,31 @@ float3 EnvironmentDirection(float3 direction)
     return previewEnvironment.Sample(previewSampler, DirectionToEquirect(direction)).rgb;
 }
 
+// APE does not feed the raw sky texture straight into glossy materials. Its
+// ToolsGfx deferred path evaluates diffuse/specular probe lighting after the
+// GBuffer pass. We do not yet have Treyarch's full probe convolution kernel,
+// but this cone filter removes the obviously-wrong mirror projection while
+// preserving the recovered HDR environment and SSI lighting direction.
+float3 EnvironmentCone(float3 direction, float radius)
+{
+    float3 d = normalize(direction);
+    float3 helper = abs(d.y) < 0.92 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+    float3 t = normalize(cross(helper, d));
+    float3 b = normalize(cross(d, t));
+    float r = max(radius, 0.0001);
+
+    float3 sum = EnvironmentDirection(d) * 4.0;
+    sum += EnvironmentDirection(normalize(d + t * r));
+    sum += EnvironmentDirection(normalize(d - t * r));
+    sum += EnvironmentDirection(normalize(d + b * r));
+    sum += EnvironmentDirection(normalize(d - b * r));
+    sum += EnvironmentDirection(normalize(d + (t + b) * (r * 0.70710678)));
+    sum += EnvironmentDirection(normalize(d + (t - b) * (r * 0.70710678)));
+    sum += EnvironmentDirection(normalize(d + (-t + b) * (r * 0.70710678)));
+    sum += EnvironmentDirection(normalize(d - (t + b) * (r * 0.70710678)));
+    return sum * (1.0 / 12.0);
+}
+
 float4 ps_main(VS_OUT i) : SV_Target0
 {
     float2 uv = i.texcoord0.xy;
@@ -4980,8 +5005,21 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 ambient = albedo * ambientTint * (previewAmbientShadow.x * 1.35) * ao;
     if (previewAmbientShadow.w > 0.5 && previewAmbientShadow.z > 0.5)
     {
-        float3 envDiffuse = EnvironmentDirection(N) * albedo * (previewAmbientShadow.x * 1.55) * ao;
-        ambient = max(ambient, envDiffuse);
+        if (materialProfile == 0)
+        {
+            // APE's GI diffuse is probe-convolved/low-frequency. Sampling the
+            // raw lat-long at N projected recognizable mountains/clouds onto
+            // the sphere and was the main cause of the chrome-ball look. Blend
+            // a broad cone with the recovered environment average instead.
+            float3 probeDiffuse = EnvironmentCone(N, 0.85);
+            float3 lowFreqEnv = lerp(ambientTint, probeDiffuse, 0.20);
+            ambient = albedo * lowFreqEnv * (previewAmbientShadow.x * 1.20) * ao;
+        }
+        else
+        {
+            float3 envDiffuse = EnvironmentDirection(N) * albedo * (previewAmbientShadow.x * 1.55) * ao;
+            ambient = max(ambient, envDiffuse);
+        }
     }
     float3 diffuse = albedo * (1.0 - F) * (NdotL / 3.14159265);
     float shadowTerm = lerp(1.0, smoothstep(0.0, 0.35, NdotL), previewAmbientShadow.y);
@@ -4991,8 +5029,21 @@ float4 ps_main(VS_OUT i) : SV_Target0
     if (previewAmbientShadow.w > 0.5 && previewAmbientShadow.z > 0.5)
     {
         float3 R = reflect(-V, N);
-        float3 env = EnvironmentDirection(R);
-        envSpec = env * F * lerp(0.9, 0.18, roughness) * ao;
+        if (materialProfile == 0)
+        {
+            // First probe-specular approximation. Gloss still controls the
+            // lobe, but the environment is convolved and energy-reduced instead
+            // of copied one-for-one as a sharp HDR mirror reflection.
+            float cone = lerp(0.055, 0.72, roughness * roughness + roughness * 0.35);
+            float3 env = EnvironmentCone(R, cone);
+            float probeEnergy = lerp(0.34, 0.075, roughness);
+            envSpec = env * F * probeEnergy * ao;
+        }
+        else
+        {
+            float3 env = EnvironmentDirection(R);
+            envSpec = env * F * lerp(0.9, 0.18, roughness) * ao;
+        }
     }
 
     float3 color = ambient + direct + envSpec + emissive;

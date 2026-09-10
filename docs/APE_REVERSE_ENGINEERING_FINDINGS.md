@@ -88,3 +88,8 @@ The following are still parity targets rather than claimed Treyarch constants:
 - exact display/tonemap LUT contents and EV adaptation behavior;
 - exact camera/environment orientation constants beyond the recovered source SSI values;
 - how APE maps every material type's optional resources beyond the stock `Geometry/lit` case.
+
+
+## Phase 1f visual regression finding
+
+The Phase 1e three-stage diagnostic isolated the remaining mismatch: `Input Albedo (t0)` showed the loaded color source, `Albedo` showed the material/GBuffer path, while `Final Lit` projected the HDR sky too sharply across the sphere. This confirms texture decode/binding is no longer the primary failure. Phase 1f therefore scopes its changes to the APE Match lighting compositor and keeps Look Dev unchanged.
