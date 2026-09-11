@@ -2850,9 +2850,16 @@ public:
         // so repeated over/under drags never stick at +/-89 degrees.
         lightPitchDegrees_ = wrapSignedDegrees(lightPitchDegrees_ + pitchDeltaDegrees);
 
-        // APE visible-sky yaw is derived from absolute sun azimuth in
-        // UpdateDeferredLightBuffer(). Do not accumulate a second manual sky
-        // transform here; vertical drag affects only sun pitch.
+        // Phase 1z: APE's visible sky has a captured preset/base orientation,
+        // then follows horizontal light manipulation as a relative yaw. The old
+        // absolute 90-lightYaw expression discarded that base orientation and
+        // made Reset look at the wrong part of the authored HDR. Pitch still
+        // affects only the sun. Keep the baked material probe fixed.
+        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
+        {
+            environmentRotationDegrees_ = wrapUnsignedDegrees(
+                environmentRotationDegrees_ - yawDeltaDegrees);
+        }
     }
 
     void SetBackgroundColor(float r, float g, float b)
@@ -3760,16 +3767,12 @@ private:
             previewMeshKind,
             nativeApeReferenceMesh ? 1.0f : 0.0f
         };
+        // Phase 1z: environmentRotationDegrees_ is the captured/reset base sky
+        // orientation and RotateLight() applies only the horizontal yaw delta.
+        // This preserves APE's observed inverse sun/sky motion without throwing
+        // away the authored base longitude. The baked reflection probe remains
+        // on apeProbeRotationDegrees_ and does not follow manual sun motion.
         float visibleSkyYawDegrees = environmentRotationDegrees_;
-        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
-        {
-            // skyRotation is stored in APE's authored Z-up sun-azimuth frame,
-            // before CurrentPreviewLightDirection() converts that sun into the
-            // Studio preview frame. Capture proof: skyYaw = 90 - APE sunYaw.
-            // Pitch never participates and the baked reflection probe stays fixed.
-            visibleSkyYawDegrees = std::fmod(90.0f - lightYawDegrees_, 360.0f);
-            if (visibleSkyYawDegrees < 0.0f) visibleSkyYawDegrees += 360.0f;
-        }
         data.apeSettings = {
             visibleSkyYawDegrees * (3.14159265358979323846f / 180.0f),
             static_cast<float>(materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch

@@ -112,20 +112,29 @@ float Bo3LightingGlossToAlpha(float lightingGlossSignal)
     return sqrt(max(2.0 / (cosinePower + 2.0), 1e-10));
 }
 
-float3 ApplyApeEnvironmentHandedness(float3 direction)
+float3 StudioToApeEnvironmentFrame(float3 direction)
 {
     float3 d = normalize(direction);
-    // APE/BO3's asset-preview environment uses the opposite horizontal
-    // handedness from the Studio camera frame. Keep this isolated to APE Match.
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
-        d.x = -d.x;
-    return d;
+    {
+        // Phase 1z: Phase 1v recovered the full APE -> Studio world transform:
+        //   Studio X = -APE Y, Studio Y = APE Z, Studio Z = APE X.
+        // The environment path was still using the much older X-only flip, so
+        // sky/probe directions lived in a different frame from N/L/V. Convert
+        // Studio world back into APE's authored Z-up frame, then express it as
+        // the Y-up lat-long/cubemap sampling frame used by the preview textures:
+        //   APE = (StudioZ, -StudioX, StudioY)
+        //   sampleFrame = (APE X, APE Z, APE Y)
+        //               = (StudioZ, StudioY, -StudioX).
+        d = float3(d.z, d.y, -d.x);
+    }
+    return normalize(d);
 }
 
 float3 RotateEnvironmentYaw(float3 direction, float yaw)
 {
-    float3 d = ApplyApeEnvironmentHandedness(direction);
+    float3 d = StudioToApeEnvironmentFrame(direction);
     float sy = sin(yaw), cy = cos(yaw);
     d.xz = float2(d.x * cy - d.z * sy, d.x * sy + d.z * cy);
     return normalize(d);

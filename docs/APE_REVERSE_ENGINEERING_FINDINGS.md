@@ -463,3 +463,9 @@ The captured NormalGloss foreground mask spans x=404..752 and y=125..468 in the 
 Finally, the APE compute shader reads GBuffer/depth surfaces with integer `ld` operations. Phase 1w mirrors this using `Texture2D.Load(SV_Position)` rather than bilinear sampling packed GBuffer channels. This avoids filtering `NormalGloss` across the sphere/background boundary.
 
 A direct numerical replay using the captured GBuffer normals, projection/camera basis and horizontal Day sun provides an additional sanity check: the verified BRDF reaches its maximum around pixel `(693,243)` with `N.H ~= 0.999996`. Holding everything else fixed, Studio's old Gloss 6 input peaks at only about `0.422` before sun-color/irradiance scaling, whereas captured Gloss 13 peaks at about `53.45` in a very small lobe. This explains why the old result could be visually dominated by grazing/probe response even after the vector math had been corrected.
+
+
+## Phase 1z — environment frame and viewport-scale correction
+Reset-to-reset screenshots and the splitter-resize comparison exposed that Phase 1y's 5.25-radius dolly normalized the wrong quantity. APE's sphere occupies about 58.8% of material-viewport height; the captured 39.430488-degree projection therefore uses ~4.85 radii in the current Studio sphere normalization.
+
+The environment path also still contained the pre-1v X-only handedness approximation even though direct lighting had moved to the full APE/Studio transform. Studio world directions are now converted to the APE lat-long/cube sampling frame as `(StudioZ, StudioY, -StudioX)`. A captured t51 BC6H face, corrected for DDS face presentation roll, cross-correlates with the captured Day HDR at ~134.75 degrees and replaces the old 120-degree screenshot-era Day base orientation.

@@ -1,3 +1,13 @@
+# Phase 1z current patch
+
+- Applies the full Phase 1v APE/Studio world conversion to visible-sky and reflection-probe directions.
+- Replaces the old Day 120-degree environment calibration with the captured t51/HDR fit of 134.75 degrees.
+- Visible sky now starts at the captured base orientation and follows manual sun yaw relatively while the baked probe stays fixed.
+- Reset sphere dolly is 4.85 radii, matching APE's ~58.8% viewport-height sphere ratio through splitter resizing.
+- Phase 1x hotspot recovery and Phase 1y probe-contrast recovery remain intact.
+
+See `PATCH_NOTES_PHASE1Z.md` for the capture/video evidence.
+
 # Phase 1q.1 - Captured Sun-Axis / Direct-Light Recovery
 
 - Removes the incorrect +90 degree SSI sun-yaw remap.

@@ -21156,7 +21156,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             // Day energy is capture-derived, not eyeballed:
             // sun.color * invExposure = 16384 / 7765.01172 = 2.1099775
             // globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.2500001
-            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 120.0f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
+            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 134.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
             {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f},
             {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.40f, 0.90f, 0.60f, 120.0f, 1.25f, 0.105f, 2.2f, 0.62f}
         };
@@ -21177,12 +21177,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             r.ResetCamera();
             r.RotateCamera(0.0f, 22.5f);
-            // Phase 1y: compare the actual Phase 1x Reset screenshots in
-            // viewport-normalized coordinates. Studio's sphere occupied ~0.760
-            // of half-height while APE occupied ~0.706. Keeping APE's captured
-            // 39.430488-degree lens and solving only the dolly yields ~5.25
-            // sphere radii. Match APE's object sizing without changing the lens.
-            r.SetCameraDistance(5.25000f);
+            // Phase 1z: the resize-comparison video exposes the correct invariant:
+            // APE's sphere diameter is about 58.8% of the material viewport height
+            // at Reset and keeps that ratio as the preview splitter moves. With the
+            // captured 39.430488-degree lens this solves to ~4.85 sphere radii.
+            // Phase 1y's 5.25 value made Studio systematically too small in every
+            // viewport height even though one absolute-pixel screenshot looked close.
+            r.SetCameraDistance(4.85000f);
         }
 
         // Keep these angles in APE's authored Z-up SSI frame. The renderer now
@@ -21228,7 +21229,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1y probe contrast + APE framing | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
+                QString(" | %1 | Phase 1z environment frame + viewport scale | Phase 1y probe contrast | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
