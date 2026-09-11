@@ -56,7 +56,7 @@ The source-of-truth SSI values and the screenshot-calibration values are deliber
 - uses isolated preview exposure/ambient/shadow calibration values per preset;
 - uses an ACES-style fitted display curve as a temporary APE Match display transform;
 - preserves the Studio's existing 45-degree material FOV and 4.2 camera distance, which match the APE reference sphere framing closely;
-- resets APE Match to a screenshot-calibrated ~26.7-degree camera pitch;
+- resets APE Match to a capture-derived 22.5-degree camera pitch;
 - remaps the recovered SSI sun yaw by +90 degrees into the Studio coordinate frame while retaining `180 - SSI pitch` for sun elevation;
 - applies an APE-only horizontal environment handedness correction plus a 120-degree environment yaw calibration;
 - uses the sampled APE No Lighting clear color exactly as RGB 76, 102, 127.
@@ -67,7 +67,7 @@ The calibration values are not claimed to be Treyarch engine constants. They exi
 
 The supplied APE glossy-sphere captures were used only as regression/calibration references; they are not bundled with the Studio. Across Morning, Day, Sunset, and Night, the specular-highlight positions give a consistent fixed mapping from SSI space into the Studio camera frame. The resulting first-pass transform is:
 
-- material camera: 45-degree vertical FOV, distance 4.2, pitch ~26.7 degrees;
+- material camera: 45-degree vertical FOV, capture-aligned reference pitch 22.5 degrees (with the APE-match dolly distance applied by the UI);
 - sun elevation: `180 - SSI pitch`;
 - Studio sun yaw: `(SSI yaw + 90) mod 360`;
 - APE environment sampling: horizontal handedness correction, then ~120 degrees of yaw rotation.

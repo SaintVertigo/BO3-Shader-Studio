@@ -272,3 +272,8 @@ Phase 1t follows the user's Phase 1s comparison video with a literal translation
 ## Phase 1u APE direct-specular numerator correction
 
 Phase 1u fixes the final known translation error in the captured sun-specular branch: APE divides `alpha^2 * specScale` by `4 * visV * visL * Dden^2`; `NdotL` gates the branch and participates in `visL`, but is not present in the numerator. Phase 1t inserted that extra factor and suppressed the hotspot at grazing light angles. Phase 1s direct diffuse and the shadow-free baseline remain unchanged.
+
+
+## Phase 1v APE world-frame alignment + direct-specular correction
+
+Phase 1v corrects two capture-grounded issues exposed by the Phase 1u test. First, the APE compute shader really does multiply `alpha^2 * specScale` by `NdotL` before the visibility/distribution denominator; Phase 1u had mistaken the later shadow register for that value. Second, the paired capture's `camToWldMatrix` proves the old Y/Z-only world conversion was incomplete. APE's reference camera basis maps exactly into Studio with `StudioX=-ApeY`, `StudioY=ApeZ`, `StudioZ=ApeX`, and the captured reference camera elevation is 22.5 degrees. APE Match now uses that full conversion for direct-light vectors while preserving Phase 1s direct diffuse, the fixed probe, the captured `skyYaw=90-sunYaw` rule, and the shadow-free baseline.

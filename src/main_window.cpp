@@ -21164,18 +21164,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (resetView)
         {
             r.ResetCamera();
-            r.RotateCamera(0.0f, 26.7f);
+            r.RotateCamera(0.0f, 22.5f);
             // Matched APE/Studio captures put the APE sphere about 8% smaller
             // at the same background framing. Geometry preview scroll is a dolly,
             // so move the reference camera from 4.20 to ~4.54 without changing FOV.
             r.AdjustCameraFov(4.25f);
         }
 
-        // SSI uses the BO3 source coordinate frame. Screenshot calibration across
-        // the captured CoreSunConstants.wldDir confirms BO3 uses Z-up while Studio is Y-up;
-        // swapping the vertical axis preserves the horizontal SSI yaw exactly. No +90 degree
-        // sun-yaw offset is required. The initial elevation remains 180 - SSI pitch. Manual
-        // APE rig rotation is not clamped to a latitude: it may cross either pole.
+        // Keep these angles in APE's authored Z-up SSI frame. The renderer now
+        // applies the full capture-derived world conversion (StudioX=-ApeY,
+        // StudioY=ApeZ, StudioZ=ApeX) instead of the old Y/Z-only swap. That
+        // conversion is what aligns CoreSunConstants.wldDir with APE's captured
+        // camera basis and therefore places the direct-specular hotspot correctly.
+        // Elevation remains 180 - SSI pitch and may wrap freely across either pole.
         const float elevation = 180.0f - p.ssiPitch;
         const float studioYaw = std::fmod(p.ssiYaw, 360.0f);
         r.SetLightAngles(studioYaw, elevation);
@@ -21213,7 +21214,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1u captured direct sun + exact specular | GGX probe + filmic display | shadow-tree pending")
+                QString(" | %1 | Phase 1v captured direct sun + coordinate-aligned specular | GGX probe + filmic display | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21229,7 +21230,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1u captured direct sun/exact specular active; guessed shadow disabled until t40 shadow-tree port").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1v captured APE coordinate frame/direct specular active; guessed shadow disabled until t40 shadow-tree port").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

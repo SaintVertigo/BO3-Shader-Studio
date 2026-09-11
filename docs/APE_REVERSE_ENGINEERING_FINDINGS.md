@@ -440,3 +440,12 @@ specNoFresnel = alpha2*specScale / (4*visV*visL*Dden^2)
 ```
 
 The earlier Phase 1t note's `alpha2*NdotL*specScale` numerator is superseded by this correction.
+
+
+## Phase 1v - corrected direct-spec register map and APE-to-Studio world frame
+
+The Phase 1u video prompted a full register lifetime audit around instructions 2397-2439. `r2.w` is still the direct `NdotL` value when instruction 2398 executes; `r4.w` is the filtered sun-shadow factor. The captured branch therefore forms `alpha2 * specScale * NdotL`, divides by `4 * visV * visL * Dden^2`, and only then multiplies shadow. Phase 1u's removal of `NdotL` is superseded.
+
+The same pass used `CodeSceneTransforms.camToWldMatrix` to resolve the persistent hotspot-position mismatch. The captured APE camera basis is right `(0,-1,0)`, up `(0.382683,0,0.923880)`, forward `(0.923880,0,-0.382683)`, with camera position `(-286.182861,0,118.540833)`. This is a 22.5-degree reference camera in APE's Z-up frame. Mapping it to Studio's Y-up preview gives the exact coordinate conversion `StudioX=-ApeY`, `StudioY=ApeZ`, `StudioZ=ApeX`. The old Y/Z-only swap rotated direct light around the sphere incorrectly even while broad diffuse motion looked plausible.
+
+The two moved-sun captures cross-check the conversion. Horizontal capture raw sun `(0.094735,-0.901343,0.422618)` maps to Studio `(0.901343,0.422618,0.094735)`. At the captured white-hotspot pixel, the decoded GBuffer normal transformed by the same matrix aligns with the transformed half vector to about 0.997 dot product. This directly explains why APE's rounded hotspot appears upper-right while the old Studio mapping tended to produce edge slivers.

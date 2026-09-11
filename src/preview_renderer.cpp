@@ -2880,6 +2880,44 @@ public:
     float LightYawDegrees() const { return lightYawDegrees_; }
     float LightPitchDegrees() const { return lightPitchDegrees_; }
 
+    DirectX::XMFLOAT3 CurrentPreviewLightDirection() const
+    {
+        // lightYawDegrees_/lightPitchDegrees_ intentionally retain APE's authored
+        // Z-up azimuth/elevation semantics while APE Match is active. The paired
+        // 3DMigoto captures give us the missing full coordinate conversion:
+        //
+        //   APE camToWld right   = ( 0,       -1,        0 )
+        //   APE camToWld up      = ( 0.382683, 0,  0.923880 )
+        //   APE camToWld forward = ( 0.923880, 0, -0.382683 )
+        //
+        // Studio's captured-reference camera at +22.5 degrees has those same
+        // basis vectors after the handedness/axis conversion
+        //
+        //   StudioX = -ApeY, StudioY = ApeZ, StudioZ = ApeX.
+        //
+        // The old code only swapped Y/Z. That preserved broad N.L motion but put
+        // the sun roughly 90 degrees around the sphere from APE, which is why the
+        // direct specular showed up as edge slivers instead of APE's moving spot.
+        const float yaw = DirectX::XMConvertToRadians(lightYawDegrees_);
+        const float elevation = DirectX::XMConvertToRadians(lightPitchDegrees_);
+        const float horizontal = std::cos(elevation);
+        const float apeX = horizontal * std::cos(yaw);
+        const float apeY = horizontal * std::sin(yaw);
+        const float apeZ = std::sin(elevation);
+
+        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
+        {
+            DirectX::XMVECTOR v = DirectX::XMVectorSet(-apeY, apeZ, apeX, 0.0f);
+            v = DirectX::XMVector3Normalize(v);
+            DirectX::XMFLOAT3 out{};
+            DirectX::XMStoreFloat3(&out, v);
+            return out;
+        }
+
+        // Ordinary Studio/LookDev convention is Y-up.
+        return {apeX, apeZ, apeY};
+    }
+
     void SetLightIntensity(float v) { lightIntensity_ = std::clamp(v, 0.0f, 4.0f); }
     float LightIntensity() const { return lightIntensity_; }
     void SetAmbientIntensity(float v) { ambientIntensity_ = std::clamp(v, 0.0f, 2.0f); }
@@ -3674,12 +3712,8 @@ private:
             DirectX::XMFLOAT4 apeShadowRow3;
             DirectX::XMFLOAT4 apeShadowParams;
         } data{};
-        const float ly = DirectX::XMConvertToRadians(lightYawDegrees_);
-        const float lp = DirectX::XMConvertToRadians(lightPitchDegrees_);
-        const float lx = std::cos(lp) * std::cos(ly);
-        const float lyy = std::sin(lp);
-        const float lz = std::cos(lp) * std::sin(ly);
-        data.lightDirIntensity = {lx, lyy, lz, lightIntensity_};
+        const DirectX::XMFLOAT3 previewLightDir = CurrentPreviewLightDirection();
+        data.lightDirIntensity = {previewLightDir.x, previewLightDir.y, previewLightDir.z, lightIntensity_};
         data.ambientShadow = {ambientIntensity_, shadowStrength_, environmentAffectsLighting_ ? 1.0f : 0.0f, environmentEnabled_ ? 1.0f : 0.0f};
         auto ambientColor = (environmentAffectsLighting_ && environmentEnabled_) ? environmentAverageColor_ : std::array<float,3>{0.26f, 0.26f, 0.28f};
         if (environmentIsEXR_ && materialPreviewProfile_ == MaterialPreviewProfile::LookDev)
@@ -3697,10 +3731,10 @@ private:
         float visibleSkyYawDegrees = environmentRotationDegrees_;
         if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
         {
-            // Captured APE is Z-up while the Studio preview is Y-up. After the
-            // vertical-axis swap the sun keeps the same horizontal yaw, while
-            // APE skyRotation follows: skyYaw = 90 degrees - sunYaw. Pitch never
-            // participates, and the baked reflection probe keeps its preset yaw.
+            // skyRotation is stored in APE's authored Z-up sun-azimuth frame,
+            // before CurrentPreviewLightDirection() converts that sun into the
+            // Studio preview frame. Capture proof: skyYaw = 90 - APE sunYaw.
+            // Pitch never participates and the baked reflection probe stays fixed.
             visibleSkyYawDegrees = std::fmod(90.0f - lightYawDegrees_, 360.0f);
             if (visibleSkyYawDegrees < 0.0f) visibleSkyYawDegrees += 360.0f;
         }
@@ -4122,12 +4156,8 @@ private:
         DirectX::XMFLOAT3 eye3{};
         XMStoreFloat3(&eye3, eye);
         data.cameraPos = {eye3.x, eye3.y, eye3.z, 1.0f};
-        const float ly = XMConvertToRadians(lightYawDegrees_);
-        const float lp = XMConvertToRadians(lightPitchDegrees_);
-        const float lx = std::cos(lp) * std::cos(ly);
-        const float lyy = std::sin(lp);
-        const float lz = std::cos(lp) * std::sin(ly);
-        data.lightDir = {lx, lyy, lz, 0.0f};
+        const DirectX::XMFLOAT3 previewLightDir = CurrentPreviewLightDirection();
+        data.lightDir = {previewLightDir.x, previewLightDir.y, previewLightDir.z, 0.0f};
         const bool directionalGeometry =
             skyShaderMode_ && !vertexOnlyShader_ &&
             (previewMode_ == PreviewMode::ForwardMaterial || previewMode_ == PreviewMode::DeferredGBuffer);
@@ -5885,10 +5915,9 @@ PS_OUT ps_main(VS_OUT i)
         if (!mesh || !mesh->vb || !mesh->ib || mesh->indexCount == 0) return;
 
         using namespace DirectX;
-        const float ly = XMConvertToRadians(lightYawDegrees_);
-        const float lp = XMConvertToRadians(lightPitchDegrees_);
+        const DirectX::XMFLOAT3 previewLightDir = CurrentPreviewLightDirection();
         XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(
-            std::cos(lp) * std::cos(ly), std::sin(lp), std::cos(lp) * std::sin(ly), 0.0f));
+            previewLightDir.x, previewLightDir.y, previewLightDir.z, 0.0f));
         XMVECTOR target = XMVectorZero();
         XMVECTOR eye = XMVectorScale(lightDir, 20.0f);
         XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
@@ -6555,10 +6584,9 @@ PS_OUT ps_main(VS_OUT i)
         const auto& shaderCameraPosition = shaderDrivenMovementDisabled_
             ? shaderMovementFrozenPosition_ : cameraPosition_;
         const std::array<float, 4> cameraPosition{shaderCameraPosition[0], shaderCameraPosition[1], shaderCameraPosition[2], 1.0f};
-        const float ly = DirectX::XMConvertToRadians(lightYawDegrees_);
-        const float lp = DirectX::XMConvertToRadians(lightPitchDegrees_);
+        const DirectX::XMFLOAT3 currentPreviewLightDir = CurrentPreviewLightDirection();
         const std::array<float, 4> previewLightDirection{
-            std::cos(lp) * std::cos(ly), std::sin(lp), std::cos(lp) * std::sin(ly), lightIntensity_};
+            currentPreviewLightDir.x, currentPreviewLightDir.y, currentPreviewLightDir.z, lightIntensity_};
         const std::array<float, 4> previewLightSettings{lightIntensity_, ambientIntensity_, shadowStrength_, fulbright_ ? 1.0f : 0.0f};
         const auto effectiveEnvironment = (environmentAffectsLighting_ && environmentEnabled_) ? environmentAverageColor_ : std::array<float,3>{0.26f, 0.26f, 0.28f};
         const auto effectiveSunColor = (environmentAffectsLighting_ && environmentEnabled_) ? environmentSunColor_ : std::array<float,3>{1.0f, 1.0f, 1.0f};

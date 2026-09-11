@@ -508,19 +508,20 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 specular = 0.0;
     if (materialProfile == 0)
     {
-        // Phase 1u: corrected literal direct-sun specular translation from captured
-        // ToolsGfx/deferred_lighting.hlsl (2f9c1c21e9bef37c), instructions
-        // around the CoreSunConstants.specScale branch.
+        // Phase 1v: instruction-faithful direct-sun specular translation from
+        // captured ToolsGfx/deferred_lighting.hlsl (2f9c1c21e9bef37c).
         //
-        // The older Studio rewrite used a textbook GGX D term with /PI and a
-        // Schlick-GGX k derived from alpha itself. The capture does neither:
+        // The older Studio rewrite used textbook GGX normalization. The capture:
         //   alpha2 = 2 / (2^(17*gloss) + 2)
         //   alpha  = sqrt(alpha2)
         //   k      = (sqrt(alpha) + 1)^2 / 8
-        //   D      = alpha2 / (1 + N.H^2*(alpha2-1))^2   // NO /PI
-        // and the visibility denominator is evaluated directly as
-        // (N.V*(1-k)+k) * (N.L*(1-k)+k). Crucially, the captured path
-        // does not multiply N.L into the specular numerator.
+        //   Dden   = 1 + abs(N.H)^2 * (alpha2 - 1)       // NO /PI
+        // and evaluates visibility as
+        // (N.V*(1-k)+k) * (N.L*(1-k)+k).
+        //
+        // Phase 1u misread r2.w at instruction 2398. r2.w is NdotL, while r4.w
+        // is the shadow factor. The captured numerator therefore DOES contain
+        // NdotL: alpha2 * specScale * NdotL. Shadow is multiplied later.
         // CoreSunConstants.specScale is 1.0 in the captured Day viewport.
         const float apeSunSpecScale = 1.0;
         float alpha = roughness;
@@ -536,13 +537,16 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float specNoFresnel = 0.0;
         if (validHalfVector && NdotL > 0.0)
         {
-            // Captured instruction stream: alpha2*specScale is divided by
-            // 4*visV*visL*Dden^2. NdotL participates in visL and gates the
-            // branch, but it is NOT multiplied into the numerator. Phase 1t
-            // accidentally inserted a conventional NdotL factor here, which
-            // suppresses the highlight exactly where APE still shows a strong
-            // moving hotspot (especially toward grazing light angles).
-            specNoFresnel = (alpha2 * apeSunSpecScale) /
+            // Captured instruction stream (2397-2439):
+            //   r3.w = alpha2 * specScale
+            //   r3.w = NdotL * r3.w
+            //   ...
+            //   r2.w = r3.w / (visV * visL * Dden^2)
+            //   r2.w *= shadow
+            //   r2.w *= 0.25
+            // Keep shadow outside this BRDF scalar because Phase 1s intentionally
+            // holds shadow at 1 until the missing t40 shadow-tree data is recovered.
+            specNoFresnel = (alpha2 * apeSunSpecScale * NdotL) /
                 max(4.0 * visV * visL * dDenom * dDenom, 1e-10);
         }
         // The shader stores the base and grazing branches separately and later
