@@ -7,6 +7,7 @@ Texture2D depthTexture : register(t4);
 Texture2D previewEnvironment : register(t5);
 Texture2D previewMaterialAlbedoInput : register(t6);
 SamplerState previewSampler : register(s0);
+SamplerState previewEnvironmentSampler : register(s1);
 
 cbuffer PreviewCamera : register(b0)
 {
@@ -90,6 +91,18 @@ float DecodeBo3Gloss(float packedGloss)
     return saturate(glossValue / 17.0);
 }
 
+float Bo3GlossToRoughness(float normalizedGloss)
+{
+    // BO3 authors this channel as cosinePowerMap / a 0..17 gloss range.  Treating
+    // 13/17 as the linear inverse of roughness made stock Geometry/lit look like
+    // a broad modern-PBR mirror.  The logarithmic range is much closer to a
+    // cosine-power authoring scale: convert 2^gloss to the equivalent lobe width
+    // before feeding the GGX approximation used by this preview compositor.
+    float glossValue = saturate(normalizedGloss) * 17.0;
+    float cosinePower = exp2(glossValue);
+    return clamp(sqrt(2.0 / (cosinePower + 2.0)), 0.02, 0.95);
+}
+
 float3 RotateEnvironmentDirection(float3 direction)
 {
     float3 d = normalize(direction);
@@ -118,7 +131,7 @@ float3 EnvironmentAt(float2 uv)
     float3 ray = previewCameraForward.xyz +
                  previewCameraRight.xyz * (ndc.x * previewCameraParams.x * previewCameraParams.y) +
                  previewCameraUp.xyz * (ndc.y * previewCameraParams.y);
-    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(ray), 0.0).rgb;
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(ray), 0.0).rgb;
 }
 
 float LinearToDisplay1(float x)
@@ -161,12 +174,12 @@ float3 ApplyLookdev(float3 color)
 
 float3 EnvironmentDirection(float3 direction)
 {
-    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(direction), 0.0).rgb;
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(direction), 0.0).rgb;
 }
 
 float3 EnvironmentDirectionLod(float3 direction, float lod)
 {
-    return previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(direction),
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(direction),
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
 }
 
@@ -316,7 +329,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float reflectance = saturate(rt2.x);
     float3 specColor = max(float3(reflectance, reflectance, reflectance), float3(0.04, 0.04, 0.04));
     float gloss = DecodeBo3Gloss(rt1.z);
-    float roughness = max(0.045, 1.0 - gloss);
+    float roughness = Bo3GlossToRoughness(gloss);
     float alpha = roughness * roughness;
     float a2 = alpha * alpha;
     float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
@@ -354,7 +367,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // variation remains in the SH signal; this only normalizes the mean.
             float probeMean = dot(max(ambientTint, 0.0), float3(0.2126, 0.7152, 0.0722));
             float3 probeBalance = probeMean / max(ambientTint, float3(0.025, 0.025, 0.025));
-            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.55);
+            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.72);
             ambient = albedo * (irradiance / 3.14159265) *
                       previewApeLightingCalibration.x * previewAmbientShadow.x * ao;
         }
@@ -381,7 +394,12 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // controls LOD; a separate low-energy probe scale prevents the raw
             // sky from turning stock dielectric materials into chrome.
             float maxLod = max(0.0, previewApeSettings.y);
-            float lodFraction = saturate(roughness * 1.70);
+            // ToolsGfx uses a prefiltered reflection-probe hierarchy.  A plain
+            // linear roughness->mip mapping preserved recognizable cloud/terrain
+            // detail across the stock wall sphere.  Bias toward the filtered
+            // probe mips while keeping very glossy materials capable of a tight
+            // reflection.
+            float lodFraction = saturate(sqrt(roughness));
             float lod = lodFraction * maxLod;
             float3 env = EnvironmentDirectionLod(R, lod);
             float3 fresnelEnv = specColor + (1.0 - specColor) * pow(1.0 - NdotV, 5.0);

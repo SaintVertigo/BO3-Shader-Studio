@@ -171,3 +171,56 @@ The previous Studio compositor incorrectly decoded `NormalGloss.z` as if it were
 ### Reset semantics
 
 APE lighting selection and camera framing are now separated. Changing Morning/Day/Sunset/Night preserves the current camera orbit. An explicit Preview Reset restores the entire selected APE preset: reference camera, SSI sun direction/color, environment rotation/source, probe calibration, exposure, and shadow state. This removes stale user-light state from parity captures.
+
+## Phase 1j — native HDR sky detail + stock specular-lobe correction
+
+The supplied APE/Shader Studio comparison video isolated two independent parity
+problems that Phase 1h/1i still left visible.
+
+### Visible APE sky resolution
+
+The shipped Day and Sunset lat-long sources are 8192x4096 EXRs.  The Studio was
+decoding those full files for statistics, then deliberately shrinking the GPU
+copy to 2048x1024 RGBA32F.  That discarded 75% of the samples in each axis and
+made distant foliage, cloud edges, and rock detail visibly softer than APE.
+
+Phase 1j keeps up to the authored 8192x4096 source resolution and uploads the APE
+environment as `R16G16B16A16_FLOAT`, which preserves HDR range while halving the
+per-texel storage versus RGBA32F.  It keeps mip generation for reflection-probe
+filtering, but the visible sky explicitly samples mip 0.  An adapter that cannot
+allocate the native image falls back to 4096x2048 first, then 2048x1024 as a last
+safety net.  Reconstructed Morning/Night cube-face skies now target 4096x2048.
+The equirectangular sampler also wraps U and clamps V so filtering crosses the
+horizontal seam correctly without wrapping across the poles.
+
+### Gloss is not reflectivity
+
+The comparison video shows `core_script_wall_c` staying predominantly neutral
+and diffuse in APE while carrying a small, compact white sun highlight.  The
+Studio instead painted recognizable sky features across most of the sphere.
+That demonstrated that the remaining mismatch was no longer the Phase 1h gloss
+*decode*; it was how the decoded gloss was converted into a modern roughness and
+how much raw environment-probe energy was applied.
+
+BO3 exposes the authored texture slot as `cosinePowerMap` and uses a 0..17 gloss
+range.  Phase 1j therefore stops using the arbitrary linear `roughness = 1-gloss`
+conversion.  The preview approximation maps the decoded 0..17 value to a
+cosine-power lobe (`2^gloss`) and converts that lobe width to the GGX roughness
+used by the Studio compositor.  For stock gloss 13 this produces a compact
+highlight instead of a broad lobe.  This mapping is still an APE-parity
+approximation until the exact shipped `ToolsGfx/deferred_lighting.hlsl` BRDF is
+recovered; the verified BO3 GBuffer packing/decoding itself is unchanged.
+
+The APE preset specular-probe calibration is also reduced substantially and the
+roughness-to-probe-mip mapping is biased toward filtered probe mips.  This keeps
+Fresnel/environment response at grazing angles without turning stock dielectric
+materials into chrome.  Diffuse SH chroma normalization is slightly stronger so
+the HDR sky does not blue/green-color-cast neutral stock materials as strongly.
+
+### Forward/deferred sky consistency
+
+The forward-material sky path previously used implicit mip selection and omitted
+the final APE desktop sRGB transfer that the deferred APE compositor already
+applied.  Phase 1j forces base-mip presentation and applies the same display
+transfer, so switching material preview paths no longer changes sky sharpness or
+contrast for the same preset.

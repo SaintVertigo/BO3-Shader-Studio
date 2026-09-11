@@ -95,6 +95,58 @@ fs::path GetExecutableDirectory()
     return fs::path(std::wstring(buffer.data(), length)).parent_path();
 }
 
+// APE's shipped sky lat-longs are large HDR sources (the Day/Sunset pair are
+// 8192x4096).  Keeping them as RGBA32F would cost ~512 MiB before mips, which
+// is why the old preview path downsampled all the way to 2048x1024.  DXGI
+// R16G16B16A16_FLOAT preserves the useful HDR range at half the storage, so the
+// APE-match path can retain the authored sky resolution instead of throwing
+// away three quarters of the samples in each axis.
+uint16_t FloatToHalfBits(float value)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    const uint32_t exponent = (bits >> 23) & 0xffu;
+    uint32_t mantissa = bits & 0x007fffffu;
+
+    if (exponent == 0xffu)
+    {
+        // Preserve NaN as NaN; clamp infinities to the largest finite half so a
+        // single bad HDR texel cannot poison mip generation.
+        if (mantissa != 0u) return static_cast<uint16_t>(sign | 0x7e00u);
+        return static_cast<uint16_t>(sign | 0x7bffu);
+    }
+
+    int32_t halfExponent = static_cast<int32_t>(exponent) - 127 + 15;
+    if (halfExponent >= 31)
+        return static_cast<uint16_t>(sign | 0x7bffu);
+
+    if (halfExponent <= 0)
+    {
+        if (halfExponent < -10) return static_cast<uint16_t>(sign);
+        mantissa |= 0x00800000u;
+        const uint32_t shift = static_cast<uint32_t>(14 - halfExponent);
+        uint32_t halfMantissa = mantissa >> shift;
+        const uint32_t roundBit = 1u << (shift - 1u);
+        if ((mantissa & roundBit) && ((mantissa & (roundBit - 1u)) || (halfMantissa & 1u)))
+            ++halfMantissa;
+        return static_cast<uint16_t>(sign | halfMantissa);
+    }
+
+    uint32_t halfMantissa = mantissa >> 13;
+    if ((mantissa & 0x00001000u) && ((mantissa & 0x00000fffu) || (halfMantissa & 1u)))
+    {
+        ++halfMantissa;
+        if (halfMantissa == 0x0400u)
+        {
+            halfMantissa = 0u;
+            ++halfExponent;
+            if (halfExponent >= 31) return static_cast<uint16_t>(sign | 0x7bffu);
+        }
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(halfExponent) << 10) | (halfMantissa & 0x03ffu));
+}
+
 
 struct ReflectedVariable
 {
@@ -688,29 +740,25 @@ public:
                 }
             }
 
-            // Keep OpenEXR environment maps as floating-point linear HDR all the
-            // way to the preview shader. The previous path baked a Reinhard-like
-            // 8-bit image at load time, destroying the high-luminance range that
-            // APE/TOOLSGFX relies on for sky reflections and specular response.
-            //
-            // Treyarch's Day/Sunset source lat-longs are 8192x4096. Uploading
-            // those as RGBA32F would consume about 512 MiB of VRAM per sky, so
-            // use a preview-sized HDR copy while keeping statistics from the
-            // full-resolution source above. No clamping/tone mapping occurs.
-            const UINT maxPreviewWidth = 2048u;
-            const UINT maxPreviewHeight = 1024u;
+            // Keep OpenEXR environment maps linear HDR all the way to the GPU.
+            // Phase 1h intentionally capped APE's 8192x4096 Day/Sunset skies at
+            // 2048x1024 because RGBA32F was too expensive.  That cap was visible
+            // beside APE as lost foliage/cloud/rock detail.  The APE path now
+            // keeps up to the authored 8192x4096 resolution and uploads it as
+            // RGBA16F (with a full mip chain for probe filtering).  If an unusual
+            // source exceeds that, only then do we resample it.
+            const UINT maxPreviewWidth = 8192u;
+            const UINT maxPreviewHeight = 4096u;
             UINT uploadW = w;
             UINT uploadH = h;
             std::vector<float> reducedHdr;
             const float* uploadPixels = exrPixels;
-            if (w > maxPreviewWidth || h > maxPreviewHeight)
-            {
-                const float scale = std::min(static_cast<float>(maxPreviewWidth) / static_cast<float>(w),
-                                             static_cast<float>(maxPreviewHeight) / static_cast<float>(h));
-                uploadW = std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(w) * scale)));
-                uploadH = std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(h) * scale)));
-                reducedHdr.resize(static_cast<size_t>(uploadW) * uploadH * 4u);
 
+            auto resampleEnvironment = [&](UINT targetW, UINT targetH)
+            {
+                uploadW = std::max<UINT>(1u, targetW);
+                uploadH = std::max<UINT>(1u, targetH);
+                reducedHdr.assign(static_cast<size_t>(uploadW) * uploadH * 4u, 0.0f);
                 for (UINT y = 0; y < uploadH; ++y)
                 {
                     const float sourceY = ((static_cast<float>(y) + 0.5f) * static_cast<float>(h) /
@@ -739,13 +787,41 @@ public:
                     }
                 }
                 uploadPixels = reducedHdr.data();
+            };
+
+            if (w > maxPreviewWidth || h > maxPreviewHeight)
+            {
+                const float scale = std::min(static_cast<float>(maxPreviewWidth) / static_cast<float>(w),
+                                             static_cast<float>(maxPreviewHeight) / static_cast<float>(h));
+                resampleEnvironment(
+                    std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(w) * scale))),
+                    std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(h) * scale))));
             }
 
             ComPtr<ID3D11ShaderResourceView> srv;
-            if (!CreateFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
+            std::wstring nativeUploadError;
+            if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, nativeUploadError, true))
             {
-                std::free(exrPixels);
-                return false;
+                // Keep the higher-quality path robust on low-VRAM/older adapters.
+                // APE's old 2K fallback remains a final safety net, but 4K is the
+                // first fallback and is already 4x the pixel count of Phase 1h.
+                const UINT fallbackW = std::min<UINT>(4096u, w);
+                const UINT fallbackH = std::min<UINT>(2048u, h);
+                if (uploadW > fallbackW || uploadH > fallbackH)
+                    resampleEnvironment(fallbackW, fallbackH);
+
+                if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
+                {
+                    const UINT safeW = std::min<UINT>(2048u, w);
+                    const UINT safeH = std::min<UINT>(1024u, h);
+                    if (uploadW > safeW || uploadH > safeH)
+                        resampleEnvironment(safeW, safeH);
+                    if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
+                    {
+                        std::free(exrPixels);
+                        return false;
+                    }
+                }
             }
             ComputeEnvironmentDiffuseSH(uploadPixels, uploadW, uploadH);
             environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(uploadW, uploadH)))));
@@ -954,8 +1030,10 @@ public:
             loaded[faceIndex] = std::move(face);
         }
 
-        outputWidth = std::clamp<UINT>(outputWidth, 256u, 4096u);
-        outputHeight = std::clamp<UINT>(outputHeight, 128u, 2048u);
+        // Reconstructed APE cubemaps use a 4K lat-long by default, but permit
+        // up to the same 8K/4K ceiling as native Day/Sunset lat-longs.
+        outputWidth = std::clamp<UINT>(outputWidth, 256u, 8192u);
+        outputHeight = std::clamp<UINT>(outputHeight, 128u, 4096u);
         if (outputWidth != outputHeight * 2u) outputWidth = outputHeight * 2u;
         std::vector<float> equirect(static_cast<size_t>(outputWidth) * outputHeight * 4u, 0.0f);
 
@@ -1021,7 +1099,7 @@ public:
         }
 
         ComPtr<ID3D11ShaderResourceView> srv;
-        if (!CreateFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error, true)) return false;
+        if (!CreateHalfFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error, true)) return false;
         ComputeEnvironmentDiffuseSH(equirect.data(), outputWidth, outputHeight);
         environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(outputWidth, outputHeight)))));
         if (totalWeight > 0.0)
@@ -4101,7 +4179,7 @@ private:
         ID3D11Buffer* environmentSettings = deferredLightBuffer_.Get();
         context_->PSSetConstantBuffers(13, 1, &environmentSettings);
         context_->PSSetShader(environmentPixelShader_.Get(), nullptr, 0);
-        context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
+        context_->PSSetSamplers(0, 1, environmentSampler_.GetAddressOf());
         ID3D11ShaderResourceView* env = environmentSRV_.Get();
         context_->PSSetShaderResources(0, 1, &env);
         context_->Draw(3, 0);
@@ -4179,7 +4257,8 @@ private:
         context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context_->VSSetShader(blitVertexShader_.Get(), nullptr, 0);
         context_->PSSetShader(deferredLightPixelShader_.Get(), nullptr, 0);
-        context_->PSSetSamplers(0, 1, sampler_.GetAddressOf());
+        ID3D11SamplerState* composeSamplers[2] = { sampler_.Get(), environmentSampler_.Get() };
+        context_->PSSetSamplers(0, 2, composeSamplers);
         UpdateDeferredLightBuffer();
         UpdateEnvironmentCameraBuffer(vp);
         ID3D11Buffer* deferredCB = deferredLightBuffer_.Get();
@@ -4605,6 +4684,12 @@ float2 DirectionToEquirect(float3 direction)
     return float2(frac(u), saturate(v));
 }
 
+float LinearToDisplayEnvironment1(float x)
+{
+    x = max(x, 0.0);
+    return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+
 float3 ApplyEnvironmentDisplay(float3 color)
 {
     color = max(color, 0.0);
@@ -4619,12 +4704,22 @@ float3 ApplyEnvironmentDisplay(float3 color)
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
-    return color;
+    // Deferred APE Match already performs the desktop sRGB transfer after its
+    // tone curve.  Forward material mode used to omit that final transfer, so
+    // switching preview paths changed the apparent sky contrast.
+    if (profile == 0)
+        color = float3(LinearToDisplayEnvironment1(color.r),
+                       LinearToDisplayEnvironment1(color.g),
+                       LinearToDisplayEnvironment1(color.b));
+    return saturate(color);
 }
 
 float4 ps_main(VS_OUT i) : SV_Target0
 {
-    float3 env = previewEnvironment.Sample(previewSampler, DirectionToEquirect(i.skyDirection.xyz)).rgb;
+    // The visible sky is presentation imagery, not a rough reflection lookup.
+    // Always display the authored base mip; probe filtering uses explicit LODs
+    // in the deferred compositor instead.
+    float3 env = previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(i.skyDirection.xyz), 0.0).rgb;
     return float4(ApplyEnvironmentDisplay(env), 1.0);
 }
 )";
@@ -4933,6 +5028,21 @@ PS_OUT ps_main(VS_OUT i)
             return false;
         }
 
+        // Equirectangular skies must wrap horizontally but clamp at the poles.
+        // Using the generic clamp sampler creates a visible seam and loses the
+        // correct bilinear footprint at u=0/1.  Keep this sampler dedicated to
+        // the sky/probe path so ordinary PostFX sampling is unchanged.
+        D3D11_SAMPLER_DESC environmentDesc = desc;
+        environmentDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+        environmentDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        environmentDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        hr = device_->CreateSamplerState(&environmentDesc, environmentSampler_.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"Create APE environment sampler failed.";
+            return false;
+        }
+
         D3D11_SAMPLER_DESC wrapDesc = desc;
         wrapDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
         wrapDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -5154,6 +5264,60 @@ PS_OUT ps_main(VS_OUT i)
             for (int channel = 0; channel < 3; ++channel)
                 environmentDiffuseSH_[sh][channel] = static_cast<float>(coeff[sh][channel] * bandScale[sh]);
         environmentDiffuseSHValid_ = true;
+    }
+
+    bool CreateHalfFloatTextureSRV(const float* rgba, UINT w, UINT h,
+                                   ComPtr<ID3D11ShaderResourceView>& out, std::wstring& error,
+                                   bool generateMips = false)
+    {
+        if (!rgba || w == 0 || h == 0)
+        {
+            error = L"Invalid half-float texture data.";
+            return false;
+        }
+
+        const size_t componentCount = static_cast<size_t>(w) * h * 4u;
+        std::vector<uint16_t> half(componentCount);
+        for (size_t i = 0; i < componentCount; ++i)
+            half[i] = FloatToHalfBits(rgba[i]);
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = generateMips ? 0u : 1u;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = generateMips ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (generateMips ? D3D11_BIND_RENDER_TARGET : 0u);
+        td.MiscFlags = generateMips ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0u;
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = half.data();
+        init.SysMemPitch = w * sizeof(uint16_t) * 4u;
+
+        ComPtr<ID3D11Texture2D> tex;
+        HRESULT hr = device_->CreateTexture2D(&td, generateMips ? nullptr : &init, tex.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateTexture2D failed for high-resolution RGBA16F HDR environment.";
+            return false;
+        }
+        if (generateMips)
+            context_->UpdateSubresource(tex.Get(), 0, nullptr, half.data(), w * sizeof(uint16_t) * 4u, 0);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = td.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MostDetailedMip = 0;
+        sd.Texture2D.MipLevels = generateMips ? static_cast<UINT>(-1) : 1u;
+        hr = device_->CreateShaderResourceView(tex.Get(), &sd, out.ReleaseAndGetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateShaderResourceView failed for high-resolution RGBA16F HDR environment.";
+            return false;
+        }
+        if (generateMips) context_->GenerateMips(out.Get());
+        return true;
     }
 
     bool CreateFloatTextureSRV(const float* rgba, UINT w, UINT h,
@@ -6182,6 +6346,7 @@ PS_OUT ps_main(VS_OUT i)
     ComPtr<ID3D11PixelShader> environmentPixelShader_;
     ComPtr<ID3D11PixelShader> deferredLightPixelShader_;
     ComPtr<ID3D11SamplerState> sampler_;
+    ComPtr<ID3D11SamplerState> environmentSampler_;
     ComPtr<ID3D11SamplerState> materialWrapSampler_;
     ComPtr<ID3D11SamplerState> materialColorSampler_;
     ComPtr<ID3D11RasterizerState> materialRasterizerState_;
