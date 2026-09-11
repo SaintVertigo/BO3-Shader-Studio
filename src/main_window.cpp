@@ -710,6 +710,65 @@ public:
     QSize sizeHint() const override { return QSize(640, 360); }
 };
 
+class ApeResizableStack final : public QStackedWidget
+{
+public:
+    explicit ApeResizableStack(QWidget* parent = nullptr) : QStackedWidget(parent)
+    {
+        setMinimumSize(0, 0);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    }
+
+    // QStackedWidget normally reports the union of every page's minimum hint.
+    // That meant the hidden Beginner builder could stop the right-hand Preview
+    // dock while Advanced mode was active. APE lets the viewport boundary keep
+    // following the cursor, so the central authoring surface must be collapsible.
+    QSize minimumSizeHint() const override { return QSize(0, 0); }
+
+    QSize sizeHint() const override
+    {
+        if (QWidget* page = currentWidget())
+            return page->sizeHint();
+        return QSize(640, 420);
+    }
+};
+
+class ApeResizableDockWidget final : public QDockWidget
+{
+public:
+    explicit ApeResizableDockWidget(const QString& title, QWidget* parent = nullptr)
+        : QDockWidget(title, parent)
+    {
+        setMinimumSize(0, 0);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    }
+
+    // QMainWindow's dock layout consults the dock's minimumSizeHint while the
+    // separator is dragged. Returning the child layout's normal minimum makes
+    // long Preview toolbars and bottom-panel controls behave like invisible
+    // hard stops. APE's pane keeps moving, so let Qt collapse the dock instead.
+    QSize minimumSizeHint() const override
+    {
+        const int titleHeight = titleBarWidget() ? titleBarWidget()->minimumSizeHint().height() : 0;
+        return QSize(0, std::max(0, titleHeight));
+    }
+};
+
+class ApeCollapsibleContainer final : public QWidget
+{
+public:
+    explicit ApeCollapsibleContainer(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setMinimumSize(0, 0);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    }
+
+    // Keep dense toolbar/control rows from becoming a QMainWindow dock minimum.
+    // Children retain their own geometry and may clip at extremely small sizes,
+    // but the user's drag is never stopped by their preferred width/height.
+    QSize minimumSizeHint() const override { return QSize(0, 0); }
+};
+
 class CompactDockScrollArea final : public QScrollArea
 {
 public:
@@ -16776,11 +16835,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         // Beginner mode is now a true no-code authoring surface rather than a
         // trimmed HLSL editor. Advanced mode keeps the original code editor.
-        authoringStack_ = new QStackedWidget(this);
+        authoringStack_ = new ApeResizableStack(this);
         beginnerBuilderPanel_ = buildBeginnerBuilderPanel();
         advancedEditorPage_ = editorPanel;
+        for (QWidget* page : {beginnerBuilderPanel_, advancedEditorPage_})
+        {
+            if (!page) continue;
+            page->setMinimumSize(0, 0);
+            page->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        }
         authoringStack_->addWidget(beginnerBuilderPanel_);
         authoringStack_->addWidget(advancedEditorPage_);
+        authoringStack_->setMinimumSize(0, 0);
+        authoringStack_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
         setCentralWidget(authoringStack_);
 
         connect(findEdit_, &QLineEdit::textChanged, this, [this]{ rebuildSearchHighlights(true); });
@@ -16799,7 +16866,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             updateBeginnerSunFromPreview(position, finalUpdate);
         });
 
-        auto* previewContainer = new QWidget();
+        auto* previewContainer = new ApeCollapsibleContainer();
         auto* previewLayout = new QVBoxLayout(previewContainer);
         previewLayout->setContentsMargins(4,4,4,4);
         previewLayout->setSpacing(4);
@@ -17150,7 +17217,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         compilerOutput_->setMaximumBlockCount(100000);
         compilerOutput_->setObjectName("CompilerOutput");
 
-        auto* outputContainer = new QWidget();
+        auto* outputContainer = new ApeCollapsibleContainer();
         auto* outputLayout = new QVBoxLayout(outputContainer);
         outputLayout->setContentsMargins(0, 0, 0, 0);
         outputLayout->setSpacing(4);
@@ -17191,10 +17258,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         auto makeDock = [this](const QString& title, const QString& objectName, QWidget* content, Qt::DockWidgetArea area) -> QDockWidget*
         {
-            auto* dock = new QDockWidget(title, this);
+            auto* dock = new ApeResizableDockWidget(title, this);
             dock->setObjectName(objectName);
             dock->setAllowedAreas(Qt::AllDockWidgetAreas);
             dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable | QDockWidget::DockWidgetClosable);
+            if (content)
+            {
+                content->setMinimumSize(0, 0);
+                content->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+            }
             dock->setWidget(content);
             addDockWidget(area, dock);
             return dock;
@@ -21229,7 +21301,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1z environment frame + viewport scale | Phase 1y probe contrast | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
+                QString(" | %1 | Phase 1aa APE-like unconstrained preview resizing | Phase 1z environment frame + viewport scale | Phase 1y probe contrast | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {

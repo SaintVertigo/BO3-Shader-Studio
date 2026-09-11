@@ -1,3 +1,9 @@
+# Current development
+
+- Phase 1aa removes Qt dock minimum-hint clamps so the Preview pane can resize much farther horizontally and vertically like APE.
+- Phase 1z environment-frame and viewport-camera corrections remain intact.
+- Phase 1x hotspot/normal recovery and Phase 1y probe work are preserved.
+
 # Phase 1z current patch
 
 - Applies the full Phase 1v APE/Studio world conversion to visible-sky and reflection-probe directions.
