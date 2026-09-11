@@ -824,7 +824,7 @@ public:
              renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
         setToolTip(enabled
             ? (apeMaterial
-                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Shift+Left rotates the APE sun in world space without coupling it to the camera. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. R or double-click restores the full selected APE preset."
+                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Shift+Left rotates APE's lighting rig: the sun and HDR environment move together and can pass over/under the asset continuously. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. R or double-click restores the full selected APE preset."
                 : "3D navigation: left-drag rotates the camera, Shift+left-drag moves the preview sun, middle-drag pans, right-drag also moves the sun, mouse wheel zooms, double-click or R resets the camera.")
             : "2D preview. 3D navigation is disabled for this shader.");
     }
@@ -919,11 +919,11 @@ protected:
                  renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
             const bool shiftLeft = (event->button() == Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
 
-            // APE's material preview uses a Maya-style camera family. Keep the
-            // recovered APE sun/preset fixed in world space while navigating:
+            // APE's material preview uses a Maya-style camera family. Camera
+            // navigation leaves the selected lighting rig fixed:
             //   Alt+LMB = orbit, Alt+MMB = pan, Alt+RMB = dolly.
-            // Shift+LMB is the explicit sun-direction override. The sun remains
-            // world-space and independent of camera orbit; RMB never rotates it.
+            // Shift+LMB explicitly rotates APE's light rig. APE moves the sun and
+            // HDR environment together, while camera orbit remains independent.
             if (apeMaterial)
             {
                 lightDragging_ = shiftLeft;
@@ -17881,7 +17881,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         };
 
         makeSliderRow("Light yaw", 0, 360, lightYawSlider_, lightYawValue_);
-        makeSliderRow("Light pitch", -89, 89, lightPitchSlider_, lightPitchValue_);
+        makeSliderRow("Light pitch", -180, 180, lightPitchSlider_, lightPitchValue_);
         makeSliderRow("Light intensity", 0, 200, lightIntensitySlider_, lightIntensityValue_);
         makeSliderRow("Ambient", 0, 100, ambientSlider_, ambientValue_);
         makeSliderRow("Shadow strength", 0, 100, shadowSlider_, shadowValue_);
@@ -20485,10 +20485,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto& renderer = preview_->renderer();
         renderer.SetLightAngles(static_cast<float>(lightYawSlider_->value()), static_cast<float>(lightPitchSlider_->value()));
 
-        // APE Match permits an explicit world-space sun-direction override while
-        // preserving the recovered SSI intensity / probe / shadow calibration.
-        // Moving yaw or pitch must not silently replace those preset values with
-        // the ordinary Look Dev controls that are disabled in this profile.
+        // In APE Match the yaw/pitch controls rotate the same lighting rig as
+        // Shift+LMB: sun + HDR environment move together while the recovered SSI
+        // intensity / probe / shadow calibration stays intact.
         if (renderer.GetMaterialPreviewProfile() != MaterialPreviewProfile::ApeMatch)
         {
             renderer.SetLightIntensity(lightIntensitySlider_->value() / 100.0f);
@@ -21154,7 +21153,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         r.SetToneMapMode(2);
         r.SetLookdevExposureEV(p.previewExposureEv);
         r.SetLightColor(p.sunR, p.sunG, p.sunB);
-        r.SetEnvironmentRotationDegrees(p.environmentRotation);
 
         // Lighting selection in APE does not re-frame the asset. Preserve the
         // current orbit while switching Morning/Day/Sunset/Night; only entering
@@ -21165,12 +21163,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             r.RotateCamera(0.0f, 26.7f);
         }
 
-        // SSI uses the BO3 source coordinate frame.  Screenshot calibration across
+        // SSI uses the BO3 source coordinate frame. Screenshot calibration across
         // all four stock APE presets gives a fixed +90 degree yaw remap into the
-        // Studio frame while the elevation conversion remains 180 - SSI pitch.
-        const float elevation = std::clamp(180.0f - p.ssiPitch, -89.0f, 89.0f);
+        // Studio frame while the initial elevation remains 180 - SSI pitch. Manual
+        // APE rig rotation is not clamped to a latitude: it may cross either pole.
+        const float elevation = 180.0f - p.ssiPitch;
         const float studioYaw = std::fmod(p.ssiYaw + 90.0f, 360.0f);
         r.SetLightAngles(studioYaw, elevation);
+        // SetLightAngles() intentionally couples manual APE edits to the HDR rig.
+        // A preset is an absolute reference state, so restore its authored
+        // environment orientation *after* installing the SSI sun direction.
+        r.SetEnvironmentRotationDegrees(p.environmentRotation);
         // ToolsGfx keeps sun and probe energy separate from display exposure.
         // Keep the ordinary light intensity at unity and apply the APE-specific
         // irradiance/probe calibration in the deferred compositor instead.

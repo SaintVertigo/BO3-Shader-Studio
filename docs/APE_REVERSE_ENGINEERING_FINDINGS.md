@@ -307,3 +307,32 @@ changing the HDR source itself.
 The visible native-resolution sky also returns to derivative-driven trilinear LOD
 selection. Native 8K/4K source resolution and seam-safe wrap/clamp sampling remain
 intact, while the overly crisp forced-mip-0 presentation from Phase 1j is removed.
+
+## Phase 1m — APE light-rig motion correction
+
+A closer APE capture corrected an important interaction assumption from Phase 1h.
+Camera orbit and the selected lighting preset are independent, but APE's explicit
+light manipulator is not a sun-only control: dragging the light rotates the HDR
+environment with the sun. Vertical light motion is also not clamped to a
+latitude. The rig may pass over either pole repeatedly, which is why APE can move
+the light above/below the sphere through multiple complete revolutions.
+
+Shader Studio previously clamped `lightPitchDegrees_` to +/-89 degrees and stored
+only one environment yaw angle. That made Shift+LMB stick at a pole and left the
+background stationary while the sun moved. Phase 1m changes the APE Match rig to:
+
+- wrap light pitch continuously through +/-180 degrees instead of clamping;
+- apply the inverse manual rig delta to the environment sampling transform, so the
+  visible HDR, diffuse SH lookup, and reflection lookup rotate with the sun;
+- carry an environment pitch in `previewApeSettings.w` in addition to the existing
+  environment yaw;
+- make the Scene / Lighting yaw/pitch sliders drive the same coupled APE rig;
+- restore the stock preset's absolute environment orientation after installing its
+  SSI sun direction, so switching/resetting a preset remains deterministic.
+
+The new close-ups also establish that the moving dark patch visible on the stock
+APE sphere is real viewport output, not the mouse cursor. It follows the segmented
+APE preview-sphere shading/environment response and must remain a parity reference.
+The half-vector singularity guard stays for numerical robustness, but it is no
+longer described as the source of that APE patch and should not be tuned to erase
+it.

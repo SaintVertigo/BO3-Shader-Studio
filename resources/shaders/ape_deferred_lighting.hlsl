@@ -26,7 +26,7 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewBackgroundColor;     // preview clear/background color
     float4 previewLookdevSettings;     // x exposure EV, y tone map, z ground, w contact shadow
     float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
-    float4 previewApeSettings;         // x env yaw radians, y max environment mip, z SH9 valid
+    float4 previewApeSettings;         // x env yaw radians, y max environment mip, z SH9 valid, w env pitch radians
     float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
     float4 previewApeDiffuseSH[9];      // Lambert-convolved environment irradiance, Y-up SH9
 };
@@ -111,9 +111,12 @@ float3 RotateEnvironmentDirection(float3 direction)
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
         d.x = -d.x;
-    float angle = previewApeSettings.x;
-    float s = sin(angle), c = cos(angle);
-    d.xz = float2(d.x * c - d.z * s, d.x * s + d.z * c);
+    float yaw = previewApeSettings.x;
+    float sy = sin(yaw), cy = cos(yaw);
+    d.xz = float2(d.x * cy - d.z * sy, d.x * sy + d.z * cy);
+    float pitch = previewApeSettings.w;
+    float sp = sin(pitch), cp = cos(pitch);
+    d.yz = float2(d.y * cp - d.z * sp, d.y * sp + d.z * cp);
     return normalize(d);
 }
 
@@ -339,11 +342,11 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 L = normalize(previewLightDirIntensity.xyz);
     float3 V = normalize(-viewRay);
 
-    // L + V becomes zero when the light is directly behind the viewer. The old
-    // normalize() generated undefined/NaN half vectors there, which is the moving
-    // black circular defect visible in the comparison recording. Keep the half
-    // vector finite and explicitly suppress the specular lobe for that degenerate
-    // configuration.
+    // L + V becomes zero when the light is directly behind the viewer. Guard
+    // that mathematical singularity for robustness. The dark moving APE patch in
+    // the user's reference captures is a real APE viewport behavior, not evidence
+    // of this half-vector case, so do not use this guard to erase that reference
+    // shading behavior.
     float3 halfVectorRaw = L + V;
     float halfVectorLengthSq = dot(halfVectorRaw, halfVectorRaw);
     bool validHalfVector = halfVectorLengthSq > 1e-8;
