@@ -508,7 +508,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 specular = 0.0;
     if (materialProfile == 0)
     {
-        // Phase 1t: literal direct-sun specular translation from captured
+        // Phase 1u: corrected literal direct-sun specular translation from captured
         // ToolsGfx/deferred_lighting.hlsl (2f9c1c21e9bef37c), instructions
         // around the CoreSunConstants.specScale branch.
         //
@@ -519,7 +519,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
         //   k      = (sqrt(alpha) + 1)^2 / 8
         //   D      = alpha2 / (1 + N.H^2*(alpha2-1))^2   // NO /PI
         // and the visibility denominator is evaluated directly as
-        // (N.V*(1-k)+k) * (N.L*(1-k)+k).
+        // (N.V*(1-k)+k) * (N.L*(1-k)+k). Crucially, the captured path
+        // does not multiply N.L into the specular numerator.
         // CoreSunConstants.specScale is 1.0 in the captured Day viewport.
         const float apeSunSpecScale = 1.0;
         float alpha = roughness;
@@ -535,7 +536,13 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float specNoFresnel = 0.0;
         if (validHalfVector && NdotL > 0.0)
         {
-            specNoFresnel = (alpha2 * NdotL * apeSunSpecScale) /
+            // Captured instruction stream: alpha2*specScale is divided by
+            // 4*visV*visL*Dden^2. NdotL participates in visL and gates the
+            // branch, but it is NOT multiplied into the numerator. Phase 1t
+            // accidentally inserted a conventional NdotL factor here, which
+            // suppresses the highlight exactly where APE still shows a strong
+            // moving hotspot (especially toward grazing light angles).
+            specNoFresnel = (alpha2 * apeSunSpecScale) /
                 max(4.0 * visV * visL * dDenom * dDenom, 1e-10);
         }
         // The shader stores the base and grazing branches separately and later

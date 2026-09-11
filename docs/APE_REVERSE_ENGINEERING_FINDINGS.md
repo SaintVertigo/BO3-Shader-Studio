@@ -423,3 +423,20 @@ specNoFresnel = alpha^2*NdotL*specScale / (4*visV*visL*Dden^2)
 APE keeps base and grazing Fresnel accumulators separate in registers and combines them later; algebraically this is the normal Schlick `F0 + (1-F0)*(1-VdotH)^5`. The captured Day `specScale` is 1.0.
 
 The immediately adjacent direct-diffuse sequence also contains a small alpha-dependent rough-diffuse correction. Phase 1t ports both pieces while leaving Phase 1s's captured sun/exposure domain unchanged.
+
+
+## Phase 1u - direct-sun specular numerator correction
+
+A second instruction-level pass over `2f9c1c21e9bef37c`, prompted by the Phase 1t test video, corrected one remaining transcription error. Around the `CoreSunConstants.specScale` path the shader first forms `alpha2 * specScale`, later divides it by `visV * visL * Dden^2`, applies the explicit `0.25`, and then applies Fresnel/base-grazing accumulation. There is no independent `NdotL` multiplication in the numerator. `NdotL` is already present in the Schlick visibility term `visL` and determines whether the sun branch is valid.
+
+Therefore the captured direct-specular scalar is:
+
+```text
+k = (sqrt(alpha) + 1)^2 / 8
+visV = NdotV*(1-k)+k
+visL = NdotL*(1-k)+k
+Dden = 1 + abs(NdotH)^2*(alpha2-1)
+specNoFresnel = alpha2*specScale / (4*visV*visL*Dden^2)
+```
+
+The earlier Phase 1t note's `alpha2*NdotL*specScale` numerator is superseded by this correction.

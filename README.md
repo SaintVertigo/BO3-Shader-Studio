@@ -267,3 +267,8 @@ APE Match now uses the direct diffuse relationship measured from the paired APE 
 ## Phase 1t APE direct-specular recovery
 
 Phase 1t follows the user's Phase 1s comparison video with a literal translation of the captured APE direct-sun specular branch. The APE Match compositor now uses BO3's captured no-PI microfacet normalization, the captured `sqrt(alpha)` visibility mapping, and the adjacent rough-diffuse correction. The Phase 1s direct-sun energy/probe separation remains unchanged, and the incomplete shadow-tree replacement remains disabled until the real three-layer selection path is reconstructed.
+
+
+## Phase 1u APE direct-specular numerator correction
+
+Phase 1u fixes the final known translation error in the captured sun-specular branch: APE divides `alpha^2 * specScale` by `4 * visV * visL * Dden^2`; `NdotL` gates the branch and participates in `visL`, but is not present in the numerator. Phase 1t inserted that extra factor and suppressed the hotspot at grazing light angles. Phase 1s direct diffuse and the shadow-free baseline remain unchanged.
