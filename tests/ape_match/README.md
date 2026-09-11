@@ -39,3 +39,15 @@ Do not tune around these as if they are bugs in the orientation pass:
 - APE's exact exposure/tonemap implementation is still approximated.
 - Penumbra and probe behavior are not yet reconstructed exactly.
 - The camera pitch/environment rotation are screenshot-calibrated until exact APE constants are recovered.
+
+
+## Phase 1h manual regression
+
+1. Open the stock `script_wall` / `core_script_wall_c` material setup in APE Match.
+2. Select Day, press Reset, and confirm the selected SSI lighting is restored.
+3. Orbit with Alt+LMB (or plain LMB), pan with Alt+MMB, and dolly with Alt+RMB / wheel. The sun direction must stay fixed while the highlight moves naturally with the camera.
+4. Right-drag in APE Match must dolly, not rotate the sun.
+5. Switch Day -> Morning -> Day while holding an off-axis camera view. The camera must remain at that view.
+6. Press R. Camera + selected APE lighting preset must both return to the known reference state.
+7. In GBuffer Gloss view, stock Geometry/lit with no gloss map should decode near 13/17 (~0.765), not ~0.09.
+8. In Final Lit, the stock gloss-13 material should regain a compact sun/specular highlight instead of looking nearly matte.

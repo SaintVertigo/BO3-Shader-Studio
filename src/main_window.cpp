@@ -813,12 +813,19 @@ public:
         {
             cameraDragging_ = false;
             cameraPanning_ = false;
+            cameraDollying_ = false;
             lightDragging_ = false;
             releaseMouse();
             unsetCursor();
         }
+        const bool apeMaterial = enabled &&
+            renderer_.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch &&
+            (renderer_.GetPreviewMode() == PreviewMode::ForwardMaterial ||
+             renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
         setToolTip(enabled
-            ? "APE-style 3D navigation: left-drag rotates the camera, Shift+left-drag moves the fake sun, middle-drag pans, right-drag also moves the sun, mouse wheel zooms, double-click or R resets the camera."
+            ? (apeMaterial
+                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. The APE sun is fixed in world space; R or double-click restores the full selected APE preset."
+                : "3D navigation: left-drag rotates the camera, Shift+left-drag moves the preview sun, middle-drag pans, right-drag also moves the sun, mouse wheel zooms, double-click or R resets the camera.")
             : "2D preview. 3D navigation is disabled for this shader.");
     }
 
@@ -832,6 +839,11 @@ public:
     void setSceneChangedCallback(std::function<void()> callback)
     {
         sceneChangedCallback_ = std::move(callback);
+    }
+
+    void setResetRequestedCallback(std::function<void()> callback)
+    {
+        resetRequestedCallback_ = std::move(callback);
     }
 
     void setSkyEditorSunInteractionEnabled(bool enabled)
@@ -901,12 +913,34 @@ protected:
         }
         if (cameraInteractionEnabled_ && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton || event->button() == Qt::RightButton))
         {
+            const bool apeMaterial =
+                renderer_.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch &&
+                (renderer_.GetPreviewMode() == PreviewMode::ForwardMaterial ||
+                 renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
             const bool shiftLeft = (event->button() == Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
-            lightDragging_ = (event->button() == Qt::RightButton) || shiftLeft;
-            cameraPanning_ = !lightDragging_ && (event->button() == Qt::MiddleButton);
+
+            // APE's material preview uses a Maya-style camera family. Keep the
+            // recovered APE sun/preset fixed in world space while navigating:
+            //   Alt+LMB = orbit, Alt+MMB = pan, Alt+RMB = dolly.
+            // Plain mouse buttons remain aliases so existing Studio muscle
+            // memory still works, but RMB no longer mutates the APE sun.
+            if (apeMaterial)
+            {
+                lightDragging_ = false;
+                cameraPanning_ = event->button() == Qt::MiddleButton;
+                cameraDollying_ = event->button() == Qt::RightButton;
+            }
+            else
+            {
+                lightDragging_ = (event->button() == Qt::RightButton) || shiftLeft;
+                cameraPanning_ = !lightDragging_ && (event->button() == Qt::MiddleButton);
+                cameraDollying_ = false;
+            }
             cameraDragging_ = true;
             lastCameraMouse_ = event->position();
-            setCursor(lightDragging_ ? Qt::CrossCursor : (cameraPanning_ ? Qt::SizeAllCursor : Qt::ClosedHandCursor));
+            setCursor(lightDragging_ ? Qt::CrossCursor
+                : (cameraPanning_ ? Qt::SizeAllCursor
+                : (cameraDollying_ ? Qt::SizeVerCursor : Qt::ClosedHandCursor)));
             setFocus(Qt::MouseFocusReason);
             grabMouse();
             event->accept();
@@ -927,8 +961,20 @@ protected:
         {
             const QPointF delta = event->position() - lastCameraMouse_;
             lastCameraMouse_ = event->position();
-            const bool shiftSun = (event->buttons() & Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
-            if (lightDragging_ || shiftSun)
+            const bool apeMaterial =
+                renderer_.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch &&
+                (renderer_.GetPreviewMode() == PreviewMode::ForwardMaterial ||
+                 renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
+            const bool shiftSun = !apeMaterial &&
+                (event->buttons() & Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
+            if (cameraDollying_)
+            {
+                // Material geometry uses distance-based dolly inside
+                // AdjustCameraFov(), so the lens remains the APE-calibrated 45°.
+                renderer_.AdjustCameraFov(static_cast<float>(delta.y()) * 0.24f);
+                if (cameraChangedCallback_) cameraChangedCallback_();
+            }
+            else if (lightDragging_ || shiftSun)
             {
                 renderer_.RotateLight(static_cast<float>(delta.x()) * 0.35f, static_cast<float>(-delta.y()) * 0.35f);
                 if (sceneChangedCallback_) sceneChangedCallback_();
@@ -940,7 +986,8 @@ protected:
             }
             else
             {
-                renderer_.RotateCamera(static_cast<float>(delta.x()) * 0.22f, static_cast<float>(-delta.y()) * 0.22f);
+                const float orbitScale = apeMaterial ? 0.18f : 0.22f;
+                renderer_.RotateCamera(static_cast<float>(delta.x()) * orbitScale, static_cast<float>(-delta.y()) * orbitScale);
                 if (cameraChangedCallback_) cameraChangedCallback_();
             }
             event->accept();
@@ -964,6 +1011,7 @@ protected:
         {
             cameraDragging_ = false;
             cameraPanning_ = false;
+            cameraDollying_ = false;
             lightDragging_ = false;
             releaseMouse();
             unsetCursor();
@@ -990,8 +1038,12 @@ protected:
     {
         if (cameraInteractionEnabled_ && event->button() == Qt::LeftButton)
         {
-            renderer_.ResetCamera();
-            if (cameraChangedCallback_) cameraChangedCallback_();
+            if (resetRequestedCallback_) resetRequestedCallback_();
+            else
+            {
+                renderer_.ResetCamera();
+                if (cameraChangedCallback_) cameraChangedCallback_();
+            }
             event->accept();
             return;
         }
@@ -1002,8 +1054,12 @@ protected:
     {
         if (cameraInteractionEnabled_ && event->key() == Qt::Key_R && event->modifiers() == Qt::NoModifier)
         {
-            renderer_.ResetCamera();
-            if (cameraChangedCallback_) cameraChangedCallback_();
+            if (resetRequestedCallback_) resetRequestedCallback_();
+            else
+            {
+                renderer_.ResetCamera();
+                if (cameraChangedCallback_) cameraChangedCallback_();
+            }
             event->accept();
             return;
         }
@@ -1028,6 +1084,7 @@ private:
     bool cameraInteractionEnabled_ = false;
     bool cameraDragging_ = false;
     bool cameraPanning_ = false;
+    bool cameraDollying_ = false;
     bool lightDragging_ = false;
     bool skyEditorSunInteractionEnabled_ = false;
     bool skySunShiftInteractionEnabled_ = false;
@@ -1035,6 +1092,7 @@ private:
     QPointF lastCameraMouse_{};
     std::function<void()> cameraChangedCallback_;
     std::function<void()> sceneChangedCallback_;
+    std::function<void()> resetRequestedCallback_;
     std::function<void(const QPointF&, bool)> sunPositionCallback_;
 };
 
@@ -3877,12 +3935,18 @@ private:
         }
         if (geometryMode)
         {
-            cameraInfo_->setText(QString("Yaw %1  Pitch %2  Pan %3,%4  Dist %5  |  L:rotate  Shift+L:sun  M:pan  Wheel:zoom")
-                .arg(preview_->renderer().CameraYawDegrees(), 0, 'f', 1)
-                .arg(preview_->renderer().CameraPitchDegrees(), 0, 'f', 1)
-                .arg(preview_->renderer().CameraPanX(), 0, 'f', 2)
-                .arg(preview_->renderer().CameraPanY(), 0, 'f', 2)
-                .arg(preview_->renderer().CameraDistance(), 0, 'f', 2));
+            const bool apeMatch = preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch;
+            cameraInfo_->setText(apeMatch
+                ? QString("APE  Yaw %1  Pitch %2  Dist %3  |  Alt+L:orbit  Alt+M:pan  Alt+R:dolly  R:reset")
+                    .arg(preview_->renderer().CameraYawDegrees(), 0, 'f', 1)
+                    .arg(preview_->renderer().CameraPitchDegrees(), 0, 'f', 1)
+                    .arg(preview_->renderer().CameraDistance(), 0, 'f', 2)
+                : QString("Yaw %1  Pitch %2  Pan %3,%4  Dist %5  |  L:rotate  Shift+L:sun  M:pan  Wheel:zoom")
+                    .arg(preview_->renderer().CameraYawDegrees(), 0, 'f', 1)
+                    .arg(preview_->renderer().CameraPitchDegrees(), 0, 'f', 1)
+                    .arg(preview_->renderer().CameraPanX(), 0, 'f', 2)
+                    .arg(preview_->renderer().CameraPanY(), 0, 'f', 2)
+                    .arg(preview_->renderer().CameraDistance(), 0, 'f', 2));
         }
         else
         {
@@ -16717,6 +16781,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         preview_->setMinimumSize(48, 24);
         preview_->setCameraChangedCallback([this]{ updateCameraUi(); });
         preview_->setSceneChangedCallback([this]{ syncSceneControlsFromRenderer(); });
+        preview_->setResetRequestedCallback([this]{ resetPreviewView(); });
         preview_->setSunPositionCallback([this](const QPointF& position, bool finalUpdate)
         {
             updateBeginnerSunFromPreview(position, finalUpdate);
@@ -16766,7 +16831,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         previewMaxButton_->setCheckable(true);
         previewMaxButton_->setToolTip("Temporarily hide secondary tool docks so Preview gets more space.");
         auto* resetCamera = new QPushButton("Reset");
-        resetCamera->setToolTip("Reset the preview camera/view.");
+        resetCamera->setToolTip("Reset the preview view. In APE Match this restores the full selected APE lighting + camera preset.");
         previewSettingsToggleButton_ = new QToolButton();
         previewSettingsToggleButton_->setText(QString::fromUtf8("⚙  Settings"));
         previewSettingsToggleButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
@@ -17312,14 +17377,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(preview_) preview_->renderNow();
         });
         connect(previewMaxButton_, &QPushButton::toggled, this, [this](bool enabled){ setPreviewMaximized(enabled); });
-        connect(resetCamera, &QPushButton::clicked, this, [this]{
-            if (!preview_) return;
-            auto& renderer = preview_->renderer();
-            renderer.ResetCamera();
-            if (renderer.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
-                renderer.RotateCamera(0.0f, 26.7f);
-            updateCameraUi();
-        });
+        connect(resetCamera, &QPushButton::clicked, this, [this]{ resetPreviewView(); });
 
         editor_->setAcceptDrops(true); editor_->viewport()->setAcceptDrops(true); preview_->setAcceptDrops(true);
         editor_->installEventFilter(this); editor_->viewport()->installEventFilter(this); preview_->installEventFilter(this);
@@ -19073,14 +19131,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
         add("Focus Preview", [this]{ if (previewDock_) { previewDock_->show(); previewDock_->raise(); preview_->setFocus(); } });
         add("Focus Editor", [this]{ editor_->setFocus(); });
-        add("Reset Camera", [this]{
-            if (!preview_) return;
-            auto& renderer = preview_->renderer();
-            renderer.ResetCamera();
-            if (renderer.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
-                renderer.RotateCamera(0.0f, 26.7f);
-            updateCameraUi();
-        });
+        add("Reset Camera", [this]{ resetPreviewView(); });
     }
 
     void showBo3LearningGuide(int requestedChapter = -1)
@@ -20969,7 +21020,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const int apeIndex = previewApeLightingPresetCombo_
                 ? previewApeLightingPresetCombo_->currentIndex()
                 : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
-            applyApeLightingPreset(apeIndex);
+            applyApeLightingPreset(apeIndex, true);
             statusBar()->showMessage("APE Match enabled - recovered TOOLSGFX/SSI lighting is active", 3500);
         }
         else if (index == 2)
@@ -21002,7 +21053,31 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         syncSceneControlsFromRenderer();
     }
 
-    void applyApeLightingPreset(int index)
+    void resetPreviewView()
+    {
+        if (!preview_) return;
+        auto& r = preview_->renderer();
+        if (r.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch &&
+            (r.GetPreviewMode() == PreviewMode::ForwardMaterial ||
+             r.GetPreviewMode() == PreviewMode::DeferredGBuffer))
+        {
+            const int apeIndex = previewApeLightingPresetCombo_
+                ? previewApeLightingPresetCombo_->currentIndex()
+                : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            // Reset means reset the *whole* APE viewport state: camera framing,
+            // recovered SSI sun direction/color, environment orientation, probe
+            // calibration, exposure and shadow settings. This prevents a stale
+            // user light rotation from contaminating parity screenshots.
+            applyApeLightingPreset(apeIndex, true);
+            statusBar()->showMessage("APE Match view + lighting preset restored", 2500);
+            return;
+        }
+
+        r.ResetCamera();
+        updateCameraUi();
+    }
+
+    void applyApeLightingPreset(int index, bool resetView = false)
     {
         if (!preview_) return;
         if (apeLightingPresetCombo_ && apeLightingPresetCombo_->currentIndex() != index)
@@ -21062,11 +21137,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         r.SetLightColor(p.sunR, p.sunG, p.sunB);
         r.SetEnvironmentRotationDegrees(p.environmentRotation);
 
-        // APE reference framing recovered from the supplied sphere captures.
-        // The Studio already used the matching 45-degree FOV / 4.2 distance; APE's
-        // default material camera is pitched downward by about 26.7 degrees.
-        r.ResetCamera();
-        r.RotateCamera(0.0f, 26.7f);
+        // Lighting selection in APE does not re-frame the asset. Preserve the
+        // current orbit while switching Morning/Day/Sunset/Night; only entering
+        // APE Match or an explicit Reset restores the recovered reference view.
+        if (resetView)
+        {
+            r.ResetCamera();
+            r.RotateCamera(0.0f, 26.7f);
+        }
 
         // SSI uses the BO3 source coordinate frame.  Screenshot calibration across
         // all four stock APE presets gives a fixed +90 degree yaw remap into the
@@ -21083,6 +21161,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         r.SetAmbientIntensity(p.ambient);
         r.SetShadowStrength(p.shadow);
         r.SetContactShadowStrength(0.0f);
+        // APE material preview exposure stays stable while orbiting/dollying.
+        // Material mode has no temporal auto-iris, but clear any history left by
+        // PostFX work before drawing the strict APE comparison.
+        r.ResetTemporalExposureHistory();
 
         QString environmentSource;
         QString environmentFailure;

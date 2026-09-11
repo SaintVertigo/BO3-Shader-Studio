@@ -4714,7 +4714,13 @@ PS_OUT ps_main(VS_OUT i)
     basis *= float3(0.408248, 0.707107, 0.577350);
     float packScale = rsqrt(abs(basis.z) + 1.0);
     float2 packedXY = basis.xy * packScale * 0.588235 + 0.5;
-    float packedGloss = saturate(gloss) * 0.49755621 + 0.00146627566;
+    // Match BO3 GBuffer_PackGloss instead of treating gloss as a linear RT
+    // channel. The packer combines absolute 0..17 gloss with the source
+    // tangent-normal height term before logarithmic encoding.
+    float normalHeight = min(sampledNormal.z * sampledNormal.z * (1.0 / 3.0), 1.0);
+    float absoluteGloss = saturate(gloss) * 17.0;
+    float packedGloss = max(log2(exp2(-absoluteGloss) + normalHeight) * (-1.0 / 17.0), 0.0) *
+                        0.49755621 + 0.00146627566;
 
     o.rt1 = float4(packedXY, packedGloss, normalDirection * (1.0 / 3.0));
     float scalarSpec = saturate(max(specular.r, max(specular.g, specular.b)));

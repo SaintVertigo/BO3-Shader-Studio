@@ -70,10 +70,24 @@ float3 DecodeBo3GBufferNormal(float4 normalGloss)
 
 float DecodeBo3Gloss(float packedGloss)
 {
-    // For the flat tangent-space normal used by generated procedural materials,
-    // GBuffer_PackGloss reduces to a normalized 0..17 gloss scale followed by
-    // BO3's 0.49755621 range/offset. Recover the normalized lookdev value.
-    return saturate((packedGloss - 0.00146627566) / 0.49755621);
+    // Stock BO3 does NOT store gloss as a simple normalized value.
+    // GBuffer_PackGloss() folds the tangent-normal height term into the same
+    // logarithmic scalar:
+    //   packed = -log2(2^-gloss + normalHeight) / 17
+    // followed by the 0.49755621 scale + 0.00146627566 offset.
+    //
+    // For the stock identity normal used by Geometry/lit when no normal map is
+    // authored, GBuffer_DecodeNormal(...).w is exactly 1/3. The user's APE
+    // capture also confirms the stock material uses Gloss Range 0..13, making
+    // this inversion critical: the previous linear decode interpreted gloss 13
+    // as ~0.09 and made the surface almost completely rough.
+    float encoded = saturate((packedGloss - 0.00146627566) / 0.49755621);
+    float combined = exp2(-17.0 * encoded);
+    const float flatNormalHeight = 1.0 / 3.0;
+    const float minGlossSignal = exp2(-17.0);
+    float glossSignal = max(combined - flatNormalHeight, minGlossSignal);
+    float glossValue = -log2(glossSignal);
+    return saturate(glossValue / 17.0);
 }
 
 float3 RotateEnvironmentDirection(float3 direction)

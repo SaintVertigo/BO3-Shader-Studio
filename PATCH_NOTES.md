@@ -1,3 +1,15 @@
+# APE Match Phase 1h — Viewport Parity + BO3 Gloss Fix
+
+- APE Match camera navigation now keeps the recovered SSI sun fixed in world space; RMB no longer rotates the fake Studio light while in strict APE mode.
+- Added APE/Maya-style material viewport bindings: Alt+LMB orbit, Alt+MMB pan, Alt+RMB dolly, while retaining plain mouse aliases and wheel dolly for convenience.
+- Preview Reset, R, and double-click now restore the full selected APE preset (camera, sun, environment rotation/source, probe calibration, exposure, and shadow state), not just camera rotation.
+- Switching Morning / Day / Sunset / Night now preserves the current orbit instead of unexpectedly re-framing the asset.
+- Fixed a major BO3 GBuffer parity error: `NormalGloss.z` is logarithmically packed together with normal-height data, not a linear normalized gloss channel. Stock Geometry/lit gloss 13 now decodes as gloss 13 instead of ~1.6.
+- Updated the built-in fallback GBuffer writer to use BO3's real `GBuffer_PackGloss` formula.
+- Removed an accidental duplicate scope in the external APE deferred-light HLSL.
+- APE Match clears any leftover temporal exposure history when a strict lighting preset is applied; material exposure remains fixed while orbiting.
+- Documented the APE executable's `ToolsGfx/deferred_lighting.hlsl` permutations (`LIGHTING_ONLY`, `GI_SPECULAR_ONLY`, `GI_DIFFUSE_ONLY`, and combined variants) and recovered camera-mode/action strings.
+
 # APE Match Phase 1g.3 — MSVC Shader Resource Fix
 
 - Fixes persistent MSVC `C2026: string too big, trailing characters truncated` in `preview_renderer.cpp`.

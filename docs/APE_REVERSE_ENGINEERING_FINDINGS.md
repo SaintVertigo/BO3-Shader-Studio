@@ -121,3 +121,53 @@ The final display curve is also still the Studio's temporary APE-match curve; th
 ### Camera reset parity
 
 The ordinary Preview Reset action now restores APE Match's calibrated material camera pitch instead of silently returning to the generic Studio 0-degree camera. This makes APE-vs-Studio lighting screenshots repeatable.
+
+
+## Phase 1h — APE viewport controls + stock gloss decode correction
+
+The supplied APE material-preview video and strings/xrefs in `asseteditor_modtools.exe` add two useful parity findings.
+
+### Camera/control behavior
+
+APE contains explicit camera-mode names `MayaCamMode` and `MotionBuilderCamMode`, plus the action labels `Orbit`, `Rotate`, `Drag`, `Zoom`, and `Pan`. The material-preview video shows the important rendering invariant regardless of which convenience binding is used: camera navigation orbits/dollies the view while the selected lighting preset remains fixed in world space.
+
+Shader Studio APE Match therefore now treats the selected SSI lighting preset as immutable viewport state during camera navigation. It accepts Maya-style bindings (`Alt+LMB` orbit, `Alt+MMB` pan, `Alt+RMB` dolly) while retaining plain mouse aliases for existing Studio users. Right-drag no longer rotates the fake Studio sun in APE Match.
+
+The executable also exposes the APE lighting menu/actions `No Lighting`, `LightingMorning`, `LightingDay`, `LightingSunset`, `LightingNight`, `Draw Skybox`, `PBR Texture Check`, and `Luminance Texture Check`.
+
+### Deferred-stage structure
+
+`asseteditor_modtools.exe` names the shader `ToolsGfx/deferred_lighting.hlsl` and exposes the compile/debug permutations:
+
+```text
+LIGHTING_ONLY
+GI_SPECULAR_ONLY
+GI_DIFFUSE_ONLY
+LIGHTING_AND_GI_SPECULAR_ONLY
+LIGHTING_AND_GI_DIFFUSE_ONLY
+```
+
+This reinforces the current APE Match architecture: direct sun, diffuse GI/probes, and specular GI/probes should remain separate terms instead of being collapsed into one sampled environment color.
+
+### Stock gloss packing was not linear
+
+The stock ToolsGfx source proves that `NormalGloss.z` is produced by:
+
+```hlsl
+GBuffer_PackGloss(gloss, normal.w)
+```
+
+where:
+
+```hlsl
+max((log2(exp2(saturate(gloss / 17) * -17) + normalHeight) * (-1 / 17)), 0)
+    * 0.49755621 + 0.00146627566
+```
+
+For the identity normal fallback used by stock `Geometry/lit`, `GBuffer_DecodeNormal(...).w` is `1/3`. The supplied APE capture visibly shows the tested material using `Gloss Range 0 .. 13`.
+
+The previous Studio compositor incorrectly decoded `NormalGloss.z` as if it were a linearly normalized gloss value. For stock gloss 13 this turned the material into an almost fully rough surface, suppressing the characteristic APE sun highlight. Phase 1h now inverts BO3's logarithmic pack for the stock identity-normal case and updates the preview fallback GBuffer writer to use BO3's real pack formula.
+
+### Reset semantics
+
+APE lighting selection and camera framing are now separated. Changing Morning/Day/Sunset/Night preserves the current camera orbit. An explicit Preview Reset restores the entire selected APE preset: reference camera, SSI sun direction/color, environment rotation/source, probe calibration, exposure, and shadow state. This removes stale user-light state from parity captures.
