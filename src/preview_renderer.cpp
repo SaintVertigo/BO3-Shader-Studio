@@ -7138,6 +7138,16 @@ void PreviewRenderer::SetApeLightingCalibration(float diffuseProbeScale, float s
     impl_->SetApeLightingCalibration(diffuseProbeScale, specularProbeScale, sunIrradianceScale, probeExposure);
 }
 
+void PreviewRenderer::SetApeGlobalProbeAverageColor(float r, float g, float b)
+{
+    impl_->SetApeGlobalProbeAverageColor(r, g, b);
+}
+
+void PreviewRenderer::ResetApeGlobalProbeAverageColorToEnvironment()
+{
+    impl_->ResetApeGlobalProbeAverageColorToEnvironment();
+}
+
 void PreviewRenderer::SetLightColor(float r, float g, float b)
 {
     impl_->SetLightColor(r, g, b);
