@@ -133,18 +133,23 @@ float RadicalInverseVdC(uint32_t bits)
     return static_cast<float>(bits) * 2.3283064365386963e-10f;
 }
 
-std::array<float, 3> ImportanceSampleCosinePower(const std::array<float, 3>& axis,
-                                                 float xi0, float xi1,
-                                                 float cosinePower)
+std::array<float, 3> ImportanceSampleGgxReflection(const std::array<float, 3>& axis,
+                                                     float xi0, float xi1,
+                                                     float roughness)
 {
+    // APE chooses the reflection-probe mip with 5 * (1 - gloss). The mip chain
+    // is therefore a prefiltered roughness chain; it is NOT another copy of the
+    // direct 2^(17*gloss) cosine-power lobe. Phase 1p made mip 1 almost perfectly
+    // sharp (power ~12k), which is why the cloud image barely changed. Build each
+    // mip with the conventional GGX prefilter family and V=N, matching the way a
+    // split-sum environment BRDF is authored.
     constexpr float twoPi = 6.28318530717958647692f;
-    const float cosTheta = std::pow(std::clamp(xi0, 1.0e-7f, 1.0f),
-                                    1.0f / std::max(1.0f, cosinePower + 1.0f));
-    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+    const float a = std::max(0.001f, roughness * roughness);
+    const float a2 = a * a;
     const float phi = twoPi * xi1;
-    const float x = std::cos(phi) * sinTheta;
-    const float y = std::sin(phi) * sinTheta;
-    const float z = cosTheta;
+    const float cosTheta = std::sqrt(std::max(0.0f, (1.0f - xi0) /
+        (1.0f + (a2 - 1.0f) * xi0)));
+    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
 
     DirectX::XMVECTOR n = DirectX::XMVector3Normalize(
         DirectX::XMVectorSet(axis[0], axis[1], axis[2], 0.0f));
@@ -153,13 +158,19 @@ std::array<float, 3> ImportanceSampleCosinePower(const std::array<float, 3>& axi
         : DirectX::XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
     DirectX::XMVECTOR tangent = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(up, n));
     DirectX::XMVECTOR bitangent = DirectX::XMVector3Cross(n, tangent);
-    DirectX::XMVECTOR d = DirectX::XMVectorAdd(
-        DirectX::XMVectorScale(n, z),
-        DirectX::XMVectorAdd(DirectX::XMVectorScale(tangent, x),
-                             DirectX::XMVectorScale(bitangent, y)));
-    d = DirectX::XMVector3Normalize(d);
+    DirectX::XMVECTOR h = DirectX::XMVectorAdd(
+        DirectX::XMVectorScale(n, cosTheta),
+        DirectX::XMVectorAdd(DirectX::XMVectorScale(tangent, std::cos(phi) * sinTheta),
+                             DirectX::XMVectorScale(bitangent, std::sin(phi) * sinTheta)));
+    h = DirectX::XMVector3Normalize(h);
+
+    // Prefilter with V=N. Reflect the view vector about H to obtain the sampled
+    // light/environment direction, as in the standard split-sum GGX prefilter.
+    const float vDotH = std::max(0.0f, DirectX::XMVectorGetX(DirectX::XMVector3Dot(n, h)));
+    DirectX::XMVECTOR l = DirectX::XMVectorSubtract(DirectX::XMVectorScale(h, 2.0f * vDotH), n);
+    l = DirectX::XMVector3Normalize(l);
     DirectX::XMFLOAT3 out{};
-    DirectX::XMStoreFloat3(&out, d);
+    DirectX::XMStoreFloat3(&out, l);
     return {out.x, out.y, out.z};
 }
 
@@ -3676,10 +3687,11 @@ private:
         float visibleSkyYawDegrees = environmentRotationDegrees_;
         if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
         {
-            // Captured APE skyRotation is exactly derived from horizontal sun
-            // azimuth: sky angle = 180 degrees - Studio light yaw. Pitch never
-            // participates, while the baked reflection probe keeps preset yaw.
-            visibleSkyYawDegrees = std::fmod(180.0f - lightYawDegrees_, 360.0f);
+            // Captured APE is Z-up while the Studio preview is Y-up. After the
+            // vertical-axis swap the sun keeps the same horizontal yaw, while
+            // APE skyRotation follows: skyYaw = 90 degrees - sunYaw. Pitch never
+            // participates, and the baked reflection probe keeps its preset yaw.
+            visibleSkyYawDegrees = std::fmod(90.0f - lightYawDegrees_, 360.0f);
             if (visibleSkyYawDegrees < 0.0f) visibleSkyYawDegrees += 360.0f;
         }
         data.apeSettings = {
@@ -3703,7 +3715,13 @@ private:
         data.apeShadowRow1 = {apeShadowWorldViewProj_._21, apeShadowWorldViewProj_._22, apeShadowWorldViewProj_._23, apeShadowWorldViewProj_._24};
         data.apeShadowRow2 = {apeShadowWorldViewProj_._31, apeShadowWorldViewProj_._32, apeShadowWorldViewProj_._33, apeShadowWorldViewProj_._34};
         data.apeShadowRow3 = {apeShadowWorldViewProj_._41, apeShadowWorldViewProj_._42, apeShadowWorldViewProj_._43, apeShadowWorldViewProj_._44};
-        data.apeShadowParams = {1.0f / 1024.0f, 1.0f / 65535.0f,
+        // The captured APE atlas is R16. Studio reconstructs the receiver world
+        // position from the camera depth buffer, so a single 1/65535 step was
+        // too small and caused widespread self-shadow acne that visually reduced
+        // the moving sun to a thin strip. Use an 8-step R16 receiver bias so the
+        // broad direct-light hemisphere survives while the shadow map can still
+        // contribute local self-shadowing.
+        data.apeShadowParams = {1.0f / 1024.0f, 8.0f / 65535.0f,
                                 (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch && apeShadowSRV_.Get() != nullptr) ? 1.0f : 0.0f, 0.0f};
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(context_->Map(deferredLightBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
@@ -5617,22 +5635,19 @@ PS_OUT ps_main(VS_OUT i)
                 auto& texels = subresourceStorage[D3D11CalcSubresource(mip, face, probeMipLevels)];
                 texels.resize(static_cast<size_t>(size) * size * 4u);
 
-                // APE samples glossy probe mip as 5 * (1 - lightingGlossSignal).
-                // Reverse that mapping when building mip 0..5 so each level's
-                // angular footprint follows the same BO3 cosine-power family.
-                // Mip 6 is the explicit broad/average path used by deferred lighting.
-                const float glossForMip = mip <= 5u
-                    ? std::clamp(1.0f - static_cast<float>(mip) / 5.0f, 0.0f, 1.0f)
-                    : 0.0f;
-                const float cosinePower = mip <= 5u
-                    ? std::exp2(17.0f * glossForMip)
-                    : 0.0f;
+                // Captured APE lookup: probeLOD = 5 * (1 - lightingGloss).
+                // That means the authored cubemap mip chain is a ROUGHNESS chain.
+                // Phase 1p incorrectly turned the direct 2^(17*gloss) BRDF into
+                // the mip convolution too, making mip 1 nearly identical to mip 0.
+                const float probeRoughness = mip <= 5u
+                    ? std::clamp(static_cast<float>(mip) / 5.0f, 0.0f, 1.0f)
+                    : 1.0f;
                 const UINT sampleCount = mip == 0u ? 1u
-                    : (mip == 1u ? 8u
-                    : (mip == 2u ? 12u
-                    : (mip == 3u ? 24u
-                    : (mip == 4u ? 40u
-                    : (mip == 5u ? 48u : 64u)))));
+                    : (mip == 1u ? 32u
+                    : (mip == 2u ? 48u
+                    : (mip == 3u ? 64u
+                    : (mip == 4u ? 96u
+                    : (mip == 5u ? 128u : 128u)))));
 
                 for (UINT y = 0; y < size; ++y)
                 {
@@ -5642,6 +5657,7 @@ PS_OUT ps_main(VS_OUT i)
                         const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
                         const auto axis = ApeCubeDirection(face, u, v);
                         std::array<double, 3> sum = {0.0, 0.0, 0.0};
+                        double weightSum = 0.0;
 
                         if (sampleCount == 1u)
                         {
@@ -5658,13 +5674,17 @@ PS_OUT ps_main(VS_OUT i)
                                 const float xi0 = (static_cast<float>(sample) + 0.5f) /
                                                   static_cast<float>(sampleCount);
                                 const float xi1 = RadicalInverseVdC(sample);
-                                const auto d = ImportanceSampleCosinePower(axis, xi0, xi1, cosinePower);
+                                const auto d = ImportanceSampleGgxReflection(axis, xi0, xi1, probeRoughness);
+                                const float ndotl = std::max(0.0f, axis[0] * d[0] + axis[1] * d[1] + axis[2] * d[2]);
+                                if (ndotl <= 0.0f)
+                                    continue;
                                 const auto c = SampleLatLongHdr(rgba, w, h, d);
-                                sum[0] += c[0];
-                                sum[1] += c[1];
-                                sum[2] += c[2];
+                                sum[0] += static_cast<double>(c[0]) * ndotl;
+                                sum[1] += static_cast<double>(c[1]) * ndotl;
+                                sum[2] += static_cast<double>(c[2]) * ndotl;
+                                weightSum += ndotl;
                             }
-                            const double inv = 1.0 / static_cast<double>(sampleCount);
+                            const double inv = weightSum > 1.0e-12 ? (1.0 / weightSum) : 0.0;
                             sum[0] *= inv;
                             sum[1] *= inv;
                             sum[2] *= inv;

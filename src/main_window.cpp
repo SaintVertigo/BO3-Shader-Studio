@@ -21169,11 +21169,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
 
         // SSI uses the BO3 source coordinate frame. Screenshot calibration across
-        // all four stock APE presets gives a fixed +90 degree yaw remap into the
-        // Studio frame while the initial elevation remains 180 - SSI pitch. Manual
+        // the captured CoreSunConstants.wldDir confirms BO3 uses Z-up while Studio is Y-up;
+        // swapping the vertical axis preserves the horizontal SSI yaw exactly. No +90 degree
+        // sun-yaw offset is required. The initial elevation remains 180 - SSI pitch. Manual
         // APE rig rotation is not clamped to a latitude: it may cross either pole.
         const float elevation = 180.0f - p.ssiPitch;
-        const float studioYaw = std::fmod(p.ssiYaw + 90.0f, 360.0f);
+        const float studioYaw = std::fmod(p.ssiYaw, 360.0f);
         r.SetLightAngles(studioYaw, elevation);
         // SetLightAngles() intentionally couples manual APE edits to the HDR rig.
         // A preset is an absolute reference state, so restore its authored
@@ -21205,7 +21206,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | captured APE BRDF + probe LOD + sun shadow + filmic display")
+                QString(" | %1 | Phase 1q.1 captured sun-axis fix | GGX probe + APE BRDF + probe LOD + filmic display")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21221,7 +21222,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: SSI + local HDR environment loaded").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1q.1 captured sun direction + GGX probe active").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

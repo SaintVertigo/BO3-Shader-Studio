@@ -1,3 +1,16 @@
+# Phase 1q.1 - Captured Sun-Axis / Direct-Light Recovery
+
+- Removes the incorrect +90 degree SSI sun-yaw remap.
+- Uses captured APE sky motion: `skyYaw = 90 - sunYaw`.
+- Raises the reconstructed-receiver R16 shadow bias so the direct sun is not reduced to a thin self-shadow strip.
+- Retains Phase 1q's GGX-prefiltered cube probe.
+
+---
+
+# Phase 1q - APE reflection prefilter correction
+
+See `PATCH_NOTES_PHASE1Q.md`.
+
 # Phase 1p - Captured Normal/Gloss + Native Cube Probe Rewrite
 
 Phase 1p is a renderer correction built from the 3DMigoto APE captures rather than another visual calibration pass.
