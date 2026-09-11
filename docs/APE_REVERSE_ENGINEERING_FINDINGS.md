@@ -368,3 +368,20 @@ This is a behavior-level correction derived from the supplied APE recording and
 the recovered BO3 separation between sun constants and probe data. Exact pixel
 identity still requires the missing shipped ToolsGfx deferred-lighting BRDF,
 probe-convolution implementation/data, and presentation Tonemap LUT.
+
+## Phase 1o - 3DMigoto ground-truth capture
+
+The Day horizontal and vertical frame analyses finally exposed the live APE D3D11 resources/constants. The deferred shader is `2f9c1c21e9bef37c`; the material GBuffer shader is `c737cd1c444145cd`; the presentation shader is `275dce0f2b3a7c36`.
+
+Key findings:
+
+- `skyRotation` is a 2D yaw pair derived directly from sun XY azimuth. No vertical/pitch sky rotation exists.
+- The visible 8192x4096 Day HDR and the 256x256x6, 7-mip BC6H reflection probe are different resources.
+- The reflection probe bytes do not change between horizontal and vertical light captures, while the R16 sun-shadow resource does.
+- `gEnvBRDFGeneric` is a 64x64 `R8G8_UNORM` texture.
+- Gloss 13 is decoded through BO3's packed logarithmic GBuffer representation, then `cosinePower=exp2(17*gloss)` and `alpha^2=2/(cosinePower+2)`.
+- Reflection-probe LOD is exactly `5*(1-gloss)`.
+- APE performs real sun self-shadowing, with three 1024x1024 R16 shadow layers in the capture. The deferred path filters eight comparison taps and cubes their mean.
+- The default material viewport presentation uses the captured log/polynomial curve in `275dce0f2b3a7c36`; the LUT branch is inactive in the supplied Day capture.
+
+These observations supersede the earlier Phase 1k-1n visual guesses where they conflict.

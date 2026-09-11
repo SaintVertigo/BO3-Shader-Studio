@@ -231,6 +231,8 @@ public:
         if (!CreateSamplers(error)) return false;
         if (!CreateMaterialRasterizer(error)) return false;
         if (!CreateDefaultTextures(error)) return false;
+        if (!CreateApeEnvironmentBrdf(error)) return false;
+        if (!CreateApeShadowResources(error)) return false;
         if (!CreateGBufferTargets(error)) return false;
         if (!CreatePreviewMeshes(error)) return false;
         if (!CreateDefaultStudioEnvironment(error)) return false;
@@ -798,9 +800,11 @@ public:
                     std::max<UINT>(1u, static_cast<UINT>(std::lround(static_cast<float>(h) * scale))));
             }
 
+            const bool apeMatchEnvironment = materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch;
+            const bool generateVisibleEnvironmentMips = !apeMatchEnvironment;
             ComPtr<ID3D11ShaderResourceView> srv;
             std::wstring nativeUploadError;
-            if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, nativeUploadError, true))
+            if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, nativeUploadError, generateVisibleEnvironmentMips))
             {
                 // Keep the higher-quality path robust on low-VRAM/older adapters.
                 // APE's old 2K fallback remains a final safety net, but 4K is the
@@ -810,13 +814,13 @@ public:
                 if (uploadW > fallbackW || uploadH > fallbackH)
                     resampleEnvironment(fallbackW, fallbackH);
 
-                if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
+                if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, generateVisibleEnvironmentMips))
                 {
                     const UINT safeW = std::min<UINT>(2048u, w);
                     const UINT safeH = std::min<UINT>(1024u, h);
                     if (uploadW > safeW || uploadH > safeH)
                         resampleEnvironment(safeW, safeH);
-                    if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, true))
+                    if (!CreateHalfFloatTextureSRV(uploadPixels, uploadW, uploadH, srv, error, generateVisibleEnvironmentMips))
                     {
                         std::free(exrPixels);
                         return false;
@@ -824,7 +828,17 @@ public:
                 }
             }
             ComputeEnvironmentDiffuseSH(uploadPixels, uploadW, uploadH);
-            environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(uploadW, uploadH)))));
+            environmentMipCount_ = generateVisibleEnvironmentMips
+                ? 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(uploadW, uploadH)))))
+                : 1u;
+            if (apeMatchEnvironment)
+            {
+                if (!CreateApeReflectionProbeFromLatLong(uploadPixels, uploadW, uploadH, error))
+                {
+                    std::free(exrPixels);
+                    return false;
+                }
+            }
 
             if (totalWeight > 0.0)
             {
@@ -1098,10 +1112,16 @@ public:
             }
         }
 
+        const bool apeMatchEnvironment = materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch;
+        const bool generateVisibleEnvironmentMips = !apeMatchEnvironment;
         ComPtr<ID3D11ShaderResourceView> srv;
-        if (!CreateHalfFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error, true)) return false;
+        if (!CreateHalfFloatTextureSRV(equirect.data(), outputWidth, outputHeight, srv, error, generateVisibleEnvironmentMips)) return false;
         ComputeEnvironmentDiffuseSH(equirect.data(), outputWidth, outputHeight);
-        environmentMipCount_ = 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(outputWidth, outputHeight)))));
+        environmentMipCount_ = generateVisibleEnvironmentMips
+            ? 1u + static_cast<UINT>(std::floor(std::log2(static_cast<double>(std::max(outputWidth, outputHeight)))))
+            : 1u;
+        if (apeMatchEnvironment && !CreateApeReflectionProbeFromLatLong(equirect.data(), outputWidth, outputHeight, error))
+            return false;
         if (totalWeight > 0.0)
         {
             environmentAverageColor_ = {
@@ -2694,14 +2714,9 @@ public:
         // so repeated over/under drags never stick at +/-89 degrees.
         lightPitchDegrees_ = wrapSignedDegrees(lightPitchDegrees_ + pitchDeltaDegrees);
 
-        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
-        {
-            // APE's horizontal light drag also yaws the *visible* sky. Vertical
-            // drag does not pitch/roll the sky, and neither axis rotates the baked
-            // material reflection/diffuse probe. Keep those states decoupled.
-            environmentRotationDegrees_ = wrapUnsignedDegrees(
-                environmentRotationDegrees_ - yawDeltaDegrees);
-        }
+        // APE visible-sky yaw is derived from absolute sun azimuth in
+        // UpdateDeferredLightBuffer(). Do not accumulate a second manual sky
+        // transform here; vertical drag affects only sun pitch.
     }
 
     void SetBackgroundColor(float r, float g, float b)
@@ -2730,14 +2745,8 @@ public:
 
         const float nextYaw = wrapUnsignedDegrees(yawDeg);
         const float nextPitch = wrapSignedDegrees(pitchDeg);
-        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
-        {
-            // Match Shift+LMB: yaw turns the visible sky, pitch changes only the
-            // sun. The prefiltered/baked material probe remains at preset yaw.
-            const float yawDelta = wrapSignedDegrees(nextYaw - lightYawDegrees_);
-            environmentRotationDegrees_ = wrapUnsignedDegrees(
-                environmentRotationDegrees_ - yawDelta);
-        }
+        // APE skyRotation is reconstructed from absolute yaw at draw time. The
+        // baked glossy/diffuse probe remains at the preset orientation.
         lightYawDegrees_ = nextYaw;
         lightPitchDegrees_ = nextPitch;
     }
@@ -3503,7 +3512,7 @@ private:
     bool CreateDeferredLightBuffer(std::wstring& error)
     {
         D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = 288; // 18 float4s: core preview lighting + APE probe calibration + SH9 irradiance
+        desc.ByteWidth = 368; // 23 float4s: core lighting + APE probe/SH9 + captured sun-shadow transform
         desc.Usage = D3D11_USAGE_DYNAMIC;
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3531,6 +3540,11 @@ private:
             DirectX::XMFLOAT4 apeSettings;
             DirectX::XMFLOAT4 apeLightingCalibration;
             DirectX::XMFLOAT4 apeDiffuseSH[9];
+            DirectX::XMFLOAT4 apeShadowRow0;
+            DirectX::XMFLOAT4 apeShadowRow1;
+            DirectX::XMFLOAT4 apeShadowRow2;
+            DirectX::XMFLOAT4 apeShadowRow3;
+            DirectX::XMFLOAT4 apeShadowParams;
         } data{};
         const float ly = DirectX::XMConvertToRadians(lightYawDegrees_);
         const float lp = DirectX::XMConvertToRadians(lightPitchDegrees_);
@@ -3552,9 +3566,20 @@ private:
         data.backgroundColor = {backgroundColor_[0], backgroundColor_[1], backgroundColor_[2], 1.0f};
         data.lookdevSettings = {lookdevExposureEV_, static_cast<float>(toneMapMode_), groundEnabled_ ? 1.0f : 0.0f, contactShadowStrength_};
         data.debugSettings = {static_cast<float>(gbufferView_), static_cast<float>(materialPreviewProfile_), 0.0f, 0.0f};
+        float visibleSkyYawDegrees = environmentRotationDegrees_;
+        if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
+        {
+            // Captured APE skyRotation is exactly derived from horizontal sun
+            // azimuth: sky angle = 180 degrees - Studio light yaw. Pitch never
+            // participates, while the baked reflection probe keeps preset yaw.
+            visibleSkyYawDegrees = std::fmod(180.0f - lightYawDegrees_, 360.0f);
+            if (visibleSkyYawDegrees < 0.0f) visibleSkyYawDegrees += 360.0f;
+        }
         data.apeSettings = {
-            environmentRotationDegrees_ * (3.14159265358979323846f / 180.0f),
-            static_cast<float>(environmentMipCount_ > 0 ? environmentMipCount_ - 1u : 0u),
+            visibleSkyYawDegrees * (3.14159265358979323846f / 180.0f),
+            static_cast<float>(materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch
+                ? (reflectionProbeMipCount_ > 0 ? reflectionProbeMipCount_ - 1u : 0u)
+                : (environmentMipCount_ > 0 ? environmentMipCount_ - 1u : 0u)),
             environmentDiffuseSHValid_ ? 1.0f : 0.0f,
             apeProbeRotationDegrees_ * (3.14159265358979323846f / 180.0f)
         };
@@ -3567,6 +3592,12 @@ private:
                 environmentDiffuseSH_[i][0], environmentDiffuseSH_[i][1], environmentDiffuseSH_[i][2], 0.0f
             };
         }
+        data.apeShadowRow0 = {apeShadowWorldViewProj_._11, apeShadowWorldViewProj_._12, apeShadowWorldViewProj_._13, apeShadowWorldViewProj_._14};
+        data.apeShadowRow1 = {apeShadowWorldViewProj_._21, apeShadowWorldViewProj_._22, apeShadowWorldViewProj_._23, apeShadowWorldViewProj_._24};
+        data.apeShadowRow2 = {apeShadowWorldViewProj_._31, apeShadowWorldViewProj_._32, apeShadowWorldViewProj_._33, apeShadowWorldViewProj_._34};
+        data.apeShadowRow3 = {apeShadowWorldViewProj_._41, apeShadowWorldViewProj_._42, apeShadowWorldViewProj_._43, apeShadowWorldViewProj_._44};
+        data.apeShadowParams = {1.0f / 1024.0f, 1.0f / 65535.0f,
+                                (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch && apeShadowSRV_.Get() != nullptr) ? 1.0f : 0.0f, 0.0f};
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(context_->Map(deferredLightBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
@@ -4289,6 +4320,12 @@ private:
         lastViewportWidth_ = static_cast<UINT>(std::max(1.0f, vp.Width));
         lastViewportHeight_ = static_cast<UINT>(std::max(1.0f, vp.Height));
 
+        // APE renders the preview mesh into its sun-shadow atlas before the
+        // material GBuffer/deferred lighting pass. Reproduce that ordering so
+        // the characteristic moving dark self-shadow patch is generated by the
+        // same kind of comparison lookup instead of a fake NdotL term.
+        RenderApeShadowMap();
+
         ID3D11RenderTargetView* mrt[4] = { gbufferRTVs_[0].Get(), gbufferRTVs_[1].Get(), gbufferRTVs_[2].Get(), gbufferRTVs_[3].Get() };
         context_->OMSetRenderTargets(4, mrt, materialDepthDSV_.Get());
         SetupMaterialGeometryPass(vp);
@@ -4308,21 +4345,24 @@ private:
         context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context_->VSSetShader(blitVertexShader_.Get(), nullptr, 0);
         context_->PSSetShader(deferredLightPixelShader_.Get(), nullptr, 0);
-        ID3D11SamplerState* composeSamplers[2] = { sampler_.Get(), environmentSampler_.Get() };
-        context_->PSSetSamplers(0, 2, composeSamplers);
+        ID3D11SamplerState* composeSamplers[3] = { sampler_.Get(), environmentSampler_.Get(), apeShadowSampler_.Get() };
+        context_->PSSetSamplers(0, 3, composeSamplers);
         UpdateDeferredLightBuffer();
         UpdateEnvironmentCameraBuffer(vp);
         ID3D11Buffer* deferredCB = deferredLightBuffer_.Get();
         context_->PSSetConstantBuffers(13, 1, &deferredCB);
-        ID3D11ShaderResourceView* composeSrvs[7] = {
+        ID3D11ShaderResourceView* composeSrvs[10] = {
             gbufferSRVs_[0].Get(), gbufferSRVs_[1].Get(), gbufferSRVs_[2].Get(), gbufferSRVs_[3].Get(), materialDepthSRV_.Get(),
             environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get(),
-            materialTextureSRVs_[0].Get() ? materialTextureSRVs_[0].Get() : neutralSRV_.Get()
+            materialTextureSRVs_[0].Get() ? materialTextureSRVs_[0].Get() : neutralSRV_.Get(),
+            reflectionProbeSRV_.Get() ? reflectionProbeSRV_.Get() : (environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get()),
+            apeEnvBrdfSRV_.Get() ? apeEnvBrdfSRV_.Get() : neutralSRV_.Get(),
+            apeShadowSRV_.Get() ? apeShadowSRV_.Get() : neutralSRV_.Get()
         };
-        context_->PSSetShaderResources(0, 7, composeSrvs);
+        context_->PSSetShaderResources(0, 10, composeSrvs);
         context_->Draw(3, 0);
-        ID3D11ShaderResourceView* nullCompose[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-        context_->PSSetShaderResources(0, 7, nullCompose);
+        ID3D11ShaderResourceView* nullCompose[10] = {};
+        context_->PSSetShaderResources(0, 10, nullCompose);
     }
 
     bool CreateBuiltInVertexShaders(std::wstring& error)
@@ -4593,6 +4633,39 @@ VS_OUT vs_main(VS_IN input)
     output.viewDirWorld = normalize(previewCameraPos.xyz - worldPosition.xyz);
     output.instance = 0;
     return output;
+}
+)";
+
+        static const char* apeShadowVsSource = R"(
+cbuffer PreviewApeShadowMatrix : register(b14)
+{
+    float4x4 shadowWorldViewProj;
+};
+struct VS_IN
+{
+    float3 position : POSITION;
+};
+struct VS_OUT
+{
+    float4 position : SV_Position;
+};
+VS_OUT vs_main(VS_IN i)
+{
+    VS_OUT o;
+    o.position = mul(float4(i.position, 1.0), shadowWorldViewProj);
+    return o;
+}
+)";
+
+        static const char* apeShadowPsSource = R"(
+struct VS_OUT
+{
+    float4 position : SV_Position;
+};
+float ps_main(VS_OUT i) : SV_Target0
+{
+    // Captured APE shadow pass stores hardware post-projection depth in R16.
+    return saturate(i.position.z);
 }
 )";
 
@@ -4963,6 +5036,9 @@ PS_OUT ps_main(VS_OUT i)
         if (!createVS(materialSource, "preview_material_vs", materialVertexShader_, &materialVsCode)) return false;
         if (!createVS(directionalMaterialSource, "preview_directional_material_vs", directionalMaterialVertexShader_)) return false;
         if (!createVS(adaptedMaterialSource, "preview_adapted_material_vs", adaptedMaterialVertexShader_)) return false;
+        ComPtr<ID3DBlob> apeShadowVsCode;
+        if (!createVS(apeShadowVsSource, "preview_ape_shadow_vs", apeShadowVertexShader_, &apeShadowVsCode)) return false;
+        if (!createPS(apeShadowPsSource, "preview_ape_shadow_ps", apeShadowPixelShader_)) return false;
         if (!createVS(postFxSource, "preview_blit_vs", blitVertexShader_)) return false;
         if (!createPS(blitPsSource, "preview_blit_ps", blitPixelShader_)) return false;
         if (!createPS(runtimeSceneEncodePsSource, "preview_bo3_runtime_scene_encode_ps", runtimeSceneEncodePixelShader_)) return false;
@@ -4993,6 +5069,18 @@ PS_OUT ps_main(VS_OUT i)
         if (FAILED(hr))
         {
             error = L"CreateInputLayout failed for the material preview vertex format.";
+            return false;
+        }
+
+        const D3D11_INPUT_ELEMENT_DESC shadowLayout[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, static_cast<UINT>(offsetof(MaterialVertex, position)), D3D11_INPUT_PER_VERTEX_DATA, 0}
+        };
+        hr = device_->CreateInputLayout(shadowLayout, ARRAYSIZE(shadowLayout),
+                                        apeShadowVsCode->GetBufferPointer(), apeShadowVsCode->GetBufferSize(),
+                                        apeShadowInputLayout_.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateInputLayout failed for the APE sun-shadow pass.";
             return false;
         }
         return true;
@@ -5385,6 +5473,256 @@ PS_OUT ps_main(VS_OUT i)
         }
         if (generateMips) context_->GenerateMips(out.Get());
         return true;
+    }
+
+    bool CreateApeReflectionProbeFromLatLong(const float* rgba, UINT w, UINT h, std::wstring& error)
+    {
+        if (!rgba || w == 0 || h == 0)
+        {
+            error = L"Invalid APE reflection-probe source.";
+            return false;
+        }
+
+        // APE's captured glossy probe is a 256x256 cube with seven mips. 3DMigoto
+        // exposed only one cube face from the shipped probe, so retain the exact
+        // angular base resolution/7-level LOD contract while reconstructing a
+        // seam-safe 1024x512 lat-long probe from the same HDR environment.
+        constexpr UINT probeW = 1024;
+        constexpr UINT probeH = 512;
+        constexpr UINT probeMipLevels = 7;
+        std::vector<float> reduced(static_cast<size_t>(probeW) * probeH * 4u);
+        for (UINT y = 0; y < probeH; ++y)
+        {
+            const float sy = ((static_cast<float>(y) + 0.5f) * static_cast<float>(h) /
+                              static_cast<float>(probeH)) - 0.5f;
+            const int y0i = std::clamp(static_cast<int>(std::floor(sy)), 0, static_cast<int>(h) - 1);
+            const int y1i = std::min(static_cast<int>(h) - 1, y0i + 1);
+            const float ty = std::clamp(sy - static_cast<float>(y0i), 0.0f, 1.0f);
+            for (UINT x = 0; x < probeW; ++x)
+            {
+                // Horizontal wrapping is essential for a prefiltered lat-long probe.
+                const float sx = ((static_cast<float>(x) + 0.5f) * static_cast<float>(w) /
+                                  static_cast<float>(probeW)) - 0.5f;
+                int x0i = static_cast<int>(std::floor(sx));
+                const float tx = sx - std::floor(sx);
+                x0i %= static_cast<int>(w);
+                if (x0i < 0) x0i += static_cast<int>(w);
+                const int x1i = (x0i + 1) % static_cast<int>(w);
+                const size_t dst = (static_cast<size_t>(y) * probeW + x) * 4u;
+                const size_t i00 = (static_cast<size_t>(y0i) * w + static_cast<UINT>(x0i)) * 4u;
+                const size_t i10 = (static_cast<size_t>(y0i) * w + static_cast<UINT>(x1i)) * 4u;
+                const size_t i01 = (static_cast<size_t>(y1i) * w + static_cast<UINT>(x0i)) * 4u;
+                const size_t i11 = (static_cast<size_t>(y1i) * w + static_cast<UINT>(x1i)) * 4u;
+                for (int c = 0; c < 4; ++c)
+                {
+                    const float top = rgba[i00 + c] + (rgba[i10 + c] - rgba[i00 + c]) * tx;
+                    const float bottom = rgba[i01 + c] + (rgba[i11 + c] - rgba[i01 + c]) * tx;
+                    reduced[dst + c] = top + (bottom - top) * ty;
+                }
+            }
+        }
+
+        const size_t componentCount = reduced.size();
+        std::vector<uint16_t> half(componentCount);
+        for (size_t i = 0; i < componentCount; ++i)
+            half[i] = FloatToHalfBits(reduced[i]);
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = probeW;
+        td.Height = probeH;
+        td.MipLevels = probeMipLevels;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+
+        ComPtr<ID3D11Texture2D> tex;
+        HRESULT hr = device_->CreateTexture2D(&td, nullptr, tex.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateTexture2D failed for the APE reflection-probe approximation.";
+            return false;
+        }
+        context_->UpdateSubresource(tex.Get(), 0, nullptr, half.data(), probeW * sizeof(uint16_t) * 4u, 0);
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = td.Format;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MostDetailedMip = 0;
+        sd.Texture2D.MipLevels = probeMipLevels;
+        hr = device_->CreateShaderResourceView(tex.Get(), &sd, reflectionProbeSRV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateShaderResourceView failed for the APE reflection-probe approximation.";
+            return false;
+        }
+        context_->GenerateMips(reflectionProbeSRV_.Get());
+        reflectionProbeMipCount_ = probeMipLevels;
+        return true;
+    }
+
+    bool CreateApeEnvironmentBrdf(std::wstring& error)
+    {
+        QFile resource(QStringLiteral(":/preview/ape_env_brdf_rg8.bin"));
+        if (!resource.open(QIODevice::ReadOnly))
+        {
+            error = L"Captured APE gEnvBRDFGeneric resource is missing.";
+            return false;
+        }
+        const QByteArray bytes = resource.readAll();
+        if (bytes.size() != 64 * 64 * 2)
+        {
+            error = L"Captured APE gEnvBRDFGeneric resource has an invalid size.";
+            return false;
+        }
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = 64;
+        td.Height = 64;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init{};
+        init.pSysMem = bytes.constData();
+        init.SysMemPitch = 64 * 2;
+        ComPtr<ID3D11Texture2D> tex;
+        HRESULT hr = device_->CreateTexture2D(&td, &init, tex.GetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateTexture2D failed for captured APE gEnvBRDFGeneric.";
+            return false;
+        }
+        hr = device_->CreateShaderResourceView(tex.Get(), nullptr, apeEnvBrdfSRV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr))
+        {
+            error = L"CreateShaderResourceView failed for captured APE gEnvBRDFGeneric.";
+            return false;
+        }
+        return true;
+    }
+
+    bool CreateApeShadowResources(std::wstring& error)
+    {
+        constexpr UINT shadowSize = 1024;
+        D3D11_TEXTURE2D_DESC colorDesc{};
+        colorDesc.Width = shadowSize;
+        colorDesc.Height = shadowSize;
+        colorDesc.MipLevels = 1;
+        colorDesc.ArraySize = 1;
+        colorDesc.Format = DXGI_FORMAT_R16_UNORM;
+        colorDesc.SampleDesc.Count = 1;
+        colorDesc.Usage = D3D11_USAGE_DEFAULT;
+        colorDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = device_->CreateTexture2D(&colorDesc, nullptr, apeShadowTexture_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateTexture2D failed for APE sun-shadow R16 target."; return false; }
+        hr = device_->CreateRenderTargetView(apeShadowTexture_.Get(), nullptr, apeShadowRTV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateRenderTargetView failed for APE sun-shadow target."; return false; }
+        hr = device_->CreateShaderResourceView(apeShadowTexture_.Get(), nullptr, apeShadowSRV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateShaderResourceView failed for APE sun-shadow target."; return false; }
+
+        D3D11_TEXTURE2D_DESC depthDesc{};
+        depthDesc.Width = shadowSize;
+        depthDesc.Height = shadowSize;
+        depthDesc.MipLevels = 1;
+        depthDesc.ArraySize = 1;
+        depthDesc.Format = DXGI_FORMAT_D16_UNORM;
+        depthDesc.SampleDesc.Count = 1;
+        depthDesc.Usage = D3D11_USAGE_DEFAULT;
+        depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        ComPtr<ID3D11Texture2D> depthTexture;
+        hr = device_->CreateTexture2D(&depthDesc, nullptr, depthTexture.GetAddressOf());
+        if (FAILED(hr)) { error = L"CreateTexture2D failed for APE sun-shadow depth target."; return false; }
+        hr = device_->CreateDepthStencilView(depthTexture.Get(), nullptr, apeShadowDSV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateDepthStencilView failed for APE sun-shadow depth target."; return false; }
+
+        D3D11_BUFFER_DESC cbd{};
+        cbd.ByteWidth = 64;
+        cbd.Usage = D3D11_USAGE_DYNAMIC;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        hr = device_->CreateBuffer(&cbd, nullptr, apeShadowMatrixBuffer_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateBuffer failed for APE sun-shadow matrix."; return false; }
+
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+        sd.MinLOD = 0.0f;
+        sd.MaxLOD = 0.0f;
+        hr = device_->CreateSamplerState(&sd, apeShadowSampler_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateSamplerState failed for APE sun-shadow comparison sampler."; return false; }
+        return true;
+    }
+
+    void RenderApeShadowMap()
+    {
+        if (materialPreviewProfile_ != MaterialPreviewProfile::ApeMatch ||
+            !apeShadowVertexShader_ || !apeShadowPixelShader_ || !apeShadowInputLayout_ ||
+            !apeShadowRTV_ || !apeShadowDSV_ || !apeShadowMatrixBuffer_)
+            return;
+        const PreviewMeshBuffers* mesh = CurrentPreviewMesh();
+        if (!mesh || !mesh->vb || !mesh->ib || mesh->indexCount == 0) return;
+
+        using namespace DirectX;
+        const float ly = XMConvertToRadians(lightYawDegrees_);
+        const float lp = XMConvertToRadians(lightPitchDegrees_);
+        XMVECTOR lightDir = XMVector3Normalize(XMVectorSet(
+            std::cos(lp) * std::cos(ly), std::sin(lp), std::cos(lp) * std::sin(ly), 0.0f));
+        XMVECTOR target = XMVectorZero();
+        XMVECTOR eye = XMVectorScale(lightDir, 20.0f);
+        XMVECTOR worldUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        if (std::abs(XMVectorGetX(XMVector3Dot(lightDir, worldUp))) > 0.985f)
+            worldUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+        const XMMATRIX view = XMMatrixLookAtLH(eye, target, worldUp);
+        // From the captured 1024 R16 map, APE's sphere occupies ~190 texels,
+        // which corresponds to about 10.8 sphere diameters across the ortho view.
+        constexpr float orthoWidth = 10.8f;
+        constexpr float orthoHeight = 10.8f;
+        const XMMATRIX proj = XMMatrixOrthographicLH(orthoWidth, orthoHeight, 0.1f, 40.0f);
+        XMMATRIX world = XMMatrixIdentity();
+        if (previewMesh_ == PreviewMesh::Plane || previewMesh_ == PreviewMesh::Card)
+            world = XMMatrixScaling(1.8f, 1.8f, 1.8f);
+        const XMMATRIX wvp = world * view * proj;
+        XMStoreFloat4x4(&apeShadowWorldViewProj_, XMMatrixTranspose(wvp));
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(context_->Map(apeShadowMatrixBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        {
+            std::memcpy(mapped.pData, &apeShadowWorldViewProj_, sizeof(apeShadowWorldViewProj_));
+            context_->Unmap(apeShadowMatrixBuffer_.Get(), 0);
+        }
+
+        const float clear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        context_->ClearRenderTargetView(apeShadowRTV_.Get(), clear);
+        context_->ClearDepthStencilView(apeShadowDSV_.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        ID3D11RenderTargetView* rtv = apeShadowRTV_.Get();
+        context_->OMSetRenderTargets(1, &rtv, apeShadowDSV_.Get());
+        D3D11_VIEWPORT vp{};
+        vp.Width = 1024.0f;
+        vp.Height = 1024.0f;
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        context_->RSSetViewports(1, &vp);
+        context_->RSSetState(materialRasterizerState_.Get());
+        context_->IASetInputLayout(apeShadowInputLayout_.Get());
+        UINT stride = sizeof(MaterialVertex), offset = 0;
+        ID3D11Buffer* vb = mesh->vb.Get();
+        context_->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+        context_->IASetIndexBuffer(mesh->ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->VSSetShader(apeShadowVertexShader_.Get(), nullptr, 0);
+        ID3D11Buffer* cb = apeShadowMatrixBuffer_.Get();
+        context_->VSSetConstantBuffers(14, 1, &cb);
+        context_->PSSetShader(apeShadowPixelShader_.Get(), nullptr, 0);
+        context_->DrawIndexed(mesh->indexCount, 0, 0);
+        context_->OMSetRenderTargets(0, nullptr, nullptr);
     }
 
     bool CreateFloatTextureSRV(const float* rgba, UINT w, UINT h,
@@ -6332,6 +6670,7 @@ PS_OUT ps_main(VS_OUT i)
     std::array<std::array<float, 3>, 9> environmentDiffuseSH_{};
     bool environmentDiffuseSHValid_ = false;
     UINT environmentMipCount_ = 1;
+    UINT reflectionProbeMipCount_ = 1;
     float apeDiffuseProbeScale_ = 1.0f;
     float apeSpecularProbeScale_ = 1.0f;
     float apeSunIrradianceScale_ = 1.0f;
@@ -6391,13 +6730,17 @@ PS_OUT ps_main(VS_OUT i)
     ComPtr<ID3D11VertexShader> materialVertexShader_;
     ComPtr<ID3D11VertexShader> directionalMaterialVertexShader_;
     ComPtr<ID3D11VertexShader> adaptedMaterialVertexShader_;
+    ComPtr<ID3D11VertexShader> apeShadowVertexShader_;
     ComPtr<ID3D11VertexShader> userVertexShader_;
     ComPtr<ID3D11VertexShader> blitVertexShader_;
     ComPtr<ID3D11InputLayout> materialInputLayout_;
+    ComPtr<ID3D11InputLayout> apeShadowInputLayout_;
     ComPtr<ID3D11InputLayout> userMaterialInputLayout_;
     ComPtr<ID3D11Buffer> cameraVSBuffer_;
     ComPtr<ID3D11Buffer> materialCameraBuffer_;
     ComPtr<ID3D11Buffer> deferredLightBuffer_;
+    ComPtr<ID3D11Buffer> apeShadowMatrixBuffer_;
+    DirectX::XMFLOAT4X4 apeShadowWorldViewProj_{};
     ComPtr<ID3D11PixelShader> pixelShader_;
     ComPtr<ID3D11PixelShader> temporalExposureStatePS_;
     bool temporalExposureMode_ = false;
@@ -6413,10 +6756,12 @@ PS_OUT ps_main(VS_OUT i)
     ComPtr<ID3D11PixelShader> blitDepthPixelShader_;
     ComPtr<ID3D11PixelShader> environmentPixelShader_;
     ComPtr<ID3D11PixelShader> deferredLightPixelShader_;
+    ComPtr<ID3D11PixelShader> apeShadowPixelShader_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11SamplerState> environmentSampler_;
     ComPtr<ID3D11SamplerState> materialWrapSampler_;
     ComPtr<ID3D11SamplerState> materialColorSampler_;
+    ComPtr<ID3D11SamplerState> apeShadowSampler_;
     ComPtr<ID3D11RasterizerState> materialRasterizerState_;
     ComPtr<ID3D11RasterizerState> materialWireframeRasterizerState_;
     ComPtr<ID3D11RasterizerState> comparisonScissorRasterizer_;
@@ -6428,6 +6773,12 @@ PS_OUT ps_main(VS_OUT i)
     bool capturedBO3DepthScene_ = false;
     float previewZNear_ = 0.1f;
     ComPtr<ID3D11ShaderResourceView> environmentSRV_;
+    ComPtr<ID3D11ShaderResourceView> reflectionProbeSRV_;
+    ComPtr<ID3D11ShaderResourceView> apeEnvBrdfSRV_;
+    ComPtr<ID3D11Texture2D> apeShadowTexture_;
+    ComPtr<ID3D11RenderTargetView> apeShadowRTV_;
+    ComPtr<ID3D11DepthStencilView> apeShadowDSV_;
+    ComPtr<ID3D11ShaderResourceView> apeShadowSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralNormalSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralBlackSRV_;
