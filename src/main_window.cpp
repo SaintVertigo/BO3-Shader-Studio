@@ -21213,7 +21213,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1r captured light energy + depth shadow | GGX probe + APE BRDF + filmic display")
+                QString(" | %1 | Phase 1s captured direct sun | GGX probe + APE BRDF + filmic display | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21229,7 +21229,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1r captured light energy + hardware depth shadow active").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1s captured direct sun active; guessed shadow disabled until t40 shadow-tree port").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

@@ -260,3 +260,6 @@ See:
 ## Status
 
 BO3 Shader Studio is still under active development. Some shader combinations, BO3 mappings, or experimental features may require testing before they are considered fully validated in-game.
+
+## Phase 1s APE direct-sun recovery
+APE Match now uses the direct diffuse relationship measured from the paired APE captures (`linearAlbedo * exposedSunColor * NdotL`) and keeps the guessed sun-shadow map disabled until APE's `gSunShadowTree` selection data can be reconstructed. Run `VERIFY_PHASE1S.ps1` after applying the patch.

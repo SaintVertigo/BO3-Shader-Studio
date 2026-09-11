@@ -564,15 +564,33 @@ float4 ps_main(VS_OUT i) : SV_Target0
             ambient = max(ambient, envDiffuse);
         }
     }
-    float3 diffuse = albedo * (1.0 - F) * (NdotL / 3.14159265);
+    float3 diffuse = 0.0;
     float shadowTerm = 1.0;
     if (materialProfile == 0)
     {
-        float3 worldPosition = ReconstructPreviewWorldPosition(uv, depth, viewRay);
-        shadowTerm = lerp(1.0, SampleApeSunShadow(worldPosition, N, NdotL), previewAmbientShadow.y);
+        // Phase 1s: this term is capture-derived rather than a conventional
+        // Lambert rewrite. Comparing the horizontal and vertical APE captures
+        // at pixels where one capture has N.L == 0 gives:
+        //
+        //   litHorizontal - unlitVertical
+        //     ~= linearAlbedo * (sunColor * invExposure) * N.L
+        //
+        // to within only a few percent across the sphere. There is NO / PI
+        // here and no (1-F) multiplier on APE's diffuse sun accumulator. The
+        // old Studio equation was therefore roughly 3.2x too weak before any
+        // shadowing was even applied. Keep the direct specular term separate.
+        diffuse = albedo * NdotL;
+
+        // We captured APE's three-layer gSunShadowmapArray, but not the
+        // gSunShadowTree structured buffer (t40) that selects/maps those layers.
+        // The single guessed Studio shadow camera was able to erase the entire
+        // direct hemisphere. Until t40 is reconstructed, an unshadowed captured
+        // direct-sun baseline is more faithful than a fabricated all-dark result.
+        shadowTerm = 1.0;
     }
     else
     {
+        diffuse = albedo * (1.0 - F) * (NdotL / 3.14159265);
         shadowTerm = lerp(1.0, smoothstep(0.0, 0.35, NdotL), previewAmbientShadow.y);
     }
     float sunScale = materialProfile == 0 ? previewApeLightingCalibration.z : 1.0;
