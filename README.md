@@ -263,3 +263,7 @@ BO3 Shader Studio is still under active development. Some shader combinations, B
 
 ## Phase 1s APE direct-sun recovery
 APE Match now uses the direct diffuse relationship measured from the paired APE captures (`linearAlbedo * exposedSunColor * NdotL`) and keeps the guessed sun-shadow map disabled until APE's `gSunShadowTree` selection data can be reconstructed. Run `VERIFY_PHASE1S.ps1` after applying the patch.
+
+## Phase 1t APE direct-specular recovery
+
+Phase 1t follows the user's Phase 1s comparison video with a literal translation of the captured APE direct-sun specular branch. The APE Match compositor now uses BO3's captured no-PI microfacet normalization, the captured `sqrt(alpha)` visibility mapping, and the adjacent rough-diffuse correction. The Phase 1s direct-sun energy/probe separation remains unchanged, and the incomplete shadow-tree replacement remains disabled until the real three-layer selection path is reconstructed.

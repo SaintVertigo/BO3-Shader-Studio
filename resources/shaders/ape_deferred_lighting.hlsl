@@ -508,19 +508,41 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 specular = 0.0;
     if (materialProfile == 0)
     {
-        // Capture-grounded BO3 mapping: cosinePower = 2^(17*gloss), then
-        // alpha^2 = 2/(cosinePower+2). APE feeds that microfacet width into
-        // its deferred BRDF instead of evaluating a raw Blinn pow() lobe.
+        // Phase 1t: literal direct-sun specular translation from captured
+        // ToolsGfx/deferred_lighting.hlsl (2f9c1c21e9bef37c), instructions
+        // around the CoreSunConstants.specScale branch.
+        //
+        // The older Studio rewrite used a textbook GGX D term with /PI and a
+        // Schlick-GGX k derived from alpha itself. The capture does neither:
+        //   alpha2 = 2 / (2^(17*gloss) + 2)
+        //   alpha  = sqrt(alpha2)
+        //   k      = (sqrt(alpha) + 1)^2 / 8
+        //   D      = alpha2 / (1 + N.H^2*(alpha2-1))^2   // NO /PI
+        // and the visibility denominator is evaluated directly as
+        // (N.V*(1-k)+k) * (N.L*(1-k)+k).
+        // CoreSunConstants.specScale is 1.0 in the captured Day viewport.
+        const float apeSunSpecScale = 1.0;
         float alpha = roughness;
-        float a2 = max(alpha * alpha, 1e-8);
-        float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-        float D = a2 / max(3.14159265 * denom * denom, 1e-8);
-        float k = (alpha + 1.0);
-        k = (k * k) * 0.125;
-        float Gv = NdotV / max(NdotV * (1.0 - k) + k, 1e-6);
-        float Gl = NdotL / max(NdotL * (1.0 - k) + k, 1e-6);
-        float3 brdfSpec = (D * Gv * Gl * F) / max(4.0 * NdotV * NdotL, 1e-6);
-        specular = brdfSpec * NdotL;
+        float alpha2 = max(alpha * alpha, 1e-10);
+        float sqrtAlpha = sqrt(max(alpha, 0.0));
+        float visibilityK = (sqrtAlpha * 0.5 + 0.5);
+        visibilityK = visibilityK * visibilityK * 0.5;
+        float oneMinusK = 1.0 - visibilityK;
+        float visV = NdotV * oneMinusK + visibilityK;
+        float visL = NdotL * oneMinusK + visibilityK;
+        float rawNdotH = validHalfVector ? dot(N, H) : 0.0;
+        float dDenom = 1.0 + abs(rawNdotH) * abs(rawNdotH) * (alpha2 - 1.0);
+        float specNoFresnel = 0.0;
+        if (validHalfVector && NdotL > 0.0)
+        {
+            specNoFresnel = (alpha2 * NdotL * apeSunSpecScale) /
+                max(4.0 * visV * visL * dDenom * dDenom, 1e-10);
+        }
+        // The shader stores the base and grazing branches separately and later
+        // recombines them as F0*base + (1-F0)*(1-V.H)^5. This Schlick form is
+        // algebraically identical, so keep it explicit here while preserving
+        // the captured lobe/visibility normalization above.
+        specular = specNoFresnel * F;
     }
     else
     {
@@ -579,7 +601,17 @@ float4 ps_main(VS_OUT i) : SV_Target0
         // here and no (1-F) multiplier on APE's diffuse sun accumulator. The
         // old Studio equation was therefore roughly 3.2x too weak before any
         // shadowing was even applied. Keep the direct specular term separate.
-        diffuse = albedo * NdotL;
+        // Phase 1t also ports the small rough-diffuse correction immediately
+        // preceding the captured direct-specular block. For Gloss 13 alpha is
+        // only ~0.0156, so Phase 1s's plain N.L was already close; retaining the
+        // exact term improves the terminator without changing the recovered
+        // direct-sun energy domain.
+        float diffuseViewTerm = 1.0 - 0.5 * NdotV;
+        float diffuseRetro = 1.0 - NdotL * diffuseViewTerm;
+        diffuseRetro *= diffuseRetro;
+        diffuseRetro = 0.62 * (1.0 - diffuseRetro) - NdotL;
+        float apeDiffuseLobe = max(NdotL + roughness * diffuseRetro, 0.0);
+        diffuse = albedo * apeDiffuseLobe;
 
         // We captured APE's three-layer gSunShadowmapArray, but not the
         // gSunShadowTree structured buffer (t40) that selects/maps those layers.
