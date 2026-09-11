@@ -389,22 +389,46 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float3 R = reflect(-V, N);
         if (materialProfile == 0)
         {
-            // APE feeds deferred specular from filtered reflection probes. Use
-            // the HDR mip pyramid as the probe prefilter approximation. Gloss
-            // controls LOD; a separate low-energy probe scale prevents the raw
-            // sky from turning stock dielectric materials into chrome.
+            // APE does not use the visible HDR background as a literal mirror.
+            // The supplied APE capture is decisive here: stock Geometry/lit with
+            // gloss 13 keeps a tiny, sharp *direct-sun* highlight, while the
+            // reflection-probe contribution remains broad and low contrast.
+            //
+            // Keep direct gloss and probe blur as two different pieces of state.
+            // A modern roughness->mip conversion coupled them too tightly and
+            // made core_script_wall_c reflect recognizable clouds/terrain.
             float maxLod = max(0.0, previewApeSettings.y);
-            // ToolsGfx uses a prefiltered reflection-probe hierarchy.  A plain
-            // linear roughness->mip mapping preserved recognizable cloud/terrain
-            // detail across the stock wall sphere.  Bias toward the filtered
-            // probe mips while keeping very glossy materials capable of a tight
-            // reflection.
-            float lodFraction = saturate(sqrt(roughness));
+            float dielectricWeight = 1.0 - saturate((reflectance - 0.04) * 5.0);
+
+            // Stock dielectric materials are forced into the middle/high probe
+            // mips even when their authored direct-light gloss is high. Explicit
+            // high-reflectance/metal-like materials are allowed to retain the
+            // sharper roughness-driven lookup.
+            float physicalLodFraction = saturate(sqrt(roughness));
+            float apeDielectricLodFraction = saturate(0.52 + (1.0 - gloss) * 0.18);
+            float lodFraction = lerp(physicalLodFraction,
+                                     max(physicalLodFraction, apeDielectricLodFraction),
+                                     dielectricWeight);
             float lod = lodFraction * maxLod;
-            float3 env = EnvironmentDirectionLod(R, lod);
+            float3 env = max(EnvironmentDirectionLod(R, lod), 0.0);
+
+            // APE's reflection probes are processed local probes, not the raw
+            // lat-long HDR. Suppress residual HDR sun spikes and normalize the
+            // stock dielectric probe toward the recovered average cube color.
+            // This preserves the broad horizon tint visible in APE without
+            // painting a photographic sky across the sphere.
+            float probeLuminance = dot(env, float3(0.2126, 0.7152, 0.0722));
+            float compression = rcp(1.0 + max(probeLuminance, 0.0) * 0.30);
+            float3 compressedEnv = env * compression;
+            float3 probeAverage = max(previewEnvironmentAmbient.rgb, 0.0);
+            float3 processedEnv = lerp(compressedEnv,
+                                       lerp(probeAverage, compressedEnv, 0.32),
+                                       dielectricWeight);
+
             float3 fresnelEnv = specColor + (1.0 - specColor) * pow(1.0 - NdotV, 5.0);
-            envSpec = env * fresnelEnv * previewApeLightingCalibration.y *
-                      previewApeLightingCalibration.w * ao;
+            float stockDielectricEnergy = lerp(1.0, 0.38, dielectricWeight);
+            envSpec = processedEnv * fresnelEnv * previewApeLightingCalibration.y *
+                      previewApeLightingCalibration.w * stockDielectricEnergy * ao;
         }
         else
         {

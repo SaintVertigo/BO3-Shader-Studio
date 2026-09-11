@@ -224,3 +224,31 @@ the final APE desktop sRGB transfer that the deferred APE compositor already
 applied.  Phase 1j forces base-mip presentation and applies the same display
 transfer, so switching material preview paths no longer changes sky sharpness or
 contrast for the same preset.
+
+
+## Phase 1k — decouple direct gloss from reflection-probe sharpness
+
+The post-Phase-1j APE/Studio recording provided a stronger visual invariant than
+the earlier still captures. Rotating the light in APE moves a very small, bright
+direct specular highlight across `t7_script_wall`, but the environment response
+never becomes a readable mirror of the sky. Shader Studio still showed clouds and
+terrain sharply across most of the sphere.
+
+That proves the remaining mismatch is not the BO3 gloss pack/decode. The same
+authored gloss participates in a compact direct-light lobe while APE's processed
+reflection probes remain much more filtered. Phase 1k therefore decouples those
+operations in APE Match only:
+
+- direct sun keeps the corrected gloss-13 compact lobe;
+- stock dielectric reflectance (0.04) gets a high minimum reflection-probe mip;
+- explicit high-reflectance / metal-like materials can still use sharper probe
+  mips;
+- the sampled HDR probe is softly luminance-compressed to remove residual sun
+  spikes that are absent from APE's processed local probes;
+- stock dielectric probe color is blended toward the recovered average cube
+  color, retaining the broad horizon tint without projecting recognizable sky
+  detail onto the material.
+
+This remains a parity approximation until Treyarch's exact ToolsGfx reflection-
+probe convolution and deferred BRDF are recovered, but it is constrained by the
+new APE video rather than by a generic PBR assumption.
