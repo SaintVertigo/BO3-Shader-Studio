@@ -824,7 +824,7 @@ public:
              renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
         setToolTip(enabled
             ? (apeMaterial
-                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. The APE sun is fixed in world space; R or double-click restores the full selected APE preset."
+                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Shift+Left rotates the APE sun in world space without coupling it to the camera. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. R or double-click restores the full selected APE preset."
                 : "3D navigation: left-drag rotates the camera, Shift+left-drag moves the preview sun, middle-drag pans, right-drag also moves the sun, mouse wheel zooms, double-click or R resets the camera.")
             : "2D preview. 3D navigation is disabled for this shader.");
     }
@@ -922,13 +922,13 @@ protected:
             // APE's material preview uses a Maya-style camera family. Keep the
             // recovered APE sun/preset fixed in world space while navigating:
             //   Alt+LMB = orbit, Alt+MMB = pan, Alt+RMB = dolly.
-            // Plain mouse buttons remain aliases so existing Studio muscle
-            // memory still works, but RMB no longer mutates the APE sun.
+            // Shift+LMB is the explicit sun-direction override. The sun remains
+            // world-space and independent of camera orbit; RMB never rotates it.
             if (apeMaterial)
             {
-                lightDragging_ = false;
-                cameraPanning_ = event->button() == Qt::MiddleButton;
-                cameraDollying_ = event->button() == Qt::RightButton;
+                lightDragging_ = shiftLeft;
+                cameraPanning_ = !lightDragging_ && event->button() == Qt::MiddleButton;
+                cameraDollying_ = !lightDragging_ && event->button() == Qt::RightButton;
             }
             else
             {
@@ -965,7 +965,7 @@ protected:
                 renderer_.GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch &&
                 (renderer_.GetPreviewMode() == PreviewMode::ForwardMaterial ||
                  renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
-            const bool shiftSun = !apeMaterial &&
+            const bool shiftSun =
                 (event->buttons() & Qt::LeftButton) && (event->modifiers() & Qt::ShiftModifier);
             if (cameraDollying_)
             {
@@ -20378,14 +20378,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (previewApeLightingPresetCombo_)
             previewApeLightingPresetCombo_->setEnabled(profile == MaterialPreviewProfile::ApeMatch);
         const bool manualLookdev = profile == MaterialPreviewProfile::LookDev;
+        const bool manualSunDirection = manualLookdev || profile == MaterialPreviewProfile::ApeMatch;
         if (lightingPresetCombo_) lightingPresetCombo_->setEnabled(manualLookdev);
         if (lightingModeCombo_) lightingModeCombo_->setEnabled(manualLookdev);
         if (lightingQuickMode_) lightingQuickMode_->setEnabled(manualLookdev);
         if (toneMapCombo_) toneMapCombo_->setEnabled(manualLookdev);
         if (lookdevExposure_) lookdevExposure_->setEnabled(manualLookdev);
         if (environmentLightingCheck_) environmentLightingCheck_->setEnabled(manualLookdev);
-        if (lightYawSlider_) lightYawSlider_->setEnabled(manualLookdev);
-        if (lightPitchSlider_) lightPitchSlider_->setEnabled(manualLookdev);
+        if (lightYawSlider_) lightYawSlider_->setEnabled(manualSunDirection);
+        if (lightPitchSlider_) lightPitchSlider_->setEnabled(manualSunDirection);
         if (lightIntensitySlider_) lightIntensitySlider_->setEnabled(manualLookdev);
         if (ambientSlider_) ambientSlider_->setEnabled(manualLookdev);
         if (shadowSlider_) shadowSlider_->setEnabled(manualLookdev);
@@ -20481,11 +20482,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void applySceneControls()
     {
         if (!preview_) return;
-        preview_->renderer().SetLightAngles(static_cast<float>(lightYawSlider_->value()), static_cast<float>(lightPitchSlider_->value()));
-        preview_->renderer().SetLightIntensity(lightIntensitySlider_->value() / 100.0f);
-        preview_->renderer().SetAmbientIntensity(ambientSlider_->value() / 100.0f);
-        preview_->renderer().SetShadowStrength(shadowSlider_->value() / 100.0f);
-        if(contactShadowSlider_) preview_->renderer().SetContactShadowStrength(contactShadowSlider_->value() / 100.0f);
+        auto& renderer = preview_->renderer();
+        renderer.SetLightAngles(static_cast<float>(lightYawSlider_->value()), static_cast<float>(lightPitchSlider_->value()));
+
+        // APE Match permits an explicit world-space sun-direction override while
+        // preserving the recovered SSI intensity / probe / shadow calibration.
+        // Moving yaw or pitch must not silently replace those preset values with
+        // the ordinary Look Dev controls that are disabled in this profile.
+        if (renderer.GetMaterialPreviewProfile() != MaterialPreviewProfile::ApeMatch)
+        {
+            renderer.SetLightIntensity(lightIntensitySlider_->value() / 100.0f);
+            renderer.SetAmbientIntensity(ambientSlider_->value() / 100.0f);
+            renderer.SetShadowStrength(shadowSlider_->value() / 100.0f);
+            if(contactShadowSlider_) renderer.SetContactShadowStrength(contactShadowSlider_->value() / 100.0f);
+        }
         if (lightYawValue_) lightYawValue_->setText(QString::number(lightYawSlider_->value()) + QChar(0x00B0));
         if (lightPitchValue_) lightPitchValue_->setText(QString::number(lightPitchSlider_->value()) + QChar(0x00B0));
         if (lightIntensityValue_) lightIntensityValue_->setText(QString::number(lightIntensitySlider_->value() / 100.0f, 'f', 2));
@@ -20496,6 +20506,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     void resetLightingControls()
     {
+        if (preview_ && preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+        {
+            const int apeIndex = previewApeLightingPresetCombo_
+                ? previewApeLightingPresetCombo_->currentIndex()
+                : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            applyApeLightingPreset(apeIndex, false);
+            statusBar()->showMessage("APE lighting preset restored", 2500);
+            return;
+        }
         if (lightYawSlider_) lightYawSlider_->setValue(135);
         if (lightPitchSlider_) lightPitchSlider_->setValue(45);
         if (lightIntensitySlider_) lightIntensitySlider_->setValue(100);
