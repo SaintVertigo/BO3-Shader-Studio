@@ -281,3 +281,8 @@ Phase 1v corrects two capture-grounded issues exposed by the Phase 1u test. Firs
 
 ## Phase 1x
 APE Match Sphere now resolves the reference surface normal from reconstructed geometric position, matching APE's captured radial sphere normal field and preventing preview XMODEL/front-face winding from pinning the specular lobe to the rim. Preview-only generated material compilation preserves authored outward TBN orientation; BO3 export keeps native `SV_IsFrontFace`.
+
+
+## Phase 1y
+
+APE Match now preserves the reconstructed probe's mean energy while restoring the stronger directional variation visible in APE, and Reset frames the reference sphere at the APE-matched 5.25-radius dolly.

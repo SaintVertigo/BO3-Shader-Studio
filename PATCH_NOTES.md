@@ -185,3 +185,8 @@ The original BO3 Shader Studio 0.1 bridge release should remain on GitHub so use
 # Phase 1x - APE Reference Normal Recovery
 
 Phase 1x fixes the remaining rim-locked hotspot by repairing the normal field that reaches APE Match's BRDF. The Sphere reference path reconstructs the surface position and uses the capture-proven outward radial normal; Studio preview compilation also isolates generated material TBNs from raster `SV_IsFrontFace` winding without changing exported BO3 runtime behavior. See `PATCH_NOTES_PHASE1X.md`.
+
+
+## Phase 1y
+
+See `PATCH_NOTES_PHASE1Y.md` for the capture-calibrated reflection-probe directional-contrast recovery and APE viewport-framing correction.

@@ -265,6 +265,22 @@ float3 ReflectionProbeDirectionLod(float3 direction, float lod)
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
 }
 
+float3 RecoverApeProbeDirectionalContrast(float3 probeSample)
+{
+    // Phase 1y: after Phase 1x fixed the reference normal field, the remaining
+    // APE/Studio material mismatch is mostly the processed reflection probe.
+    // Measured normalized annuli show APE retaining ~1.5x more directional
+    // variation through the mid sphere and ~1.8x in the main grazing annulus,
+    // while mean brightness is already closely matched.
+    //
+    // Restore that lost structure around the reconstructed probe's own average
+    // rather than multiplying total reflection energy. This leaves the mean
+    // probe energy, direct-sun hotspot, and Phase 1s diffuse path untouched.
+    const float apeDirectionalContrast = 1.75;
+    float3 probeMean = max(previewEnvironmentAmbient.rgb, 0.0);
+    return max(probeMean + (probeSample - probeMean) * apeDirectionalContrast, 0.0);
+}
+
 float2 SampleApeEnvBrdf(float ndotv, float lightingGlossSignal)
 {
     // Captured shader 2f9c1c21e9bef37c samples gEnvBRDFGeneric with
@@ -683,6 +699,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // mip 1 effectively sharp and making the result look unchanged.
             float lod = 5.0 * (1.0 - saturate(lightingGloss));
             float3 env = max(ReflectionProbeDirectionLod(R, lod), 0.0);
+            env = RecoverApeProbeDirectionalContrast(env);
             float2 dfg = SampleApeEnvBrdf(NdotV, lightingGloss);
             // Captured final material combine is 0.96 * branchA + 0.04 * branchB
             // for the stock dielectric (see the final 2f9c... instruction block).

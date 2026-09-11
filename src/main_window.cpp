@@ -21177,12 +21177,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             r.ResetCamera();
             r.RotateCamera(0.0f, 22.5f);
-            // Phase 1w: fit the captured 1157x594 APE NormalGloss sphere mask
-            // against the captured projection (tanHalfFovY = 0.358352035). The
-            // best-fit camera distance is 4.89094 sphere radii. Studio's sphere is
-            // normalized to radius 1, so install that ratio directly rather than
-            // retaining Phase 1v's eyeballed ~4.54 dolly.
-            r.SetCameraDistance(4.89094f);
+            // Phase 1y: compare the actual Phase 1x Reset screenshots in
+            // viewport-normalized coordinates. Studio's sphere occupied ~0.760
+            // of half-height while APE occupied ~0.706. Keeping APE's captured
+            // 39.430488-degree lens and solving only the dolly yields ~5.25
+            // sphere radii. Match APE's object sizing without changing the lens.
+            r.SetCameraDistance(5.25000f);
         }
 
         // Keep these angles in APE's authored Z-up SSI frame. The renderer now
@@ -21228,7 +21228,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1x APE sphere normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
+                QString(" | %1 | Phase 1y probe contrast + APE framing | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
