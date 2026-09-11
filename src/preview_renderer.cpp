@@ -4637,7 +4637,7 @@ VS_OUT vs_main(VS_IN input)
 )";
 
         static const char* apeShadowVsSource = R"(
-cbuffer PreviewApeShadowMatrix : register(b14)
+cbuffer PreviewApeShadowMatrix : register(b0)
 {
     float4x4 shadowWorldViewProj;
 };
@@ -5719,7 +5719,7 @@ PS_OUT ps_main(VS_OUT i)
         context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context_->VSSetShader(apeShadowVertexShader_.Get(), nullptr, 0);
         ID3D11Buffer* cb = apeShadowMatrixBuffer_.Get();
-        context_->VSSetConstantBuffers(14, 1, &cb);
+        context_->VSSetConstantBuffers(0, 1, &cb);
         context_->PSSetShader(apeShadowPixelShader_.Get(), nullptr, 0);
         context_->DrawIndexed(mesh->indexCount, 0, 0);
         context_->OMSetRenderTargets(0, nullptr, nullptr);

@@ -1,3 +1,9 @@
+# APE Match Phase 1o.1 - D3D11 Shadow CBuffer Slot Hotfix
+
+- Fixes DirectX initialization error `X4567: maximum cbuffer exceeded` caused by the Phase 1o shadow VS using invalid D3D11 slot b14.
+- The standalone APE shadow matrix buffer now uses valid slot b0 in both HLSL and `VSSetConstantBuffers`.
+- Phase 1o captured APE lighting/shadow/probe/tonemap behavior is otherwise unchanged.
+
 # APE Match Phase 1h — Viewport Parity + BO3 Gloss Fix
 
 - APE Match camera navigation now keeps the recovered SSI sun fixed in world space; RMB no longer rotates the fake Studio light while in strict APE mode.
