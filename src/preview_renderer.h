@@ -259,6 +259,7 @@ public:
     float CameraPanX() const;
     float CameraPanY() const;
     float CameraDistance() const;
+    void SetCameraDistance(float distance);
     void PanCamera(float dx, float dy);
     void RotateLight(float yawDeltaDegrees, float pitchDeltaDegrees);
     void SetBackgroundColor(float r, float g, float b);

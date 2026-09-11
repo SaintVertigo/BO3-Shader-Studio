@@ -1,5 +1,7 @@
 # APE Match — Phase 1
 
+> **Historical note (Phase 1w):** the early 45-degree / 4.2 camera values below were screenshot-era approximations. Raw APE frame analysis later recovered a 39.43048821-degree vertical material FOV, a 22.5-degree reference orbit, and a 4.89094-radius framing for the horizontal reference capture. See `PATCH_NOTES_PHASE1W.md` and `APE_REVERSE_ENGINEERING_FINDINGS.md` for the capture-derived values.
+
 This pass starts the BO3 Shader Studio material-preview parity work with Treyarch's Asset Property Editor (APE). It is intentionally a renderer/validation foundation rather than a visual UI overhaul.
 
 ## Preview profiles

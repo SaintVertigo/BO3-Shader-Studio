@@ -2813,6 +2813,10 @@ public:
     float CameraPanX() const { return cameraPanX_; }
     float CameraPanY() const { return cameraPanY_; }
     float CameraDistance() const { return cameraDistance_; }
+    void SetCameraDistance(float distance)
+    {
+        cameraDistance_ = std::clamp(distance, 1.8f, 12.0f);
+    }
 
     void PanCamera(float dx, float dy)
     {
@@ -4116,6 +4120,21 @@ private:
         return true;
     }
 
+    float MaterialPreviewVerticalFovRadians() const
+    {
+        // Captured APE CodeSceneTransforms projection:
+        //   cb9[29].y = tan(verticalFov / 2) = 0.358352035
+        // => vertical FOV = 39.430488210972584 degrees.
+        // Keep Studio Look Dev / Neutral at their established 45-degree lens;
+        // strict APE Match alone uses the captured projection.
+        constexpr float kApeMatchVerticalFovDegrees = 39.43048821f;
+        constexpr float kStudioMaterialVerticalFovDegrees = 45.0f;
+        const float degrees = materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch
+            ? kApeMatchVerticalFovDegrees
+            : kStudioMaterialVerticalFovDegrees;
+        return DirectX::XMConvertToRadians(degrees);
+    }
+
     void UpdateMaterialCameraBuffer(const D3D11_VIEWPORT& vp)
     {
         if (!materialCameraBuffer_) return;
@@ -4135,7 +4154,7 @@ private:
         eye = XMVectorAdd(eye, target);
         const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
         const XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
-        const float materialFov = XMConvertToRadians(45.0f);
+        const float materialFov = MaterialPreviewVerticalFovRadians();
         const XMMATRIX proj = XMMatrixPerspectiveFovLH(materialFov, aspect, 0.05f, 100.0f);
         XMMATRIX world = XMMatrixIdentity();
         if (previewMesh_ == PreviewMesh::Plane || previewMesh_ == PreviewMesh::Card)
@@ -4377,7 +4396,9 @@ private:
             XMFLOAT3 rf{}, uf{}, ff{};
             XMStoreFloat3(&rf, right); XMStoreFloat3(&uf, up); XMStoreFloat3(&ff, forward);
             const float aspect = std::max(0.01f, vp.Width / std::max(1.0f, vp.Height));
-            const float tanHalfFov = std::tan(XMConvertToRadians(45.0f) * 0.5f);
+            // Must be identical to the geometry-pass projection above; otherwise
+            // deferred V/H reconstruction diverges progressively toward the silhouette.
+            const float tanHalfFov = std::tan(MaterialPreviewVerticalFovRadians() * 0.5f);
             const std::array<float,4> r{rf.x, rf.y, rf.z, 0.0f};
             const std::array<float,4> u{uf.x, uf.y, uf.z, 0.0f};
             const std::array<float,4> f{ff.x, ff.y, ff.z, 0.0f};
@@ -6546,7 +6567,7 @@ PS_OUT ps_main(VS_OUT i)
             target = XMVectorAdd(target, panOffset);
             eye = XMVectorAdd(eye, target);
             const XMMATRIX mView = XMMatrixLookAtLH(eye, target, XMVectorSet(0,1,0,0));
-            const XMMATRIX mProj = XMMatrixPerspectiveFovLH(XMConvertToRadians(45.0f), aspect, 0.05f, 100.0f);
+            const XMMATRIX mProj = XMMatrixPerspectiveFovLH(MaterialPreviewVerticalFovRadians(), aspect, 0.05f, 100.0f);
             XMMATRIX mWorld = XMMatrixIdentity();
             if (previewMesh_ == PreviewMesh::Plane || previewMesh_ == PreviewMesh::Card) mWorld = XMMatrixScaling(1.8f, 1.8f, 1.8f);
             const XMMATRIX mWvp = mWorld * mView * mProj;
@@ -7738,6 +7759,11 @@ float PreviewRenderer::CameraPanY() const
 float PreviewRenderer::CameraDistance() const
 {
     return impl_->CameraDistance();
+}
+
+void PreviewRenderer::SetCameraDistance(float distance)
+{
+    impl_->SetCameraDistance(distance);
 }
 
 void PreviewRenderer::PanCamera(float dx, float dy)

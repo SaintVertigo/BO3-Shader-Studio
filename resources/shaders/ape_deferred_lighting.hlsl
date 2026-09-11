@@ -368,11 +368,18 @@ float3 EvaluateApeDiffuseIrradiance(float3 direction)
 float4 ps_main(VS_OUT i) : SV_Target0
 {
     float2 uv = i.texcoord0.xy;
-    float4 rt0 = gbuffer0.Sample(previewSampler, uv);
-    float4 rt1 = gbuffer1.Sample(previewSampler, uv);
-    float4 rt2 = gbuffer2.Sample(previewSampler, uv);
-    float4 rt3 = gbuffer3.Sample(previewSampler, uv);
-    float depth = depthTexture.Sample(previewSampler, uv).r;
+
+    // Captured APE deferred shader 2f9c1c21e9bef37c reads its GBuffer and
+    // depth with integer ld instructions. These surfaces contain packed data
+    // (especially NormalGloss), so bilinear filtering changes BRDF inputs at
+    // silhouettes and is not instruction-faithful. SV_Position is already in
+    // pixel coordinates; truncation maps the pixel centre to the same texel.
+    int2 pixelCoord = int2(i.position.xy);
+    float4 rt0 = gbuffer0.Load(int3(pixelCoord, 0));
+    float4 rt1 = gbuffer1.Load(int3(pixelCoord, 0));
+    float4 rt2 = gbuffer2.Load(int3(pixelCoord, 0));
+    float4 rt3 = gbuffer3.Load(int3(pixelCoord, 0));
+    float depth = depthTexture.Load(int3(pixelCoord, 0)).r;
     int debugMode = (int)(previewDebugSettings.x + 0.5);
 
     // Raw MRT/depth inspector modes are intentionally unprocessed.
@@ -508,7 +515,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 specular = 0.0;
     if (materialProfile == 0)
     {
-        // Phase 1v: instruction-faithful direct-sun specular translation from
+        // Phase 1w preserves Phase 1v's instruction-faithful direct-sun specular from
         // captured ToolsGfx/deferred_lighting.hlsl (2f9c1c21e9bef37c).
         //
         // The older Studio rewrite used textbook GGX normalization. The capture:
