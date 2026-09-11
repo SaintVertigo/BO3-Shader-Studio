@@ -385,3 +385,23 @@ Key findings:
 - The default material viewport presentation uses the captured log/polynomial curve in `275dce0f2b3a7c36`; the LUT branch is inactive in the supplied Day capture.
 
 These observations supersede the earlier Phase 1k-1n visual guesses where they conflict.
+
+## 2026-09-11 - 3DMigoto normal/gloss/probe correction
+
+The captures resolved a critical BO3 normal/gloss convention that the Studio fallback had wrong. The stock APE neutral normal texture bound to `core_script_wall_c` is 8x8 RGBA `(128,128,0,255)`. R/G are tangent XY, tangent Z is reconstructed from XY, and B is an independent normal-height signal used by the gloss packer. A conventional `(128,128,255)` neutral normal is therefore incorrect for this BO3 path because it injects height into `GBuffer_PackGloss`.
+
+The captured material GBuffer for the stock wall contains `NormalGloss.z ~= 0.3822`. The deferred shader `2f9c1c21e9bef37c` normalizes that packed value directly:
+
+```hlsl
+float lightingGloss = saturate((packedGloss - 0.00146627566) * 2.00982332);
+float probeLod = 5.0 * (1.0 - lightingGloss);
+float cosinePower = exp2(17.0 * lightingGloss);
+float alpha = sqrt(2.0 / (cosinePower + 2.0));
+```
+
+For the stock zero-height normal and Gloss Range 13, this yields `lightingGloss ~= 13/17` and `probeLod ~= 1.1765`.
+
+The same captured deferred shader samples the 64x64 `gEnvBRDFGeneric` using `(NdotV, lightingGloss)` at texel-center corrected coordinates. Passing microfacet alpha as the LUT Y coordinate is incorrect.
+
+The captured t51 reflection resource is a 256x256 cubemap/cubearray resource with six cube faces and seven mips. Horizontal/vertical captures confirm this glossy probe remains baked while visible-sky yaw changes independently.
+The final captured material combine also establishes the EnvBRDF branch weighting for stock dielectric reflectance: the shader forms `0.96 * branchA + 0.04 * branchB`. This corresponds to `(1-F0)*A + F0*B`. The previous Studio expression `F0*A + B` was not equivalent and could raise the environment specular term by more than an order of magnitude for this LUT.

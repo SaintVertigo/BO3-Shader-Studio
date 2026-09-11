@@ -6,7 +6,7 @@ Texture2D gbuffer3 : register(t3);
 Texture2D depthTexture : register(t4);
 Texture2D previewEnvironment : register(t5);
 Texture2D previewMaterialAlbedoInput : register(t6);
-Texture2D previewReflectionProbe : register(t7);
+TextureCube previewReflectionProbe : register(t7);
 Texture2D<float2> previewApeEnvBrdf : register(t8);
 Texture2D<float> previewApeShadowMap : register(t9);
 SamplerState previewSampler : register(s0);
@@ -78,39 +78,36 @@ float3 DecodeBo3GBufferNormal(float4 normalGloss)
     return len2 > 1e-8 ? n * rsqrt(len2) : float3(0.0, 0.0, 1.0);
 }
 
-float DecodeBo3Gloss(float packedGloss)
+// APE deferred lighting consumes the normalized PACKED NormalGloss.z signal.
+// It does not run a separate "author gloss" decoder here. For the stock APE
+// 8x8 normal texture (128,128,0), the height term is zero, so Gloss 13 packs to
+// a normalized lighting signal of about 13/17. Non-zero blue/height data folds
+// into the packed value exactly as BO3's GBuffer contract intends.
+float DecodeBo3LightingGlossSignal(float packedGloss)
 {
-    // Stock BO3 does NOT store gloss as a simple normalized value.
-    // GBuffer_PackGloss() folds the tangent-normal height term into the same
-    // logarithmic scalar:
-    //   packed = -log2(2^-gloss + normalHeight) / 17
-    // followed by the 0.49755621 scale + 0.00146627566 offset.
-    //
-    // For the stock identity normal used by Geometry/lit when no normal map is
-    // authored, GBuffer_DecodeNormal(...).w is exactly 1/3. The user's APE
-    // capture also confirms the stock material uses Gloss Range 0..13, making
-    // this inversion critical: the previous linear decode interpreted gloss 13
-    // as ~0.09 and made the surface almost completely rough.
-    float encoded = saturate((packedGloss - 0.00146627566) / 0.49755621);
-    float combined = exp2(-17.0 * encoded);
-    const float flatNormalHeight = 1.0 / 3.0;
-    const float minGlossSignal = exp2(-17.0);
-    float glossSignal = max(combined - flatNormalHeight, minGlossSignal);
-    float glossValue = -log2(glossSignal);
-    return saturate(glossValue / 17.0);
+    // Captured 2f9c1c21e9bef37c sequence for the ordinary (<0.5) material path:
+    //   (packedGloss - 0.00146627566) * 2.00982332
+    // 2.00982332 is 1 / 0.49755621. A second packed branch exists above 0.5; keep
+    // it because APE's shader does, even though core_script_wall_c stays below it.
+    float base = packedGloss >= 0.5 ? 0.5 : 0.00146627566;
+    return saturate((packedGloss - base) * 2.00982332);
 }
 
-float Bo3GlossToRoughness(float normalizedGloss)
+float DecodeBo3AuthoredGloss(float packedGloss)
 {
-    // BO3 authors this channel as cosinePowerMap / a 0..17 gloss range.  Treating
-    // 13/17 as the linear inverse of roughness made stock Geometry/lit look like
-    // a broad modern-PBR mirror.  The logarithmic range is much closer to a
-    // cosine-power authoring scale: convert 2^gloss to the equivalent lobe width
-    // before feeding the GGX approximation used by this preview compositor.
-    float glossValue = saturate(normalizedGloss) * 17.0;
-    float cosinePower = exp2(glossValue);
-    // Do not impose a modern roughness floor here. APE keeps the full BO3
-    // cosine-power width (Gloss 13 -> alpha ~= 0.01562).
+    // The GBuffer does not retain enough information to uniquely separate
+    // author gloss from a non-zero normal-height fold. APE's stock neutral
+    // normal has blue/height = 0, where the normalized packed signal is also
+    // the author-facing 0..17 gloss fraction, so expose that same signal here.
+    return DecodeBo3LightingGlossSignal(packedGloss);
+}
+
+float Bo3LightingGlossToAlpha(float lightingGlossSignal)
+{
+    // Exact captured APE width conversion:
+    //   cosinePower = 2^(17 * lightingGlossSignal)
+    //   alpha^2     = 2 / (cosinePower + 2)
+    float cosinePower = exp2(17.0 * saturate(lightingGlossSignal));
     return sqrt(max(2.0 / (cosinePower + 2.0), 1e-10));
 }
 
@@ -259,14 +256,20 @@ float3 EnvironmentDirectionLod(float3 direction, float lod)
 
 float3 ReflectionProbeDirectionLod(float3 direction, float lod)
 {
-    return previewReflectionProbe.SampleLevel(previewEnvironmentSampler, BakedProbeDirectionToEquirect(direction),
+    // Phase 1p uses a real 256x256 TextureCube with seven authored/prefiltered
+    // mips, matching the resource type captured from APE at t51. The probe stays
+    // baked at the preset orientation while the visible lat-long sky can yaw.
+    float3 d = RotateBakedProbeDirection(direction);
+    return previewReflectionProbe.SampleLevel(previewEnvironmentSampler, d,
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
 }
 
-float2 SampleApeEnvBrdf(float ndotv, float roughness)
+float2 SampleApeEnvBrdf(float ndotv, float lightingGlossSignal)
 {
-    // APE samples a 64x64 R8G8_UNORM gEnvBRDFGeneric at texel centers.
-    float2 uv = saturate(float2(ndotv, roughness));
+    // Captured shader 2f9c1c21e9bef37c samples gEnvBRDFGeneric with
+    // (NdotV, normalized packed-gloss signal), NOT microfacet alpha/roughness.
+    // For the stock wall this coordinate is ~13/17; it is not microfacet alpha.
+    float2 uv = saturate(float2(ndotv, lightingGlossSignal));
     uv = uv * (63.0 / 64.0) + (0.5 / 64.0);
     return previewApeEnvBrdf.SampleLevel(previewSampler, uv, 0.0).rg;
 }
@@ -443,7 +446,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
     if (debugMode == 9)
     {
-        float g = DecodeBo3Gloss(rt1.z);
+        float g = DecodeBo3AuthoredGloss(rt1.z);
         return float4(g, g, g, 1.0);
     }
     if (debugMode == 10)
@@ -481,8 +484,8 @@ float4 ps_main(VS_OUT i) : SV_Target0
     // the packed gloss value.
     float reflectance = saturate(rt2.x);
     float3 specColor = max(float3(reflectance, reflectance, reflectance), float3(0.04, 0.04, 0.04));
-    float gloss = DecodeBo3Gloss(rt1.z);
-    float roughness = Bo3GlossToRoughness(gloss);
+    float lightingGloss = DecodeBo3LightingGlossSignal(rt1.z);
+    float roughness = Bo3LightingGlossToAlpha(lightingGloss);
     float3 F = specColor + (1.0 - specColor) * pow(1.0 - VdotH, 5.0);
 
     // Look Dev intentionally keeps Studio's artist-friendly GGX renderer. APE
@@ -577,13 +580,19 @@ float4 ps_main(VS_OUT i) : SV_Target0
         float3 R = reflect(-V, N);
         if (materialProfile == 0)
         {
-            // Captured APE deferred shader: the glossy probe is an independent
-            // prefiltered resource. Its authored LOD is exactly 5*(1-gloss);
-            // mip 6 is reserved for the broad/average probe path.
-            float lod = 5.0 * (1.0 - saturate(gloss));
+            // Captured APE deferred shader uses the normalized PACKED gloss signal.
+            // With APE's stock neutral normal texture (blue/height = 0), Gloss 13
+            // yields about 13/17 and therefore probe LOD ~= 1.176. The important
+            // Phase 1p change is that this LOD now addresses a real prefiltered
+            // TextureCube instead of a sharp lat-long texture with generic mips.
+            float lod = 5.0 * (1.0 - saturate(lightingGloss));
             float3 env = max(ReflectionProbeDirectionLod(R, lod), 0.0);
-            float2 dfg = SampleApeEnvBrdf(NdotV, roughness);
-            float3 splitSum = specColor * dfg.x + dfg.y;
+            float2 dfg = SampleApeEnvBrdf(NdotV, lightingGloss);
+            // Captured final material combine is 0.96 * branchA + 0.04 * branchB
+            // for the stock dielectric (see the final 2f9c... instruction block).
+            // Phase 1o had these terms reversed as F0*A + B, which drove the LUT
+            // contribution close to 1.0 and made the wall look like a mirror.
+            float3 splitSum = (1.0 - specColor) * dfg.x + specColor * dfg.y;
             envSpec = env * splitSum * previewApeLightingCalibration.y *
                       previewApeLightingCalibration.w * ao;
         }

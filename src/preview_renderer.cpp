@@ -101,6 +101,113 @@ fs::path GetExecutableDirectory()
 // R16G16B16A16_FLOAT preserves the useful HDR range at half the storage, so the
 // APE-match path can retain the authored sky resolution instead of throwing
 // away three quarters of the samples in each axis.
+
+std::array<float, 3> ApeCubeDirection(UINT face, float u, float v)
+{
+    // Direct3D cube face convention. u/v are [0,1] texel-center coordinates.
+    const float sc = u * 2.0f - 1.0f;
+    const float tc = v * 2.0f - 1.0f;
+    DirectX::XMVECTOR d{};
+    switch (face)
+    {
+    case 0: d = DirectX::XMVectorSet( 1.0f, -tc, -sc, 0.0f); break; // +X
+    case 1: d = DirectX::XMVectorSet(-1.0f, -tc,  sc, 0.0f); break; // -X
+    case 2: d = DirectX::XMVectorSet( sc,  1.0f,  tc, 0.0f); break; // +Y
+    case 3: d = DirectX::XMVectorSet( sc, -1.0f, -tc, 0.0f); break; // -Y
+    case 4: d = DirectX::XMVectorSet( sc, -tc,  1.0f, 0.0f); break; // +Z
+    default:d = DirectX::XMVectorSet(-sc, -tc, -1.0f, 0.0f); break; // -Z
+    }
+    d = DirectX::XMVector3Normalize(d);
+    DirectX::XMFLOAT3 out{};
+    DirectX::XMStoreFloat3(&out, d);
+    return {out.x, out.y, out.z};
+}
+
+float RadicalInverseVdC(uint32_t bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return static_cast<float>(bits) * 2.3283064365386963e-10f;
+}
+
+std::array<float, 3> ImportanceSampleCosinePower(const std::array<float, 3>& axis,
+                                                 float xi0, float xi1,
+                                                 float cosinePower)
+{
+    constexpr float twoPi = 6.28318530717958647692f;
+    const float cosTheta = std::pow(std::clamp(xi0, 1.0e-7f, 1.0f),
+                                    1.0f / std::max(1.0f, cosinePower + 1.0f));
+    const float sinTheta = std::sqrt(std::max(0.0f, 1.0f - cosTheta * cosTheta));
+    const float phi = twoPi * xi1;
+    const float x = std::cos(phi) * sinTheta;
+    const float y = std::sin(phi) * sinTheta;
+    const float z = cosTheta;
+
+    DirectX::XMVECTOR n = DirectX::XMVector3Normalize(
+        DirectX::XMVectorSet(axis[0], axis[1], axis[2], 0.0f));
+    DirectX::XMVECTOR up = std::abs(axis[1]) < 0.999f
+        ? DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
+        : DirectX::XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
+    DirectX::XMVECTOR tangent = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(up, n));
+    DirectX::XMVECTOR bitangent = DirectX::XMVector3Cross(n, tangent);
+    DirectX::XMVECTOR d = DirectX::XMVectorAdd(
+        DirectX::XMVectorScale(n, z),
+        DirectX::XMVectorAdd(DirectX::XMVectorScale(tangent, x),
+                             DirectX::XMVectorScale(bitangent, y)));
+    d = DirectX::XMVector3Normalize(d);
+    DirectX::XMFLOAT3 out{};
+    DirectX::XMStoreFloat3(&out, d);
+    return {out.x, out.y, out.z};
+}
+
+std::array<float, 4> SampleLatLongHdr(const float* rgba, UINT w, UINT h,
+                                     const std::array<float, 3>& direction)
+{
+    constexpr float invTwoPi = 0.15915494309189533577f;
+    constexpr float invPi = 0.31830988618379067154f;
+    const float len2 = direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
+    const float invLen = len2 > 1.0e-12f ? 1.0f / std::sqrt(len2) : 1.0f;
+    const float dx = direction[0] * invLen;
+    const float dy = std::clamp(direction[1] * invLen, -1.0f, 1.0f);
+    const float dz = direction[2] * invLen;
+    float u = std::atan2(dz, dx) * invTwoPi + 0.5f;
+    u -= std::floor(u);
+    const float v = std::acos(dy) * invPi;
+
+    const float fx = u * static_cast<float>(w) - 0.5f;
+    const float fy = std::clamp(v, 0.0f, 1.0f) * static_cast<float>(h) - 0.5f;
+    int x0 = static_cast<int>(std::floor(fx));
+    int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0, static_cast<int>(h) - 1);
+    const float tx = fx - std::floor(fx);
+    const float ty = std::clamp(fy - std::floor(fy), 0.0f, 1.0f);
+    x0 %= static_cast<int>(w);
+    if (x0 < 0) x0 += static_cast<int>(w);
+    const int x1 = (x0 + 1) % static_cast<int>(w);
+    const int y1 = std::min(static_cast<int>(h) - 1, y0 + 1);
+
+    auto fetch = [&](int x, int y, int c) -> float {
+        const size_t idx = (static_cast<size_t>(y) * w + static_cast<UINT>(x)) * 4u + static_cast<size_t>(c);
+        const float value = rgba[idx];
+        return std::isfinite(value) ? std::max(0.0f, value) : 0.0f;
+    };
+
+    std::array<float, 4> result{};
+    for (int c = 0; c < 4; ++c)
+    {
+        const float a = fetch(x0, y0, c);
+        const float b = fetch(x1, y0, c);
+        const float c0 = fetch(x0, y1, c);
+        const float d = fetch(x1, y1, c);
+        const float top = a + (b - a) * tx;
+        const float bottom = c0 + (d - c0) * tx;
+        result[c] = top + (bottom - top) * ty;
+    }
+    return result;
+}
+
 uint16_t FloatToHalfBits(float value)
 {
     uint32_t bits = 0;
@@ -4355,7 +4462,7 @@ private:
             gbufferSRVs_[0].Get(), gbufferSRVs_[1].Get(), gbufferSRVs_[2].Get(), gbufferSRVs_[3].Get(), materialDepthSRV_.Get(),
             environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get(),
             materialTextureSRVs_[0].Get() ? materialTextureSRVs_[0].Get() : neutralSRV_.Get(),
-            reflectionProbeSRV_.Get() ? reflectionProbeSRV_.Get() : (environmentEnabled_ ? environmentSRV_.Get() : neutralSRV_.Get()),
+            reflectionProbeSRV_.Get() ? reflectionProbeSRV_.Get() : neutralCubeSRV_.Get(),
             apeEnvBrdfSRV_.Get() ? apeEnvBrdfSRV_.Get() : neutralSRV_.Get(),
             apeShadowSRV_.Get() ? apeShadowSRV_.Get() : neutralSRV_.Get()
         };
@@ -4900,7 +5007,13 @@ PS_OUT ps_main(VS_OUT i)
     float2 uv = i.texcoord0.xy;
     float4 albedo = previewAlbedo.Sample(previewSampler, uv);
     float3 sampledNormal = previewNormal.Sample(previewSampler, uv).xyz;
-    float3 n = normalize(sampledNormal * 2.0 - 1.0);
+    // BO3 normal maps store tangent XY in R/G and the independent normal-height
+    // signal in B. The stock neutral APE normal texture is (128,128,0), not the
+    // conventional D3D normal-map value (128,128,255). Reconstruct tangent Z
+    // from XY; never treat the blue height channel as normal Z.
+    float2 tangentXY = sampledNormal.xy * 1.9921875 - 1.0;
+    float tangentZ = sqrt(max(1.0 - dot(tangentXY, tangentXY), 0.0));
+    float3 n = normalize(float3(tangentXY, tangentZ));
     if (dot(n,n) < 0.01) n = float3(0,0,1);
     float3 specular = previewSpecular.Sample(previewSampler, uv).rgb;
     float gloss = previewGloss.Sample(previewSampler, uv).r;
@@ -5280,7 +5393,7 @@ PS_OUT ps_main(VS_OUT i)
         // A constant depth is intentionally boring: it prevents the old generated
         // diagonal gradient from masquerading as real geometry in AO/outlines/fog.
         const std::array<uint8_t, 4> neutralDepth{96, 96, 96, 255};
-        const std::array<uint8_t, 4> neutralNormal{128, 128, 255, 255};
+        const std::array<uint8_t, 4> neutralNormal{128, 128, 0, 255};
         const std::array<uint8_t, 4> neutralBlack{0, 0, 0, 255};
         const std::array<uint8_t, 4> neutralSpecular{10, 10, 10, 255};
         // Stock Geometry/lit BASE_TEXTURES uses glossRange.y directly. APE's
@@ -5483,82 +5596,128 @@ PS_OUT ps_main(VS_OUT i)
             return false;
         }
 
-        // APE's captured glossy probe is a 256x256 cube with seven mips. 3DMigoto
-        // exposed only one cube face from the shipped probe, so retain the exact
-        // angular base resolution/7-level LOD contract while reconstructing a
-        // seam-safe 1024x512 lat-long probe from the same HDR environment.
-        constexpr UINT probeW = 1024;
-        constexpr UINT probeH = 512;
+        // Captured APE resource contract at deferred-lighting t51:
+        //   TextureCube / 256x256 / 6 faces / 7 mips.
+        // Phase 1o incorrectly used a 1024x512 lat-long Texture2D and ordinary
+        // GenerateMips(), which left Gloss 13 looking like a mirror. Build the
+        // same resource topology APE actually samples and author each mip as a
+        // directional reflection convolution instead.
+        constexpr UINT probeSize = 256;
         constexpr UINT probeMipLevels = 7;
-        std::vector<float> reduced(static_cast<size_t>(probeW) * probeH * 4u);
-        for (UINT y = 0; y < probeH; ++y)
+        constexpr UINT faceCount = 6;
+
+        std::vector<std::vector<uint16_t>> subresourceStorage(faceCount * probeMipLevels);
+        std::vector<D3D11_SUBRESOURCE_DATA> init(faceCount * probeMipLevels);
+
+        for (UINT face = 0; face < faceCount; ++face)
         {
-            const float sy = ((static_cast<float>(y) + 0.5f) * static_cast<float>(h) /
-                              static_cast<float>(probeH)) - 0.5f;
-            const int y0i = std::clamp(static_cast<int>(std::floor(sy)), 0, static_cast<int>(h) - 1);
-            const int y1i = std::min(static_cast<int>(h) - 1, y0i + 1);
-            const float ty = std::clamp(sy - static_cast<float>(y0i), 0.0f, 1.0f);
-            for (UINT x = 0; x < probeW; ++x)
+            for (UINT mip = 0; mip < probeMipLevels; ++mip)
             {
-                // Horizontal wrapping is essential for a prefiltered lat-long probe.
-                const float sx = ((static_cast<float>(x) + 0.5f) * static_cast<float>(w) /
-                                  static_cast<float>(probeW)) - 0.5f;
-                int x0i = static_cast<int>(std::floor(sx));
-                const float tx = sx - std::floor(sx);
-                x0i %= static_cast<int>(w);
-                if (x0i < 0) x0i += static_cast<int>(w);
-                const int x1i = (x0i + 1) % static_cast<int>(w);
-                const size_t dst = (static_cast<size_t>(y) * probeW + x) * 4u;
-                const size_t i00 = (static_cast<size_t>(y0i) * w + static_cast<UINT>(x0i)) * 4u;
-                const size_t i10 = (static_cast<size_t>(y0i) * w + static_cast<UINT>(x1i)) * 4u;
-                const size_t i01 = (static_cast<size_t>(y1i) * w + static_cast<UINT>(x0i)) * 4u;
-                const size_t i11 = (static_cast<size_t>(y1i) * w + static_cast<UINT>(x1i)) * 4u;
-                for (int c = 0; c < 4; ++c)
+                const UINT size = std::max<UINT>(1u, probeSize >> mip);
+                auto& texels = subresourceStorage[D3D11CalcSubresource(mip, face, probeMipLevels)];
+                texels.resize(static_cast<size_t>(size) * size * 4u);
+
+                // APE samples glossy probe mip as 5 * (1 - lightingGlossSignal).
+                // Reverse that mapping when building mip 0..5 so each level's
+                // angular footprint follows the same BO3 cosine-power family.
+                // Mip 6 is the explicit broad/average path used by deferred lighting.
+                const float glossForMip = mip <= 5u
+                    ? std::clamp(1.0f - static_cast<float>(mip) / 5.0f, 0.0f, 1.0f)
+                    : 0.0f;
+                const float cosinePower = mip <= 5u
+                    ? std::exp2(17.0f * glossForMip)
+                    : 0.0f;
+                const UINT sampleCount = mip == 0u ? 1u
+                    : (mip == 1u ? 8u
+                    : (mip == 2u ? 12u
+                    : (mip == 3u ? 24u
+                    : (mip == 4u ? 40u
+                    : (mip == 5u ? 48u : 64u)))));
+
+                for (UINT y = 0; y < size; ++y)
                 {
-                    const float top = rgba[i00 + c] + (rgba[i10 + c] - rgba[i00 + c]) * tx;
-                    const float bottom = rgba[i01 + c] + (rgba[i11 + c] - rgba[i01 + c]) * tx;
-                    reduced[dst + c] = top + (bottom - top) * ty;
+                    for (UINT x = 0; x < size; ++x)
+                    {
+                        const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size);
+                        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
+                        const auto axis = ApeCubeDirection(face, u, v);
+                        std::array<double, 3> sum = {0.0, 0.0, 0.0};
+
+                        if (sampleCount == 1u)
+                        {
+                            const auto c = SampleLatLongHdr(rgba, w, h, axis);
+                            sum = {c[0], c[1], c[2]};
+                        }
+                        else
+                        {
+                            // Deterministic Hammersley sampling keeps the probe stable
+                            // between reloads and avoids the directional streaks that
+                            // ordinary face-local box mip generation produces.
+                            for (UINT sample = 0; sample < sampleCount; ++sample)
+                            {
+                                const float xi0 = (static_cast<float>(sample) + 0.5f) /
+                                                  static_cast<float>(sampleCount);
+                                const float xi1 = RadicalInverseVdC(sample);
+                                const auto d = ImportanceSampleCosinePower(axis, xi0, xi1, cosinePower);
+                                const auto c = SampleLatLongHdr(rgba, w, h, d);
+                                sum[0] += c[0];
+                                sum[1] += c[1];
+                                sum[2] += c[2];
+                            }
+                            const double inv = 1.0 / static_cast<double>(sampleCount);
+                            sum[0] *= inv;
+                            sum[1] *= inv;
+                            sum[2] *= inv;
+                        }
+
+                        const size_t dst = (static_cast<size_t>(y) * size + x) * 4u;
+                        texels[dst + 0] = FloatToHalfBits(static_cast<float>(sum[0]));
+                        texels[dst + 1] = FloatToHalfBits(static_cast<float>(sum[1]));
+                        texels[dst + 2] = FloatToHalfBits(static_cast<float>(sum[2]));
+                        texels[dst + 3] = FloatToHalfBits(1.0f);
+                    }
                 }
+
+                auto& sub = init[D3D11CalcSubresource(mip, face, probeMipLevels)];
+                sub.pSysMem = texels.data();
+                sub.SysMemPitch = size * sizeof(uint16_t) * 4u;
+                sub.SysMemSlicePitch = 0;
             }
         }
 
-        const size_t componentCount = reduced.size();
-        std::vector<uint16_t> half(componentCount);
-        for (size_t i = 0; i < componentCount; ++i)
-            half[i] = FloatToHalfBits(reduced[i]);
-
         D3D11_TEXTURE2D_DESC td{};
-        td.Width = probeW;
-        td.Height = probeH;
+        td.Width = probeSize;
+        td.Height = probeSize;
         td.MipLevels = probeMipLevels;
-        td.ArraySize = 1;
+        td.ArraySize = faceCount;
         td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-        td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
 
         ComPtr<ID3D11Texture2D> tex;
-        HRESULT hr = device_->CreateTexture2D(&td, nullptr, tex.GetAddressOf());
+        HRESULT hr = device_->CreateTexture2D(&td, init.data(), tex.GetAddressOf());
         if (FAILED(hr))
         {
-            error = L"CreateTexture2D failed for the APE reflection-probe approximation.";
+            error = L"CreateTexture2D failed for the APE 256x256 prefiltered TextureCube.";
             return false;
         }
-        context_->UpdateSubresource(tex.Get(), 0, nullptr, half.data(), probeW * sizeof(uint16_t) * 4u, 0);
 
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
         sd.Format = td.Format;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        sd.Texture2D.MostDetailedMip = 0;
-        sd.Texture2D.MipLevels = probeMipLevels;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+        sd.TextureCube.MostDetailedMip = 0;
+        sd.TextureCube.MipLevels = probeMipLevels;
         hr = device_->CreateShaderResourceView(tex.Get(), &sd, reflectionProbeSRV_.ReleaseAndGetAddressOf());
         if (FAILED(hr))
         {
-            error = L"CreateShaderResourceView failed for the APE reflection-probe approximation.";
+            error = L"CreateShaderResourceView failed for the APE prefiltered TextureCube.";
             return false;
         }
-        context_->GenerateMips(reflectionProbeSRV_.Get());
+
+        // Keep the resource alive through the SRV and expose APE's exact mip count
+        // to the deferred compositor. There is deliberately no GenerateMips() call.
         reflectionProbeMipCount_ = probeMipLevels;
         return true;
     }
