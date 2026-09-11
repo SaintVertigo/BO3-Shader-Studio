@@ -1436,12 +1436,13 @@ public:
     void ResetLightColorToEnvironment() { useExplicitLightColor_ = false; }
     void SetEnvironmentRotationDegrees(float degrees)
     {
-        // This value is the sampling-space yaw used by the equirectangular
-        // environment. Applying an APE preset resets the manual light-rig tilt;
-        // subsequent APE light drags rotate both the sun and the environment.
+        // APE keeps two orientation states that only coincide at preset/reset:
+        //  - visible sky yaw follows horizontal light manipulation;
+        //  - the baked reflection/diffuse probe stays at the preset orientation.
+        // Vertical light manipulation changes only the sun direction.
         environmentRotationDegrees_ = std::fmod(degrees, 360.0f);
         if (environmentRotationDegrees_ < 0.0f) environmentRotationDegrees_ += 360.0f;
-        environmentPitchDegrees_ = 0.0f;
+        apeProbeRotationDegrees_ = environmentRotationDegrees_;
     }
     float EnvironmentRotationDegrees() const { return environmentRotationDegrees_; }
 
@@ -2695,13 +2696,11 @@ public:
 
         if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
         {
-            // The APE material light manipulator rotates the HDR environment with
-            // the sun. environmentRotation/Pitch are sampling-space transforms,
-            // therefore they receive the inverse of the world-space rig delta.
+            // APE's horizontal light drag also yaws the *visible* sky. Vertical
+            // drag does not pitch/roll the sky, and neither axis rotates the baked
+            // material reflection/diffuse probe. Keep those states decoupled.
             environmentRotationDegrees_ = wrapUnsignedDegrees(
                 environmentRotationDegrees_ - yawDeltaDegrees);
-            environmentPitchDegrees_ = wrapSignedDegrees(
-                environmentPitchDegrees_ - pitchDeltaDegrees);
         }
     }
 
@@ -2733,15 +2732,11 @@ public:
         const float nextPitch = wrapSignedDegrees(pitchDeg);
         if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
         {
-            // Scene/Lighting sliders control the same APE rig as Shift+LMB. Use
-            // shortest angular deltas so editing yaw/pitch also moves the HDR
-            // environment instead of detaching the sun from the sky.
+            // Match Shift+LMB: yaw turns the visible sky, pitch changes only the
+            // sun. The prefiltered/baked material probe remains at preset yaw.
             const float yawDelta = wrapSignedDegrees(nextYaw - lightYawDegrees_);
-            const float pitchDelta = wrapSignedDegrees(nextPitch - lightPitchDegrees_);
             environmentRotationDegrees_ = wrapUnsignedDegrees(
                 environmentRotationDegrees_ - yawDelta);
-            environmentPitchDegrees_ = wrapSignedDegrees(
-                environmentPitchDegrees_ - pitchDelta);
         }
         lightYawDegrees_ = nextYaw;
         lightPitchDegrees_ = nextPitch;
@@ -3561,7 +3556,7 @@ private:
             environmentRotationDegrees_ * (3.14159265358979323846f / 180.0f),
             static_cast<float>(environmentMipCount_ > 0 ? environmentMipCount_ - 1u : 0u),
             environmentDiffuseSHValid_ ? 1.0f : 0.0f,
-            environmentPitchDegrees_ * (3.14159265358979323846f / 180.0f)
+            apeProbeRotationDegrees_ * (3.14159265358979323846f / 180.0f)
         };
         data.apeLightingCalibration = {
             apeDiffuseProbeScale_, apeSpecularProbeScale_, apeSunIrradianceScale_, apeProbeExposure_
@@ -4732,12 +4727,12 @@ float2 DirectionToEquirect(float3 direction)
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
         d.x = -d.x;
+    // APE's manual light elevation does not pitch the visible sky. Only the
+    // horizontal light component yaws the background. previewApeSettings.w is
+    // reserved for the fixed baked-probe orientation used by material lighting.
     float yaw = previewApeSettings.x;
     float sy = sin(yaw), cy = cos(yaw);
     d.xz = float2(d.x * cy - d.z * sy, d.x * sy + d.z * cy);
-    float pitch = previewApeSettings.w;
-    float sp = sin(pitch), cp = cos(pitch);
-    d.yz = float2(d.y * cp - d.z * sp, d.y * sp + d.z * cp);
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
@@ -6349,8 +6344,8 @@ PS_OUT ps_main(VS_OUT i)
     MaterialPreviewProfile materialPreviewProfile_ = MaterialPreviewProfile::LookDev;
     std::array<float, 3> lightColor_{1.0f, 1.0f, 1.0f};
     bool useExplicitLightColor_ = false;
-    float environmentRotationDegrees_ = 0.0f;
-    float environmentPitchDegrees_ = 0.0f;
+    float environmentRotationDegrees_ = 0.0f;      // visible APE sky yaw
+    float apeProbeRotationDegrees_ = 0.0f;         // baked reflection/diffuse probe yaw
     float lightYawDegrees_ = 135.0f;
     float lightPitchDegrees_ = 45.0f;
     float lightIntensity_ = 1.2f;

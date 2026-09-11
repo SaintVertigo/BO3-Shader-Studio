@@ -336,3 +336,35 @@ APE preview-sphere shading/environment response and must remain a parity referen
 The half-vector singularity guard stays for numerical robustness, but it is no
 longer described as the source of that APE patch and should not be tuned to erase
 it.
+
+
+## Phase 1n — split APE sun, visible sky, and baked probe orientation
+
+A denser APE recording supersedes the Phase 1m assumption that the manual light
+manipulator rotates one rigid sun/environment rig. APE exposes three distinct
+orientation behaviors:
+
+- the sun direction accepts both horizontal yaw and continuous over/under pitch;
+- the visible Day/Morning/Sunset/Night sky follows the horizontal light motion
+  only and remains vertically upright while the sun passes over either pole;
+- the glossy/reflection response on the material remains at the preset/baked
+  probe orientation instead of following the manual sun/sky yaw. The diffuse
+  probe is kept on that same fixed orientation, matching BO3's independent
+  global/reflection-probe state in the recovered shader structures.
+
+Phase 1n therefore removes the Phase 1m environment-pitch transform and splits
+background sampling from material-probe sampling. `previewApeSettings.x` is the
+visible-sky yaw and `previewApeSettings.w` is the fixed baked-probe yaw. Applying
+an APE preset initializes both to the recovered preset environment yaw; subsequent
+manual light yaw changes only the visible-sky yaw, while light pitch changes only
+the sun direction. Camera orbit remains independent of all three.
+
+This split also preserves an important APE reference artifact: the dark
+low-frequency patch visible in the glossy sphere can remain spatially tied to the
+baked probe even when the direct sun moves onto that side of the sphere. It must
+not be erased merely because it overlaps the directly lit hemisphere.
+
+This is a behavior-level correction derived from the supplied APE recording and
+the recovered BO3 separation between sun constants and probe data. Exact pixel
+identity still requires the missing shipped ToolsGfx deferred-lighting BRDF,
+probe-convolution implementation/data, and presentation Tonemap LUT.

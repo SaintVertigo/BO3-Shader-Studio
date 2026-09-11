@@ -26,7 +26,7 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewBackgroundColor;     // preview clear/background color
     float4 previewLookdevSettings;     // x exposure EV, y tone map, z ground, w contact shadow
     float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
-    float4 previewApeSettings;         // x env yaw radians, y max environment mip, z SH9 valid, w env pitch radians
+    float4 previewApeSettings;         // x visible-sky yaw, y max env mip, z SH9 valid, w baked-probe yaw
     float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
     float4 previewApeDiffuseSH[9];      // Lambert-convolved environment irradiance, Y-up SH9
 };
@@ -103,7 +103,7 @@ float Bo3GlossToRoughness(float normalizedGloss)
     return clamp(sqrt(2.0 / (cosinePower + 2.0)), 0.02, 0.95);
 }
 
-float3 RotateEnvironmentDirection(float3 direction)
+float3 ApplyApeEnvironmentHandedness(float3 direction)
 {
     float3 d = normalize(direction);
     // APE/BO3's asset-preview environment uses the opposite horizontal
@@ -111,21 +111,46 @@ float3 RotateEnvironmentDirection(float3 direction)
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
         d.x = -d.x;
-    float yaw = previewApeSettings.x;
+    return d;
+}
+
+float3 RotateEnvironmentYaw(float3 direction, float yaw)
+{
+    float3 d = ApplyApeEnvironmentHandedness(direction);
     float sy = sin(yaw), cy = cos(yaw);
     d.xz = float2(d.x * cy - d.z * sy, d.x * sy + d.z * cy);
-    float pitch = previewApeSettings.w;
-    float sp = sin(pitch), cp = cos(pitch);
-    d.yz = float2(d.y * cp - d.z * sp, d.y * sp + d.z * cp);
     return normalize(d);
 }
 
-float2 DirectionToEquirect(float3 direction)
+float3 RotateVisibleSkyDirection(float3 direction)
 {
-    float3 d = RotateEnvironmentDirection(direction);
+    // Horizontal light manipulation yaws APE's visible sky. Vertical light
+    // manipulation never pitches/rolls it.
+    return RotateEnvironmentYaw(direction, previewApeSettings.x);
+}
+
+float3 RotateBakedProbeDirection(float3 direction)
+{
+    // APE's glossy/diffuse probe is baked at the preset orientation. It does
+    // not follow manual light yaw or pitch, even though the visible sky yaws.
+    return RotateEnvironmentYaw(direction, previewApeSettings.w);
+}
+
+float2 DirectionToEquirectFromDirection(float3 d)
+{
     float u = atan2(d.z, d.x) * 0.15915494309189535 + 0.5;
     float v = acos(clamp(d.y, -1.0, 1.0)) * 0.3183098861837907;
     return float2(frac(u), saturate(v));
+}
+
+float2 VisibleSkyDirectionToEquirect(float3 direction)
+{
+    return DirectionToEquirectFromDirection(RotateVisibleSkyDirection(direction));
+}
+
+float2 BakedProbeDirectionToEquirect(float3 direction)
+{
+    return DirectionToEquirectFromDirection(RotateBakedProbeDirection(direction));
 }
 
 float3 EnvironmentAt(float2 uv)
@@ -134,7 +159,7 @@ float3 EnvironmentAt(float2 uv)
     float3 ray = previewCameraForward.xyz +
                  previewCameraRight.xyz * (ndc.x * previewCameraParams.x * previewCameraParams.y) +
                  previewCameraUp.xyz * (ndc.y * previewCameraParams.y);
-    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(ray), 0.35).rgb;
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, VisibleSkyDirectionToEquirect(ray), 0.35).rgb;
 }
 
 float LinearToDisplay1(float x)
@@ -199,12 +224,12 @@ float3 ApplyLookdev(float3 color)
 
 float3 EnvironmentDirection(float3 direction)
 {
-    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(direction), 0.0).rgb;
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, BakedProbeDirectionToEquirect(direction), 0.0).rgb;
 }
 
 float3 EnvironmentDirectionLod(float3 direction, float lod)
 {
-    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(direction),
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, BakedProbeDirectionToEquirect(direction),
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
 }
 
@@ -213,7 +238,7 @@ float3 EvaluateApeDiffuseIrradiance(float3 direction)
     if (previewApeSettings.z < 0.5)
         return max(previewEnvironmentAmbient.rgb * 3.14159265, 0.0);
 
-    float3 d = RotateEnvironmentDirection(direction);
+    float3 d = RotateBakedProbeDirection(direction);
     float x = d.x, y = d.y, z = d.z;
     float basis[9] = {
         0.2820947918,

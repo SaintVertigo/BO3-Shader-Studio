@@ -824,7 +824,7 @@ public:
              renderer_.GetPreviewMode() == PreviewMode::DeferredGBuffer);
         setToolTip(enabled
             ? (apeMaterial
-                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Shift+Left rotates APE's lighting rig: the sun and HDR environment move together and can pass over/under the asset continuously. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. R or double-click restores the full selected APE preset."
+                ? "APE Match navigation: Alt+Left orbit, Alt+Middle pan, Alt+Right dolly. Shift+Left moves APE's sun continuously over/under the asset. Horizontal light movement also yaws the visible sky; vertical movement does not pitch it, and the baked material probe stays fixed. Plain Left/Middle/Right and the mouse wheel remain convenient aliases. R or double-click restores the full selected APE preset."
                 : "3D navigation: left-drag rotates the camera, Shift+left-drag moves the preview sun, middle-drag pans, right-drag also moves the sun, mouse wheel zooms, double-click or R resets the camera.")
             : "2D preview. 3D navigation is disabled for this shader.");
     }
@@ -20485,9 +20485,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto& renderer = preview_->renderer();
         renderer.SetLightAngles(static_cast<float>(lightYawSlider_->value()), static_cast<float>(lightPitchSlider_->value()));
 
-        // In APE Match the yaw/pitch controls rotate the same lighting rig as
-        // Shift+LMB: sun + HDR environment move together while the recovered SSI
-        // intensity / probe / shadow calibration stays intact.
+        // In APE Match the yaw/pitch controls mirror Shift+LMB: the sun accepts
+        // both axes continuously, only yaw turns the visible sky, and the baked
+        // reflection/diffuse probe remains at the preset orientation.
         if (renderer.GetMaterialPreviewProfile() != MaterialPreviewProfile::ApeMatch)
         {
             renderer.SetLightIntensity(lightIntensitySlider_->value() / 100.0f);
