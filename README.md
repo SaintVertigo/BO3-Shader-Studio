@@ -277,3 +277,7 @@ Phase 1u fixes the final known translation error in the captured sun-specular br
 ## Phase 1v APE world-frame alignment + direct-specular correction
 
 Phase 1v corrects two capture-grounded issues exposed by the Phase 1u test. First, the APE compute shader really does multiply `alpha^2 * specScale` by `NdotL` before the visibility/distribution denominator; Phase 1u had mistaken the later shadow register for that value. Second, the paired capture's `camToWldMatrix` proves the old Y/Z-only world conversion was incomplete. APE's reference camera basis maps exactly into Studio with `StudioX=-ApeY`, `StudioY=ApeZ`, `StudioZ=ApeX`, and the captured reference camera elevation is 22.5 degrees. APE Match now uses that full conversion for direct-light vectors while preserving Phase 1s direct diffuse, the fixed probe, the captured `skyYaw=90-sunYaw` rule, and the shadow-free baseline.
+
+
+## Phase 1x
+APE Match Sphere now resolves the reference surface normal from reconstructed geometric position, matching APE's captured radial sphere normal field and preventing preview XMODEL/front-face winding from pinning the specular lobe to the rim. Preview-only generated material compilation preserves authored outward TBN orientation; BO3 export keeps native `SV_IsFrontFace`.

@@ -3389,9 +3389,15 @@ GBufferPixelOutput ps_main(const BeginnerMaterialInput input, const uint isFront
 
     // ToolsGfx gbuffer_calculate_albedo forces output alpha to 1 after tinting.
     float4 beginnerAlbedo = float4(color + beginnerEmissive, 1.0);
+    uint beginnerNormalFrontFace = isFrontFace;
+#if defined(BO3_STUDIO_PREVIEW)
+    // Preview meshes are two-sided; preserve their authored outward vertex-normal
+    // frame instead of allowing raster winding to flip the GBuffer normal.
+    beginnerNormalFrontFace = 1u;
+#endif
     float4 beginnerNormalGloss = GBuffer_CalculateNormalGloss(
         input.normal.xyz, input.tangent.xyz, input.biTangent.xyz,
-        isFrontFace, beginnerBump, beginnerGloss, float2(0.0, 17.0));
+        beginnerNormalFrontFace, beginnerBump, beginnerGloss, float2(0.0, 17.0));
     float4 beginnerReflectanceOcclusion = GBuffer_CalculateReflectanceOcclusion(
         uint2(input.position.xy), isFrontFace, beginnerAlbedo,
         beginnerSpecular, float3(1.0, 1.0, 1.0), beginnerAO, true, true);

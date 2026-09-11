@@ -180,3 +180,8 @@ The original BO3 Shader Studio 0.1 bridge release should remain on GitHub so use
 - Reworked the shader embedding again: the HLSL is now appended in six independent raw-string statements inside a static initializer lambda.
 - Every deferred-light source literal is under 3 KB, well below MSVC's per-literal ceiling, and the reconstructed HLSL byte-for-byte matches the Phase 1g shader text.
 - Rendering math, SSI values, probe calibration, and APE lighting behavior are unchanged.
+
+
+# Phase 1x - APE Reference Normal Recovery
+
+Phase 1x fixes the remaining rim-locked hotspot by repairing the normal field that reaches APE Match's BRDF. The Sphere reference path reconstructs the surface position and uses the capture-proven outward radial normal; Studio preview compilation also isolates generated material TBNs from raster `SV_IsFrontFace` winding without changing exported BO3 runtime behavior. See `PATCH_NOTES_PHASE1X.md`.

@@ -6651,8 +6651,16 @@ BO3CustomMaterialPixelInput vs_main(const GBufferVertexInput vertex, const uint 
     // NormalGloss.z = 391/1023. BO3's captured decoder maps that to
     // 0.765226, i.e. Gloss 13.0088 on the authored 0..17 scale.
     // Use APE's stock lit-material default instead of the old arbitrary 6.
+    uint bo3NormalFrontFace = isFrontFace;
+#if defined(BO3_STUDIO_PREVIEW)
+    // Studio's preview meshes are intentionally rendered two-sided. Their
+    // authored vertex normals define the outward surface orientation; D3D raster
+    // winding must not invert that frame while previewing. BO3 export does not
+    // define BO3_STUDIO_PREVIEW, so runtime retains native SV_IsFrontFace logic.
+    bo3NormalFrontFace = 1u;
+#endif
     float4 normalGloss = GBuffer_CalculateNormalGloss(
-        pixel.normal, pixel.tangent, pixel.biTangent, isFrontFace,
+        pixel.normal, pixel.tangent, pixel.biTangent, bo3NormalFrontFace,
         flatTangentNormal, 1.0, float2(13.0, 13.0));
     float4 reflectanceOcclusion = GBuffer_CalculateReflectanceOcclusion(
         pixel.position.xy, isFrontFace, albedo,
@@ -21220,7 +21228,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1w captured Gloss 13 + exact APE projection | GGX probe + filmic display | shadow-tree pending")
+                QString(" | %1 | Phase 1x APE sphere normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21236,7 +21244,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1w captured Gloss 13, 39.430488-degree projection and unfiltered GBuffer reads active; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1x radial reference normal + preview front-face isolation active; captured Gloss 13/projection retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

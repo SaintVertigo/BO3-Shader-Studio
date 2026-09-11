@@ -29,7 +29,7 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewLightColorFulbright; // rgb sun color, w fulbright
     float4 previewBackgroundColor;     // preview clear/background color
     float4 previewLookdevSettings;     // x exposure EV, y tone map, z ground, w contact shadow
-    float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
+    float4 previewDebugSettings;       // x = GBufferView, y = profile, z = preview mesh kind, w = native APE reference mesh
     float4 previewApeSettings;         // x visible-sky yaw, y max env mip, z SH9 valid, w baked-probe yaw
     float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
     float4 previewApeGlobalProbeAverage; // captured CoreSunConstants.avgGlobalProbeColor (rgb)
@@ -290,6 +290,27 @@ float3 ReconstructPreviewWorldPosition(float2 uv, float depth, float3 viewRay)
     return previewCameraPosition.xyz + viewRay * rayDistance;
 }
 
+// Phase 1x: APE's stock preview sphere is a true geometric sphere and the
+// captured decoded NormalGloss field agrees with the analytic radial normal to
+// essentially machine precision across the visible face.  Reconstruct that same
+// outward normal for APE Match's Sphere preview. This removes raster winding and
+// SV_IsFrontFace from the reference-lighting equation without altering exported
+// BO3 material behavior or non-sphere preview modes.
+float3 ResolveApePreviewNormal(float4 normalGloss, float2 uv, float depth, float3 viewRay)
+{
+    float3 decodedNormal = DecodeBo3GBufferNormal(normalGloss);
+    const int profile = (int)(previewDebugSettings.y + 0.5);
+    const int meshKind = (int)(previewDebugSettings.z + 0.5);
+    if (profile == 0 && meshKind == 1)
+    {
+        float3 worldPosition = ReconstructPreviewWorldPosition(uv, depth, viewRay);
+        float radiusSq = dot(worldPosition, worldPosition);
+        if (radiusSq > 1e-8)
+            return worldPosition * rsqrt(radiusSq);
+    }
+    return decodedNormal;
+}
+
 float SampleApeSunShadow(float3 worldPosition, float3 surfaceNormal, float ndotl)
 {
     if (previewApeShadowParams.z < 0.5)
@@ -455,7 +476,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     }
     if (debugMode == 7)
     {
-        float3 debugNormal = DecodeBo3GBufferNormal(rt1);
+        float3 debugNormal = ResolveApePreviewNormal(rt1, uv, depth, viewRay);
         return float4(debugNormal * 0.5 + 0.5, 1.0);
     }
     if (debugMode == 8)
@@ -478,7 +499,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     if (previewLightColorFulbright.w > 0.5 || materialProfile == 2)
         return float4(ApplyLookdev(albedo + emissive), 1.0);
 
-    float3 N = DecodeBo3GBufferNormal(rt1);
+    float3 N = ResolveApePreviewNormal(rt1, uv, depth, viewRay);
     float3 L = normalize(previewLightDirIntensity.xyz);
     float3 V = normalize(-viewRay);
 

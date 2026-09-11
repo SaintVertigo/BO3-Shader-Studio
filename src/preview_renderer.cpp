@@ -446,9 +446,14 @@ public:
         const char* toolsgfxValue = postFxPreviewContext_ == PostFxPreviewContext::ToolsgfxMaterial ? "1" : "0";
         const D3D_SHADER_MACRO postFxMacros[] = {
             {"TOOLSGFX", toolsgfxValue},
+            {"BO3_STUDIO_PREVIEW", "1"},
             {nullptr, nullptr}
         };
-        const D3D_SHADER_MACRO* compileMacros = postFxCompile ? postFxMacros : nullptr;
+        const D3D_SHADER_MACRO studioPreviewMacros[] = {
+            {"BO3_STUDIO_PREVIEW", "1"},
+            {nullptr, nullptr}
+        };
+        const D3D_SHADER_MACRO* compileMacros = postFxCompile ? postFxMacros : studioPreviewMacros;
 
         auto compileSource = [&](const std::string& source, ComPtr<ID3DBlob>& bytecode, std::wstring& diagnostics) -> HRESULT
         {
@@ -3731,7 +3736,30 @@ private:
         data.lightColorFulbright = {sunColor[0], sunColor[1], sunColor[2], fulbright_ ? 1.0f : 0.0f};
         data.backgroundColor = {backgroundColor_[0], backgroundColor_[1], backgroundColor_[2], 1.0f};
         data.lookdevSettings = {lookdevExposureEV_, static_cast<float>(toneMapMode_), groundEnabled_ ? 1.0f : 0.0f, contactShadowStrength_};
-        data.debugSettings = {static_cast<float>(gbufferView_), static_cast<float>(materialPreviewProfile_), 0.0f, 0.0f};
+        // z carries the active preview mesh kind into the deferred compositor.
+        // APE Match uses it to recover the stock sphere's geometric/radial normal
+        // directly from reconstructed position, matching the captured APE sphere
+        // and insulating the reference lobe from XMODEL winding/front-face drift.
+        float previewMeshKind = 0.0f;
+        switch (previewMesh_)
+        {
+        case PreviewMesh::Sphere: previewMeshKind = 1.0f; break;
+        case PreviewMesh::Cube: previewMeshKind = 2.0f; break;
+        case PreviewMesh::Plane: previewMeshKind = 3.0f; break;
+        case PreviewMesh::Card: previewMeshKind = 4.0f; break;
+        case PreviewMesh::Custom: previewMeshKind = 5.0f; break;
+        default: break;
+        }
+        const bool nativeApeReferenceMesh = materialPreviewProfile_ != MaterialPreviewProfile::LookDev &&
+            ((previewMesh_ == PreviewMesh::Sphere && HasApeReferenceMesh(PreviewMesh::Sphere)) ||
+             (previewMesh_ == PreviewMesh::Cube && HasApeReferenceMesh(PreviewMesh::Cube)) ||
+             (previewMesh_ == PreviewMesh::Plane && HasApeReferenceMesh(PreviewMesh::Plane)));
+        data.debugSettings = {
+            static_cast<float>(gbufferView_),
+            static_cast<float>(materialPreviewProfile_),
+            previewMeshKind,
+            nativeApeReferenceMesh ? 1.0f : 0.0f
+        };
         float visibleSkyYawDegrees = environmentRotationDegrees_;
         if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch)
         {
