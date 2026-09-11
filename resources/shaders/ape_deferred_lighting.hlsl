@@ -131,7 +131,7 @@ float3 EnvironmentAt(float2 uv)
     float3 ray = previewCameraForward.xyz +
                  previewCameraRight.xyz * (ndc.x * previewCameraParams.x * previewCameraParams.y) +
                  previewCameraUp.xyz * (ndc.y * previewCameraParams.y);
-    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(ray), 0.0).rgb;
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, DirectionToEquirect(ray), 0.35).rgb;
 }
 
 float LinearToDisplay1(float x)
@@ -145,6 +145,27 @@ float3 LinearToDisplay(float3 color)
     return float3(LinearToDisplay1(color.r), LinearToDisplay1(color.g), LinearToDisplay1(color.b));
 }
 
+float3 ApplyApeDisplayCurve(float3 color)
+{
+    // Source-derived ordering: ToolsGfx's HDR path first normalizes by scene
+    // exposure (HDR_ClampExposure uses gScene.invExposure) and only later runs
+    // the presentation/tonemap stage.  The shipped TonemapLUT payload itself is
+    // not present in the recovered source bundle, so use a neutral luminance
+    // shoulder calibrated from the APE capture rather than the much contrastier
+    // ACES filmic approximation used by older Studio phases.  Working in
+    // luminance preserves the HDR sky's hue; the small chroma reduction matches
+    // APE's visibly less saturated asset-viewer output.
+    color = max(color, 0.0);
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(color, lumaWeights);
+    float mappedLuminance = luminance / (0.78 + luminance);
+    float scale = mappedLuminance / max(luminance, 1e-6);
+    float3 mapped = color * scale;
+    float mappedMean = dot(mapped, lumaWeights);
+    mapped = lerp(float3(mappedMean, mappedMean, mappedMean), mapped, 0.90);
+    return saturate(mapped);
+}
+
 float3 ApplyLookdev(float3 color)
 {
     int profile = (int)(previewDebugSettings.y + 0.5);
@@ -156,19 +177,20 @@ float3 ApplyLookdev(float3 color)
 
     color *= exp2(previewLookdevSettings.x);
     int mode = (int)(previewLookdevSettings.y + 0.5);
+    if (profile == 0)
+    {
+        color = ApplyApeDisplayCurve(color);
+        color = LinearToDisplay(color);
+        return saturate(color);
+    }
+
     if (mode == 1)
         color = color / (1.0 + color); // Reinhard
-    else if (mode == 2 || profile == 0)
+    else if (mode == 2)
     {
-        // The exact ToolsGfx TonemapLUT is still a parity target. Keep the
-        // display curve isolated from probe/sun energy so lighting can be
-        // matched independently of the visible HDR background.
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
-
-    if (profile == 0)
-        color = LinearToDisplay(color);
     return saturate(color);
 }
 
@@ -316,11 +338,21 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 N = DecodeBo3GBufferNormal(rt1);
     float3 L = normalize(previewLightDirIntensity.xyz);
     float3 V = normalize(-viewRay);
-    float3 H = normalize(L + V);
+
+    // L + V becomes zero when the light is directly behind the viewer. The old
+    // normalize() generated undefined/NaN half vectors there, which is the moving
+    // black circular defect visible in the comparison recording. Keep the half
+    // vector finite and explicitly suppress the specular lobe for that degenerate
+    // configuration.
+    float3 halfVectorRaw = L + V;
+    float halfVectorLengthSq = dot(halfVectorRaw, halfVectorRaw);
+    bool validHalfVector = halfVectorLengthSq > 1e-8;
+    float3 H = validHalfVector ? halfVectorRaw * rsqrt(halfVectorLengthSq) : N;
+
     float NdotL = saturate(dot(N,L));
     float NdotV = saturate(dot(N,V));
-    float NdotH = saturate(dot(N,H));
-    float VdotH = saturate(dot(V,H));
+    float NdotH = validHalfVector ? saturate(dot(N,H)) : 0.0;
+    float VdotH = validHalfVector ? saturate(dot(V,H)) : 0.0;
 
     // BO3 GBuffer RT2 is ReflectanceOcclusion, not a conventional
     // (specular.rgb, gloss) texture. Generated procedural materials currently
@@ -330,15 +362,35 @@ float4 ps_main(VS_OUT i) : SV_Target0
     float3 specColor = max(float3(reflectance, reflectance, reflectance), float3(0.04, 0.04, 0.04));
     float gloss = DecodeBo3Gloss(rt1.z);
     float roughness = Bo3GlossToRoughness(gloss);
-    float alpha = roughness * roughness;
-    float a2 = alpha * alpha;
-    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    float D = a2 / max(3.14159265 * denom * denom, 1e-5);
-    float k = (roughness + 1.0); k = (k*k) * 0.125;
-    float Gv = NdotV / max(NdotV * (1.0-k) + k, 1e-5);
-    float Gl = NdotL / max(NdotL * (1.0-k) + k, 1e-5);
     float3 F = specColor + (1.0 - specColor) * pow(1.0 - VdotH, 5.0);
-    float3 specular = (D * Gv * Gl * F) / max(4.0 * NdotV * NdotL, 1e-4);
+
+    // Look Dev intentionally keeps Studio's modern GGX renderer. APE Match uses
+    // the BO3 authoring semantics directly: cosinePowerMap is a 0..17 logarithmic
+    // gloss scale, so Gloss 13 corresponds to an exponent of 8192. The normalized
+    // Blinn/cosine-power lobe reproduces APE's tiny white sun point instead of
+    // translating the legacy gloss into a GGX roughness whose safety clamp chopped
+    // the peak off. CoreSunConstants also exposes sun specScale separately from
+    // intensity; this keeps the specular term structurally independent of diffuse.
+    float3 specular = 0.0;
+    if (materialProfile == 0)
+    {
+        float glossValue = saturate(gloss) * 17.0;
+        float cosinePower = exp2(glossValue);
+        float cosineLobe = validHalfVector ? pow(max(NdotH, 1e-6), cosinePower) : 0.0;
+        float normalizedLobe = ((cosinePower + 8.0) / (8.0 * 3.14159265)) * cosineLobe;
+        specular = F * normalizedLobe * NdotL;
+    }
+    else
+    {
+        float alpha = roughness * roughness;
+        float a2 = alpha * alpha;
+        float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+        float D = a2 / max(3.14159265 * denom * denom, 1e-5);
+        float k = (roughness + 1.0); k = (k*k) * 0.125;
+        float Gv = NdotV / max(NdotV * (1.0-k) + k, 1e-5);
+        float Gl = NdotL / max(NdotL * (1.0-k) + k, 1e-5);
+        specular = (D * Gv * Gl * F) / max(4.0 * NdotV * NdotL, 1e-4);
+    }
 
     float ao = saturate(max(rt2.z, 0.15));
     float3 ambientTint = previewEnvironmentAmbient.rgb;
@@ -357,7 +409,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // A sky-only SH projection has almost no energy in directions facing
             // the preview floor, so retain a conservative global-probe floor from
             // avgCubeColor to represent that bounced/local-probe contribution.
-            float3 bounceFloor = max(ambientTint, 0.0) * (3.14159265 * 0.42) *
+            float3 bounceFloor = max(ambientTint, 0.0) * (3.14159265 * 0.60) *
                                  previewApeLightingCalibration.w;
             irradiance = max(irradiance, bounceFloor);
             // APE's probe structures carry avgCubeColor separately from probe
@@ -367,7 +419,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // variation remains in the SH signal; this only normalizes the mean.
             float probeMean = dot(max(ambientTint, 0.0), float3(0.2126, 0.7152, 0.0722));
             float3 probeBalance = probeMean / max(ambientTint, float3(0.025, 0.025, 0.025));
-            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.72);
+            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.30);
             ambient = albedo * (irradiance / 3.14159265) *
                       previewApeLightingCalibration.x * previewAmbientShadow.x * ao;
         }
@@ -405,28 +457,30 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // high-reflectance/metal-like materials are allowed to retain the
             // sharper roughness-driven lookup.
             float physicalLodFraction = saturate(sqrt(roughness));
-            float apeDielectricLodFraction = saturate(0.52 + (1.0 - gloss) * 0.18);
+            float apeDielectricLodFraction = saturate(0.34 + (1.0 - gloss) * 0.16);
             float lodFraction = lerp(physicalLodFraction,
                                      max(physicalLodFraction, apeDielectricLodFraction),
                                      dielectricWeight);
             float lod = lodFraction * maxLod;
             float3 env = max(EnvironmentDirectionLod(R, lod), 0.0);
 
-            // APE's reflection probes are processed local probes, not the raw
-            // lat-long HDR. Suppress residual HDR sun spikes and normalize the
-            // stock dielectric probe toward the recovered average cube color.
-            // This preserves the broad horizon tint visible in APE without
-            // painting a photographic sky across the sphere.
+            // Reflection-probe records carry exposure and avgCubeColor as separate
+            // fields. avgCubeColor is metadata/fallback, not a replacement for the
+            // directional probe. Phase 1k blended too heavily toward that average
+            // and erased APE's broad blue-gray view-dependent response. Keep the
+            // directional filtered mip dominant, only tame HDR spikes and use the
+            // average as a mild low-frequency stabilization term.
             float probeLuminance = dot(env, float3(0.2126, 0.7152, 0.0722));
-            float compression = rcp(1.0 + max(probeLuminance, 0.0) * 0.30);
+            float compression = rcp(1.0 + max(probeLuminance, 0.0) * 0.12);
             float3 compressedEnv = env * compression;
             float3 probeAverage = max(previewEnvironmentAmbient.rgb, 0.0);
-            float3 processedEnv = lerp(compressedEnv,
-                                       lerp(probeAverage, compressedEnv, 0.32),
-                                       dielectricWeight);
+            float3 processedEnv = lerp(compressedEnv, probeAverage, 0.16 * dielectricWeight);
 
+            // Schlick Fresnel is intentionally left strong at grazing angles: the
+            // APE recording shows a pronounced cool rim even though face-on stock
+            // dielectric reflectance remains only 0.04.
             float3 fresnelEnv = specColor + (1.0 - specColor) * pow(1.0 - NdotV, 5.0);
-            float stockDielectricEnergy = lerp(1.0, 0.38, dielectricWeight);
+            float stockDielectricEnergy = lerp(1.0, 0.82, dielectricWeight);
             envSpec = processedEnv * fresnelEnv * previewApeLightingCalibration.y *
                       previewApeLightingCalibration.w * stockDielectricEnergy * ao;
         }

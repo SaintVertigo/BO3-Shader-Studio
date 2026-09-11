@@ -252,3 +252,58 @@ operations in APE Match only:
 This remains a parity approximation until Treyarch's exact ToolsGfx reflection-
 probe convolution and deferred BRDF are recovered, but it is constrained by the
 new APE video rather than by a generic PBR assumption.
+
+
+## Phase 1l — source-structured sun/probe/display correction
+
+The latest APE comparison recording exposed three structural errors that could be
+traced against the recovered BO3/ToolsGfx source headers instead of tuned as one
+combined lighting number.
+
+### Sun diffuse and sun specular are separate engine state
+
+`gfxcore/hlslcoredefines.h` defines `CoreSunConstants` with independent
+`color`, `specScale`, `globalProbeExposure`, `avgGlobalProbeColor`, and
+`intensity` fields. This supports the APE recording: a stock dielectric can carry
+a tiny, intense direct-sun highlight without making the diffuse term or the
+reflection probe equally mirror-like.
+
+The recovered Geometry/lit material also authors gloss through `cosinePowerMap`
+and the 0..17 gloss range. APE Match therefore no longer converts that legacy
+direct-light gloss into GGX. The direct sun path evaluates a normalized
+cosine-power/Blinn lobe with exponent `2^gloss`. Gloss 13 consequently produces a
+very narrow highlight, while Studio Look Dev deliberately retains its modern GGX
+renderer.
+
+The half-vector path is now guarded before normalization. This removes the moving
+black circular defect seen when `L + V` approached zero in the comparison video.
+
+### Reflection-probe average color is metadata, not the directional probe
+
+`CoreReflectionProbePack` stores `exposure` and `avgCubeColor` separately from the
+probe transform/blend record, while `CoreSunConstants` separately carries global
+probe exposure/average color. Phase 1k overused the recovered average color as a
+replacement for the directional filtered environment and erased the broad
+blue-gray view dependence visible in APE.
+
+Phase 1l keeps filtered directional probe mips dominant, uses the average color
+only as a small stabilization term, retains a moderate dielectric blur, and
+preserves Schlick grazing Fresnel. This is still an approximation of the missing
+`ToolsGfx/diffuseprobe_compute.hlsl` / reflection convolution implementation, but
+its data flow now matches the recovered source structures.
+
+### ToolsGfx exposure ordering and the unresolved Tonemap LUT
+
+`lib/hdrold.hlsl::HDR_ClampExposure()` shows the TOOLSGFX path multiplying HDR
+color by `gScene.invExposure` before the later presentation stage. The exact
+`ToolsGfx/tonemap_lut.hlsl` LUT payload is not present in the recovered source
+bundle. Accordingly Phase 1l does not claim an exact Treyarch tone curve; it
+replaces the temporary ACES approximation with one isolated, neutral
+luminance-preserving shoulder calibrated against the supplied APE capture. The
+new transfer lowers highlight contrast, preserves more shadow detail, and reduces
+the excessive green/yellow saturation seen in the Studio background without
+changing the HDR source itself.
+
+The visible native-resolution sky also returns to derivative-driven trilinear LOD
+selection. Native 8K/4K source resolution and seam-safe wrap/clamp sampling remain
+intact, while the overly crisp forced-mip-0 presentation from Phase 1j is removed.

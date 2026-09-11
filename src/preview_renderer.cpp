@@ -4690,6 +4690,18 @@ float LinearToDisplayEnvironment1(float x)
     return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
 }
 
+float3 ApplyApeEnvironmentCurve(float3 color)
+{
+    color = max(color, 0.0);
+    const float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(color, lumaWeights);
+    float mappedLuminance = luminance / (0.78 + luminance);
+    float scale = mappedLuminance / max(luminance, 1e-6);
+    float3 mapped = color * scale;
+    float mappedMean = dot(mapped, lumaWeights);
+    return saturate(lerp(float3(mappedMean, mappedMean, mappedMean), mapped, 0.90));
+}
+
 float3 ApplyEnvironmentDisplay(float3 color)
 {
     color = max(color, 0.0);
@@ -4697,16 +4709,17 @@ float3 ApplyEnvironmentDisplay(float3 color)
     if (profile == 2) return previewBackgroundColor.rgb;
     color *= exp2(previewLookdevSettings.x);
     int mode = (int)(previewLookdevSettings.y + 0.5);
-    if (mode == 1)
+    if (profile == 0)
+        color = ApplyApeEnvironmentCurve(color);
+    else if (mode == 1)
         color = color / (1.0 + color);
-    else if (mode == 2 || profile == 0)
+    else if (mode == 2)
     {
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         color = saturate((color * (a * color + b)) / (color * (c * color + d) + e));
     }
     // Deferred APE Match already performs the desktop sRGB transfer after its
-    // tone curve.  Forward material mode used to omit that final transfer, so
-    // switching preview paths changed the apparent sky contrast.
+    // tone curve. Forward material mode uses the same transfer here.
     if (profile == 0)
         color = float3(LinearToDisplayEnvironment1(color.r),
                        LinearToDisplayEnvironment1(color.g),
@@ -4716,10 +4729,10 @@ float3 ApplyEnvironmentDisplay(float3 color)
 
 float4 ps_main(VS_OUT i) : SV_Target0
 {
-    // The visible sky is presentation imagery, not a rough reflection lookup.
-    // Always display the authored base mip; probe filtering uses explicit LODs
-    // in the deferred compositor instead.
-    float3 env = previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(i.skyDirection.xyz), 0.0).rgb;
+    // Keep the native 8K source, but use a light fixed trilinear footprint similar to the
+    // APE capture instead of forcing the absolute base mip. Forcing mip 0 made Phase 1j
+    // unnaturally crisp/noisy even though probe filtering correctly used mips.
+    float3 env = previewEnvironment.SampleLevel(previewSampler, DirectionToEquirect(i.skyDirection.xyz), 0.35).rgb;
     return float4(ApplyEnvironmentDisplay(env), 1.0);
 }
 )";
