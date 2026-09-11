@@ -1562,6 +1562,15 @@ public:
         apeSunIrradianceScale_ = std::clamp(sunIrradianceScale, 0.0f, 16.0f);
         apeProbeExposure_ = std::clamp(probeExposure, 0.0f, 8.0f);
     }
+    void SetApeGlobalProbeAverageColor(float r, float g, float b)
+    {
+        apeGlobalProbeAverageColor_ = {std::max(0.0f, r), std::max(0.0f, g), std::max(0.0f, b)};
+        useExplicitApeGlobalProbeAverage_ = true;
+    }
+    void ResetApeGlobalProbeAverageColorToEnvironment()
+    {
+        useExplicitApeGlobalProbeAverage_ = false;
+    }
     void SetLightColor(float r, float g, float b)
     {
         lightColor_ = {std::max(0.0f, r), std::max(0.0f, g), std::max(0.0f, b)};
@@ -3630,7 +3639,7 @@ private:
     bool CreateDeferredLightBuffer(std::wstring& error)
     {
         D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = 368; // 23 float4s: core lighting + APE probe/SH9 + captured sun-shadow transform
+        desc.ByteWidth = 384; // 24 float4s: core lighting + captured probe average/SH9 + sun-shadow transform
         desc.Usage = D3D11_USAGE_DYNAMIC;
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3657,6 +3666,7 @@ private:
             DirectX::XMFLOAT4 debugSettings;
             DirectX::XMFLOAT4 apeSettings;
             DirectX::XMFLOAT4 apeLightingCalibration;
+            DirectX::XMFLOAT4 apeGlobalProbeAverage;
             DirectX::XMFLOAT4 apeDiffuseSH[9];
             DirectX::XMFLOAT4 apeShadowRow0;
             DirectX::XMFLOAT4 apeShadowRow1;
@@ -3705,6 +3715,10 @@ private:
         data.apeLightingCalibration = {
             apeDiffuseProbeScale_, apeSpecularProbeScale_, apeSunIrradianceScale_, apeProbeExposure_
         };
+        const auto apeProbeAverage = useExplicitApeGlobalProbeAverage_
+            ? apeGlobalProbeAverageColor_
+            : environmentAverageColor_;
+        data.apeGlobalProbeAverage = {apeProbeAverage[0], apeProbeAverage[1], apeProbeAverage[2], 0.0f};
         for (size_t i = 0; i < environmentDiffuseSH_.size(); ++i)
         {
             data.apeDiffuseSH[i] = {
@@ -3715,14 +3729,12 @@ private:
         data.apeShadowRow1 = {apeShadowWorldViewProj_._21, apeShadowWorldViewProj_._22, apeShadowWorldViewProj_._23, apeShadowWorldViewProj_._24};
         data.apeShadowRow2 = {apeShadowWorldViewProj_._31, apeShadowWorldViewProj_._32, apeShadowWorldViewProj_._33, apeShadowWorldViewProj_._34};
         data.apeShadowRow3 = {apeShadowWorldViewProj_._41, apeShadowWorldViewProj_._42, apeShadowWorldViewProj_._43, apeShadowWorldViewProj_._44};
-        // The captured APE atlas is R16. Studio reconstructs the receiver world
-        // position from the camera depth buffer, so a single 1/65535 step was
-        // too small and caused widespread self-shadow acne that visually reduced
-        // the moving sun to a thin strip. Use an 8-step R16 receiver bias so the
-        // broad direct-light hemisphere survives while the shadow map can still
-        // contribute local self-shadowing.
-        data.apeShadowParams = {1.0f / 1024.0f, 8.0f / 65535.0f,
-                                (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch && apeShadowSRV_.Get() != nullptr) ? 1.0f : 0.0f, 0.0f};
+        // Phase 1r uses the actual D16 depth surface as the shadow SRV (instead
+        // of a separately quantized color copy), plus raster and normal bias.
+        // Keep only a small comparison-value bias here. w is the receiver normal
+        // offset in Studio world units; the shader slope-scales it near N.L=0.
+        data.apeShadowParams = {1.0f / 1024.0f, 2.0f / 65535.0f,
+                                (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch && apeShadowSRV_.Get() != nullptr) ? 1.0f : 0.0f, 0.0040f};
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(context_->Map(deferredLightBuffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
@@ -5788,36 +5800,40 @@ PS_OUT ps_main(VS_OUT i)
     bool CreateApeShadowResources(std::wstring& error)
     {
         constexpr UINT shadowSize = 1024;
-        D3D11_TEXTURE2D_DESC colorDesc{};
-        colorDesc.Width = shadowSize;
-        colorDesc.Height = shadowSize;
-        colorDesc.MipLevels = 1;
-        colorDesc.ArraySize = 1;
-        colorDesc.Format = DXGI_FORMAT_R16_UNORM;
-        colorDesc.SampleDesc.Count = 1;
-        colorDesc.Usage = D3D11_USAGE_DEFAULT;
-        colorDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        HRESULT hr = device_->CreateTexture2D(&colorDesc, nullptr, apeShadowTexture_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) { error = L"CreateTexture2D failed for APE sun-shadow R16 target."; return false; }
-        hr = device_->CreateRenderTargetView(apeShadowTexture_.Get(), nullptr, apeShadowRTV_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) { error = L"CreateRenderTargetView failed for APE sun-shadow target."; return false; }
-        hr = device_->CreateShaderResourceView(apeShadowTexture_.Get(), nullptr, apeShadowSRV_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) { error = L"CreateShaderResourceView failed for APE sun-shadow target."; return false; }
 
-        D3D11_TEXTURE2D_DESC depthDesc{};
-        depthDesc.Width = shadowSize;
-        depthDesc.Height = shadowSize;
-        depthDesc.MipLevels = 1;
-        depthDesc.ArraySize = 1;
-        depthDesc.Format = DXGI_FORMAT_D16_UNORM;
-        depthDesc.SampleDesc.Count = 1;
-        depthDesc.Usage = D3D11_USAGE_DEFAULT;
-        depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-        ComPtr<ID3D11Texture2D> depthTexture;
-        hr = device_->CreateTexture2D(&depthDesc, nullptr, depthTexture.GetAddressOf());
+        // Phase 1r: make the shadow map one real depth resource. Phase 1o/q
+        // rendered depth into a D16 DSV *and* copied SV_Position.z into a
+        // separate R16 color target, then sampled the color copy. The two paths
+        // quantize/rasterize differently, which is disastrous for self-shadowing
+        // when the receiver is reconstructed from camera depth. APE's captured
+        // t54 is an R16 shadow resource; use a typeless R16 texture so the same
+        // hardware depth values written by the rasterizer are read by SampleCmp.
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = shadowSize;
+        td.Height = shadowSize;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16_TYPELESS;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = device_->CreateTexture2D(&td, nullptr, apeShadowTexture_.ReleaseAndGetAddressOf());
         if (FAILED(hr)) { error = L"CreateTexture2D failed for APE sun-shadow depth target."; return false; }
-        hr = device_->CreateDepthStencilView(depthTexture.Get(), nullptr, apeShadowDSV_.ReleaseAndGetAddressOf());
-        if (FAILED(hr)) { error = L"CreateDepthStencilView failed for APE sun-shadow depth target."; return false; }
+
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsv{};
+        dsv.Format = DXGI_FORMAT_D16_UNORM;
+        dsv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        dsv.Texture2D.MipSlice = 0;
+        hr = device_->CreateDepthStencilView(apeShadowTexture_.Get(), &dsv, apeShadowDSV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateDepthStencilView failed for APE sun-shadow target."; return false; }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R16_UNORM;
+        srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srv.Texture2D.MostDetailedMip = 0;
+        srv.Texture2D.MipLevels = 1;
+        hr = device_->CreateShaderResourceView(apeShadowTexture_.Get(), &srv, apeShadowSRV_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateShaderResourceView failed for APE sun-shadow target."; return false; }
 
         D3D11_BUFFER_DESC cbd{};
         cbd.ByteWidth = 64;
@@ -5826,6 +5842,21 @@ PS_OUT ps_main(VS_OUT i)
         cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         hr = device_->CreateBuffer(&cbd, nullptr, apeShadowMatrixBuffer_.ReleaseAndGetAddressOf());
         if (FAILED(hr)) { error = L"CreateBuffer failed for APE sun-shadow matrix."; return false; }
+
+        // Dedicated shadow rasterizer. A small fixed + slope-scaled bias pushes
+        // caster depth away from the receiver, eliminating the broad acne band
+        // without changing the sphere's N.L terminator. Cull none is deliberate:
+        // APE's preview reference meshes are two-sided in several tool paths.
+        D3D11_RASTERIZER_DESC rs{};
+        rs.FillMode = D3D11_FILL_SOLID;
+        rs.CullMode = D3D11_CULL_NONE;
+        rs.FrontCounterClockwise = FALSE;
+        rs.DepthClipEnable = TRUE;
+        rs.DepthBias = 2;
+        rs.SlopeScaledDepthBias = 1.0f;
+        rs.DepthBiasClamp = 0.0025f;
+        hr = device_->CreateRasterizerState(&rs, apeShadowRasterizerState_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) { error = L"CreateRasterizerState failed for APE sun-shadow bias state."; return false; }
 
         D3D11_SAMPLER_DESC sd{};
         sd.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
@@ -5843,8 +5874,8 @@ PS_OUT ps_main(VS_OUT i)
     void RenderApeShadowMap()
     {
         if (materialPreviewProfile_ != MaterialPreviewProfile::ApeMatch ||
-            !apeShadowVertexShader_ || !apeShadowPixelShader_ || !apeShadowInputLayout_ ||
-            !apeShadowRTV_ || !apeShadowDSV_ || !apeShadowMatrixBuffer_)
+            !apeShadowVertexShader_ || !apeShadowInputLayout_ ||
+            !apeShadowDSV_ || !apeShadowMatrixBuffer_ || !apeShadowRasterizerState_)
             return;
         const PreviewMeshBuffers* mesh = CurrentPreviewMesh();
         if (!mesh || !mesh->vb || !mesh->ib || mesh->indexCount == 0) return;
@@ -5878,18 +5909,15 @@ PS_OUT ps_main(VS_OUT i)
             context_->Unmap(apeShadowMatrixBuffer_.Get(), 0);
         }
 
-        const float clear[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        context_->ClearRenderTargetView(apeShadowRTV_.Get(), clear);
         context_->ClearDepthStencilView(apeShadowDSV_.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-        ID3D11RenderTargetView* rtv = apeShadowRTV_.Get();
-        context_->OMSetRenderTargets(1, &rtv, apeShadowDSV_.Get());
+        context_->OMSetRenderTargets(0, nullptr, apeShadowDSV_.Get());
         D3D11_VIEWPORT vp{};
         vp.Width = 1024.0f;
         vp.Height = 1024.0f;
         vp.MinDepth = 0.0f;
         vp.MaxDepth = 1.0f;
         context_->RSSetViewports(1, &vp);
-        context_->RSSetState(materialRasterizerState_.Get());
+        context_->RSSetState(apeShadowRasterizerState_.Get());
         context_->IASetInputLayout(apeShadowInputLayout_.Get());
         UINT stride = sizeof(MaterialVertex), offset = 0;
         ID3D11Buffer* vb = mesh->vb.Get();
@@ -5899,7 +5927,9 @@ PS_OUT ps_main(VS_OUT i)
         context_->VSSetShader(apeShadowVertexShader_.Get(), nullptr, 0);
         ID3D11Buffer* cb = apeShadowMatrixBuffer_.Get();
         context_->VSSetConstantBuffers(0, 1, &cb);
-        context_->PSSetShader(apeShadowPixelShader_.Get(), nullptr, 0);
+        // Depth-only pass: sampling the same D16 surface later guarantees that
+        // raster depth bias and comparison depth live in one quantization domain.
+        context_->PSSetShader(nullptr, nullptr, 0);
         context_->DrawIndexed(mesh->indexCount, 0, 0);
         context_->OMSetRenderTargets(0, nullptr, nullptr);
     }
@@ -6854,6 +6884,8 @@ PS_OUT ps_main(VS_OUT i)
     float apeSpecularProbeScale_ = 1.0f;
     float apeSunIrradianceScale_ = 1.0f;
     float apeProbeExposure_ = 1.0f;
+    std::array<float, 3> apeGlobalProbeAverageColor_{0.771301925f, 1.01348603f, 1.53983426f};
+    bool useExplicitApeGlobalProbeAverage_ = false;
     fs::path environmentPath_{};
     bool environmentEnabled_ = false;
     bool environmentIsEXR_ = false;
@@ -6958,6 +6990,7 @@ PS_OUT ps_main(VS_OUT i)
     ComPtr<ID3D11RenderTargetView> apeShadowRTV_;
     ComPtr<ID3D11DepthStencilView> apeShadowDSV_;
     ComPtr<ID3D11ShaderResourceView> apeShadowSRV_;
+    ComPtr<ID3D11RasterizerState> apeShadowRasterizerState_;
     ComPtr<ID3D11ShaderResourceView> neutralSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralNormalSRV_;
     ComPtr<ID3D11ShaderResourceView> neutralBlackSRV_;

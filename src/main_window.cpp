@@ -21141,7 +21141,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         static constexpr ApePreset presets[] = {
             // name       sun RGB                         SSI pitch/yaw   stops          EV    cmp   range       pen  display  ambient shadow envYaw  diffGI specGI sunGI probeExp
             {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.15f, 0.95f, 0.48f, 120.0f, 1.40f, 0.120f, 2.6f, 0.90f},
-            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.15f, 1.00f, 1.00f, 120.0f, 1.70f, 0.135f, 3.6f, 1.05f},
+            // Day energy is capture-derived, not eyeballed:
+            // sun.color * invExposure = 16384 / 7765.01172 = 2.1099775
+            // globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.2500001
+            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 120.0f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
             {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f},
             {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.40f, 0.90f, 0.60f, 120.0f, 1.25f, 0.105f, 2.2f, 0.62f}
         };
@@ -21186,6 +21189,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         r.SetLightIntensity(1.0f);
         r.SetApeLightingCalibration(p.diffuseProbeScale, p.specularProbeScale,
                                     p.sunIrradianceScale, p.probeExposure);
+        if (index == 1)
+            r.SetApeGlobalProbeAverageColor(0.771301925f, 1.01348603f, 1.53983426f);
+        else
+            r.ResetApeGlobalProbeAverageColorToEnvironment();
         r.SetAmbientIntensity(p.ambient);
         r.SetShadowStrength(p.shadow);
         r.SetContactShadowStrength(0.0f);
@@ -21206,7 +21213,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1q.1 captured sun-axis fix | GGX probe + APE BRDF + probe LOD + filmic display")
+                QString(" | %1 | Phase 1r captured light energy + depth shadow | GGX probe + APE BRDF + filmic display")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21222,7 +21229,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1q.1 captured sun direction + GGX probe active").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1r captured light energy + hardware depth shadow active").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

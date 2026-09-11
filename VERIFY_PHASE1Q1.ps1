@@ -7,8 +7,8 @@ $renderer = Get-Content -Raw (Join-Path $root "src\preview_renderer.cpp")
 $checks = @(
     @{ Text = $main; Pattern = 'std::fmod\(p\.ssiYaw, 360\.0f\)'; Name = 'captured SSI yaw used directly' },
     @{ Text = $renderer; Pattern = '90\.0f - lightYawDegrees_'; Name = 'captured visible-sky yaw relationship' },
-    @{ Text = $renderer; Pattern = '8\.0f / 65535\.0f'; Name = 'R16 receiver bias hotfix' },
-    @{ Text = $main; Pattern = 'Phase 1q\.1 captured sun-axis fix'; Name = 'runtime Phase 1q.1 fingerprint' }
+    @{ Text = $renderer; Pattern = '(8\.0f / 65535\.0f|DXGI_FORMAT_R16_TYPELESS)'; Name = 'shadow receiver/depth recovery' },
+    @{ Text = $main; Pattern = 'Phase 1(q\.1 captured sun-axis fix|r captured light energy \+ depth shadow)'; Name = 'runtime Phase 1q.1-or-newer fingerprint' }
 )
 
 foreach ($check in $checks) {

@@ -32,6 +32,7 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewDebugSettings;       // x = GBufferView enum, y = MaterialPreviewProfile
     float4 previewApeSettings;         // x visible-sky yaw, y max env mip, z SH9 valid, w baked-probe yaw
     float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
+    float4 previewApeGlobalProbeAverage; // captured CoreSunConstants.avgGlobalProbeColor (rgb)
     float4 previewApeDiffuseSH[9];      // Lambert-convolved environment irradiance, Y-up SH9
     float4 previewApeShadowRow0;
     float4 previewApeShadowRow1;
@@ -289,10 +290,21 @@ float3 ReconstructPreviewWorldPosition(float2 uv, float depth, float3 viewRay)
     return previewCameraPosition.xyz + viewRay * rayDistance;
 }
 
-float SampleApeSunShadow(float3 worldPosition)
+float SampleApeSunShadow(float3 worldPosition, float3 surfaceNormal, float ndotl)
 {
     if (previewApeShadowParams.z < 0.5)
         return 1.0;
+
+    // Phase 1r: the old Phase 1o/q shadow target was a color R16 copy of
+    // SV_Position.z with no raster depth bias. Reprojecting the camera depth
+    // back to world space then comparing against that copy produced severe
+    // self-shadow acne, which erased almost the entire APE direct-light
+    // hemisphere and left only a thin moving strip. APE's real map is a
+    // hardware depth surface. Offset the receiver along the geometric normal
+    // (slope-scaled near the terminator) before the comparison, matching the
+    // role of the native shadow raster bias without weakening broad N.L light.
+    float normalBias = previewApeShadowParams.w * lerp(2.0, 1.0, saturate(ndotl));
+    worldPosition += normalize(surfaceNormal) * normalBias;
 
     float4 p = float4(worldPosition, 1.0);
     float4 clip = float4(
@@ -529,27 +541,20 @@ float4 ps_main(VS_OUT i) : SV_Target0
     {
         if (materialProfile == 0)
         {
-            // APE's ToolsGfx scene constants expose a global probe exposure and
-            // average probe color, while its renderer runs a dedicated diffuse
-            // probe compute stage before deferred lighting. Evaluate the local
-            // HDR environment through Lambert-convolved SH9 rather than using
-            // the background image itself as material lighting.
-            float3 irradiance = EvaluateApeDiffuseIrradiance(N) * previewApeLightingCalibration.w;
-            // The assetviewer LED was baked with four bounces and local probes.
-            // A sky-only SH projection has almost no energy in directions facing
-            // the preview floor, so retain a conservative global-probe floor from
-            // avgCubeColor to represent that bounced/local-probe contribution.
-            float3 bounceFloor = max(ambientTint, 0.0) * (3.14159265 * 0.60) *
-                                 previewApeLightingCalibration.w;
+            // Capture-grounded energy domain. In the Day capture:
+            //   globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.25
+            // and avgGlobalProbeColor is stored separately in CoreSunConstants.
+            // Earlier phases multiplied raw sky SH by ~1.8 and invented a 60%
+            // bounce floor, making indirect light dominate the sphere so strongly
+            // that moving the sun was almost invisible. Keep the directional SH,
+            // but scale it in APE's captured probe-exposure domain and use the
+            // captured average probe only as the physically appropriate constant
+            // radiance floor (constant radiance -> PI * L irradiance).
+            float probeExposure = previewApeLightingCalibration.w;
+            float3 irradiance = EvaluateApeDiffuseIrradiance(N) * probeExposure;
+            float3 capturedAverageRadiance = max(previewApeGlobalProbeAverage.rgb, 0.0) * probeExposure;
+            float3 bounceFloor = capturedAverageRadiance * 3.14159265;
             irradiance = max(irradiance, bounceFloor);
-            // APE's probe structures carry avgCubeColor separately from probe
-            // exposure. Use the recovered environment average as a mild chroma
-            // adaptation term so blue/green HDR skies do not color-cast diffuse
-            // GI as strongly as a raw lat-long sample would. Directional color
-            // variation remains in the SH signal; this only normalizes the mean.
-            float probeMean = dot(max(ambientTint, 0.0), float3(0.2126, 0.7152, 0.0722));
-            float3 probeBalance = probeMean / max(ambientTint, float3(0.025, 0.025, 0.025));
-            irradiance *= lerp(float3(1.0, 1.0, 1.0), probeBalance, 0.30);
             ambient = albedo * (irradiance / 3.14159265) *
                       previewApeLightingCalibration.x * previewAmbientShadow.x * ao;
         }
@@ -564,7 +569,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
     if (materialProfile == 0)
     {
         float3 worldPosition = ReconstructPreviewWorldPosition(uv, depth, viewRay);
-        shadowTerm = lerp(1.0, SampleApeSunShadow(worldPosition), previewAmbientShadow.y);
+        shadowTerm = lerp(1.0, SampleApeSunShadow(worldPosition, N, NdotL), previewAmbientShadow.y);
     }
     else
     {
@@ -583,8 +588,10 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // Captured APE deferred shader uses the normalized PACKED gloss signal.
             // With APE's stock neutral normal texture (blue/height = 0), Gloss 13
             // yields about 13/17 and therefore probe LOD ~= 1.176. The important
-            // Phase 1p change is that this LOD now addresses a real prefiltered
-            // TextureCube instead of a sharp lat-long texture with generic mips.
+            // Phase 1q keeps the captured 5*(1-gloss) lookup, but the cube mips
+            // are now a true roughness-prefilter chain. Phase 1p accidentally
+            // reused the direct 2^(17*gloss) lobe for mip convolution, leaving
+            // mip 1 effectively sharp and making the result look unchanged.
             float lod = 5.0 * (1.0 - saturate(lightingGloss));
             float3 env = max(ReflectionProbeDirectionLod(R, lod), 0.0);
             float2 dfg = SampleApeEnvBrdf(NdotV, lightingGloss);
