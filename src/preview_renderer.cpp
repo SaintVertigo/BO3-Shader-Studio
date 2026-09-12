@@ -1560,12 +1560,15 @@ public:
     void SetMaterialPreviewProfile(MaterialPreviewProfile profile) { materialPreviewProfile_ = profile; }
     MaterialPreviewProfile GetMaterialPreviewProfile() const { return materialPreviewProfile_; }
     void SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
-                                   float sunIrradianceScale, float probeExposure)
+                                   float sunIrradianceScale, float probeExposure,
+                                   float directDiffuseScale, float directSpecularScale)
     {
-        apeDiffuseProbeScale_ = std::clamp(diffuseProbeScale, 0.0f, 8.0f);
-        apeSpecularProbeScale_ = std::clamp(specularProbeScale, 0.0f, 4.0f);
+        apeDiffuseProbeScale_ = std::clamp(diffuseProbeScale, 0.0f, 16.0f);
+        apeSpecularProbeScale_ = std::clamp(specularProbeScale, 0.0f, 8.0f);
         apeSunIrradianceScale_ = std::clamp(sunIrradianceScale, 0.0f, 16.0f);
         apeProbeExposure_ = std::clamp(probeExposure, 0.0f, 8.0f);
+        apeDirectDiffuseScale_ = std::clamp(directDiffuseScale, 0.0f, 8.0f);
+        apeDirectSpecularScale_ = std::clamp(directSpecularScale, 0.0f, 64.0f);
     }
     void SetApeGlobalProbeAverageColor(float r, float g, float b)
     {
@@ -3730,7 +3733,7 @@ private:
     bool CreateDeferredLightBuffer(std::wstring& error)
     {
         D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = 384; // 24 float4s: core lighting + captured probe average/SH9 + sun-shadow transform
+        desc.ByteWidth = 400; // 25 float4s: core lighting + APE direct split + captured probe average/SH9 + sun-shadow transform
         desc.Usage = D3D11_USAGE_DYNAMIC;
         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3757,6 +3760,7 @@ private:
             DirectX::XMFLOAT4 debugSettings;
             DirectX::XMFLOAT4 apeSettings;
             DirectX::XMFLOAT4 apeLightingCalibration;
+            DirectX::XMFLOAT4 apeDirectCalibration;
             DirectX::XMFLOAT4 apeGlobalProbeAverage;
             DirectX::XMFLOAT4 apeDiffuseSH[9];
             DirectX::XMFLOAT4 apeShadowRow0;
@@ -3820,6 +3824,9 @@ private:
         };
         data.apeLightingCalibration = {
             apeDiffuseProbeScale_, apeSpecularProbeScale_, apeSunIrradianceScale_, apeProbeExposure_
+        };
+        data.apeDirectCalibration = {
+            apeDirectDiffuseScale_, apeDirectSpecularScale_, 0.0f, 0.0f
         };
         const auto apeProbeAverage = useExplicitApeGlobalProbeAverage_
             ? apeGlobalProbeAverageColor_
@@ -5078,12 +5085,16 @@ struct VS_OUT
 float2 DirectionToEquirect(float3 direction)
 {
     float3 d = normalize(direction);
-    // APE/BO3's asset-preview environment uses the opposite horizontal
-    // handedness from the Studio camera frame. Keep this isolated to APE Match
-    // so Look Dev and user-authored environment orientation remain unchanged.
+    // Phase 1ad: visible APE sky and baked material probe do not use
+    // the same handedness in Studio. The probe keeps the capture-derived 1z
+    // world-frame transform, while the panorama must remain unmirrored as the
+    // camera orbits. This is the visible-sky mapping:
+    //   sample = (StudioZ, StudioY, StudioX)
+    // The old X-only flip made lateral camera motion run through the panorama
+    // backwards and is why the Day/Night backgrounds appeared horizontally flipped.
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
-        d.x = -d.x;
+        d = float3(d.z, d.y, d.x);
     // APE's manual light elevation does not pitch the visible sky. Only the
     // horizontal light component yaws the background. previewApeSettings.w is
     // reserved for the fixed baked-probe orientation used by material lighting.
@@ -7029,6 +7040,8 @@ PS_OUT ps_main(VS_OUT i)
     float apeSpecularProbeScale_ = 1.0f;
     float apeSunIrradianceScale_ = 1.0f;
     float apeProbeExposure_ = 1.0f;
+    float apeDirectDiffuseScale_ = 1.0f;
+    float apeDirectSpecularScale_ = 1.0f;
     std::array<float, 3> apeGlobalProbeAverageColor_{0.771301925f, 1.01348603f, 1.53983426f};
     bool useExplicitApeGlobalProbeAverage_ = false;
     fs::path environmentPath_{};
@@ -7278,9 +7291,11 @@ MaterialPreviewProfile PreviewRenderer::GetMaterialPreviewProfile() const
 }
 
 void PreviewRenderer::SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
-                                                 float sunIrradianceScale, float probeExposure)
+                                                 float sunIrradianceScale, float probeExposure,
+                                                 float directDiffuseScale, float directSpecularScale)
 {
-    impl_->SetApeLightingCalibration(diffuseProbeScale, specularProbeScale, sunIrradianceScale, probeExposure);
+    impl_->SetApeLightingCalibration(diffuseProbeScale, specularProbeScale, sunIrradianceScale, probeExposure,
+                                     directDiffuseScale, directSpecularScale);
 }
 
 void PreviewRenderer::SetApeGlobalProbeAverageColor(float r, float g, float b)

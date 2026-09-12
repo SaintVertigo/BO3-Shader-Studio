@@ -13,3 +13,7 @@ Studio Preview docks now use APE-like collapsible minimum hints so horizontal an
 
 ## Phase 1ab
 APE Match now aligns the native APE preview-mesh frame/UV orientation, separates visible-sky and baked-probe Day yaw, uses a fixed 4.38-radius Reset camera, and retains APE-like unconstrained preview resizing.
+
+
+## Phase 1ad
+APE Match separates visible-sky handedness from the baked material-probe frame, restores the remaining side-orbit probe range, and rebalances Night so broad direct diffuse no longer overwhelms APE's dark indirect response while preserving the compact specular hotspot.

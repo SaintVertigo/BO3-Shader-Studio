@@ -144,7 +144,8 @@ public:
     void SetMaterialPreviewProfile(MaterialPreviewProfile profile);
     MaterialPreviewProfile GetMaterialPreviewProfile() const;
     void SetApeLightingCalibration(float diffuseProbeScale, float specularProbeScale,
-                                   float sunIrradianceScale, float probeExposure);
+                                   float sunIrradianceScale, float probeExposure,
+                                   float directDiffuseScale = 1.0f, float directSpecularScale = 1.0f);
     void SetApeGlobalProbeAverageColor(float r, float g, float b);
     void ResetApeGlobalProbeAverageColorToEnvironment();
     void SetLightColor(float r, float g, float b);

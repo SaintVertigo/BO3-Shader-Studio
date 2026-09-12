@@ -21215,24 +21215,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             float specularProbeScale;
             float sunIrradianceScale;
             float probeExposure;
+            float directDiffuseScale;
+            float directSpecularScale;
         };
 
         // Source of truth for the SSI fields is Treyarch's shipped source_data/ssi.gdt.
-        // The final four values remain the small calibration bridge between Studio's
-        // normalized HDR domain and APE's relative-HDR scene constants. Phase 1o
+        // The trailing calibration values bridge Studio's normalized HDR domain
+        // and APE's relative-HDR scene constants. Phase 1ad also carries a
+        // direct diffuse/specular split so Night can preserve its tiny white
+        // hotspot without lighting half the sphere like Day. Phase 1o
         // replaces the BRDF, reflection LOD, sky-yaw, sun shadow and presentation
         // equations with values captured directly from APE.
         // Phase 1g no longer subtracts EV from Stops to invent a light intensity: APE
         // exposes probe exposure and sun intensity as separate scene constants.
         static constexpr ApePreset presets[] = {
-            // name       sun RGB                         SSI pitch/yaw   stops          EV    cmp   range       pen  display  ambient shadow envYaw  diffGI specGI sunGI probeExp
-            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.15f, 0.95f, 0.48f, 120.0f, 1.40f, 0.120f, 2.6f, 0.90f},
+            // name       sun RGB                         SSI pitch/yaw   stops          EV    cmp   range       pen  display  ambient shadow envYaw  diffGI specGI sunGI probeExp directD directS
+            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.15f, 0.95f, 0.48f, 120.0f, 1.40f, 0.120f, 2.6f, 0.90f, 1.0f, 1.0f},
             // Day energy is capture-derived, not eyeballed:
             // sun.color * invExposure = 16384 / 7765.01172 = 2.1099775
             // globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.2500001
-            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 172.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
-            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f},
-            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.40f, 0.90f, 0.60f, 120.0f, 1.25f, 0.105f, 2.2f, 0.62f}
+            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 172.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f, 1.0f, 1.0f},
+            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f, 1.0f, 1.0f},
+            // Night screenshot parity: APE's sphere is mostly indirect teal light
+            // with only a compact white specular point. Keep the hotspot by
+            // separating direct diffuse from direct specular instead of dimming
+            // the entire direct branch together.
+            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.80f, 1.00f, 0.60f, 120.0f, 3.80f, 0.180f, 0.050f, 0.85f, 1.0f, 28.0f}
         };
         const ApePreset& p = presets[std::clamp(index, 0, 3)];
         auto& r = preview_->renderer();
@@ -21284,7 +21292,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // irradiance/probe calibration in the deferred compositor instead.
         r.SetLightIntensity(1.0f);
         r.SetApeLightingCalibration(p.diffuseProbeScale, p.specularProbeScale,
-                                    p.sunIrradianceScale, p.probeExposure);
+                                    p.sunIrradianceScale, p.probeExposure,
+                                    p.directDiffuseScale, p.directSpecularScale);
         if (index == 1)
             r.SetApeGlobalProbeAverageColor(0.771301925f, 1.01348603f, 1.53983426f);
         else

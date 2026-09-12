@@ -32,6 +32,7 @@ cbuffer PreviewDeferredLight : register(b13)
     float4 previewDebugSettings;       // x = GBufferView, y = profile, z = preview mesh kind, w = native APE reference mesh
     float4 previewApeSettings;         // x visible-sky yaw, y max env mip, z SH9 valid, w baked-probe yaw
     float4 previewApeLightingCalibration; // x diffuse probe, y spec probe, z sun irradiance, w probe exposure
+    float4 previewApeDirectCalibration;   // x direct diffuse, y direct specular, zw reserved
     float4 previewApeGlobalProbeAverage; // captured CoreSunConstants.avgGlobalProbeColor (rgb)
     float4 previewApeDiffuseSH[9];      // Lambert-convolved environment irradiance, Y-up SH9
     float4 previewApeShadowRow0;
@@ -112,29 +113,42 @@ float Bo3LightingGlossToAlpha(float lightingGlossSignal)
     return sqrt(max(2.0 / (cosinePower + 2.0), 1e-10));
 }
 
-float3 StudioToApeEnvironmentFrame(float3 direction)
+float3 StudioToApeProbeFrame(float3 direction)
 {
     float3 d = normalize(direction);
     int profile = (int)(previewDebugSettings.y + 0.5);
     if (profile == 0)
     {
-        // Phase 1z: Phase 1v recovered the full APE -> Studio world transform:
-        //   Studio X = -APE Y, Studio Y = APE Z, Studio Z = APE X.
-        // The environment path was still using the much older X-only flip, so
-        // sky/probe directions lived in a different frame from N/L/V. Convert
-        // Studio world back into APE's authored Z-up frame, then express it as
-        // the Y-up lat-long/cubemap sampling frame used by the preview textures:
-        //   APE = (StudioZ, -StudioX, StudioY)
-        //   sampleFrame = (APE X, APE Z, APE Y)
-        //               = (StudioZ, StudioY, -StudioX).
+        // Keep the capture-derived Phase 1z probe frame. This path already
+        // aligns the material reflection pattern and must not be mirrored with
+        // the visible background.
         d = float3(d.z, d.y, -d.x);
     }
     return normalize(d);
 }
 
-float3 RotateEnvironmentYaw(float3 direction, float yaw)
+float3 StudioToApeVisibleSkyFrame(float3 direction)
 {
-    float3 d = StudioToApeEnvironmentFrame(direction);
+    float3 d = normalize(direction);
+    int profile = (int)(previewDebugSettings.y + 0.5);
+    if (profile == 0)
+    {
+        // Phase 1ad: the user's lateral Day/Night comparison exposed that the
+        // visible panorama was horizontally mirrored after the 1z world-frame
+        // conversion. APE's screen-visible lat-long uses the opposite U
+        // handedness from the baked material probe. Mirror only the visible
+        // sky by changing the equirectangular horizontal component:
+        //   probe sample   = (StudioZ, StudioY, -StudioX)
+        //   visible sample = (StudioZ, StudioY,  StudioX)
+        // At the Reset camera (StudioX == 0) this preserves the calibrated
+        // center longitude while fixing the direction travelled during orbit.
+        d = float3(d.z, d.y, d.x);
+    }
+    return normalize(d);
+}
+
+float3 RotateEnvironmentYawFrame(float3 d, float yaw)
+{
     float sy = sin(yaw), cy = cos(yaw);
     d.xz = float2(d.x * cy - d.z * sy, d.x * sy + d.z * cy);
     return normalize(d);
@@ -144,14 +158,14 @@ float3 RotateVisibleSkyDirection(float3 direction)
 {
     // Horizontal light manipulation yaws APE's visible sky. Vertical light
     // manipulation never pitches/rolls it.
-    return RotateEnvironmentYaw(direction, previewApeSettings.x);
+    return RotateEnvironmentYawFrame(StudioToApeVisibleSkyFrame(direction), previewApeSettings.x);
 }
 
 float3 RotateBakedProbeDirection(float3 direction)
 {
     // APE's glossy/diffuse probe is baked at the preset orientation. It does
     // not follow manual light yaw or pitch, even though the visible sky yaws.
-    return RotateEnvironmentYaw(direction, previewApeSettings.w);
+    return RotateEnvironmentYawFrame(StudioToApeProbeFrame(direction), previewApeSettings.w);
 }
 
 float2 DirectionToEquirectFromDirection(float3 d)
@@ -291,7 +305,10 @@ float3 RecoverApeProbeDirectionalContrast(float3 probeSample, float ndotv)
     // directional range through the body and ~29% more in the grazing annulus.
     // Fold that residual into the existing mean-preserving recovery rather than
     // changing probe energy: 2.18*1.18 ~= 2.58, 2.38*1.29 ~= 3.07.
-    float apeDirectionalContrast = lerp(2.58, 3.07, grazing * grazing);
+    // Phase 1ad side-orbit A/B: once UV parity is correct, APE still
+    // carries ~27% more body variation and ~32% more grazing variation than
+    // Studio. Preserve mean energy and restore that residual range.
+    float apeDirectionalContrast = lerp(3.30, 4.05, grazing * grazing);
     float3 probeMean = max(previewEnvironmentAmbient.rgb, 0.0);
     return max(probeMean + (probeSample - probeMean) * apeDirectionalContrast, 0.0);
 }
@@ -696,8 +713,11 @@ float4 ps_main(VS_OUT i) : SV_Target0
         shadowTerm = lerp(1.0, smoothstep(0.0, 0.35, NdotL), previewAmbientShadow.y);
     }
     float sunScale = materialProfile == 0 ? previewApeLightingCalibration.z : 1.0;
-    float3 direct = (diffuse + specular) * previewLightColorFulbright.rgb *
-                    previewLightDirIntensity.w * sunScale * shadowTerm;
+    float directDiffuseScale = materialProfile == 0 ? previewApeDirectCalibration.x : 1.0;
+    float directSpecularScale = materialProfile == 0 ? previewApeDirectCalibration.y : 1.0;
+    float3 direct = (diffuse * directDiffuseScale + specular * directSpecularScale) *
+                    previewLightColorFulbright.rgb * previewLightDirIntensity.w *
+                    sunScale * shadowTerm;
 
     float3 envSpec = 0.0;
     if (previewAmbientShadow.w > 0.5 && previewAmbientShadow.z > 0.5)
