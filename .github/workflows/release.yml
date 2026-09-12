@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Visible version override (leave blank to use version.json, e.g. 0.1)'
+        description: 'Visible version override (leave blank to use version.json, e.g. 0.2)'
         required: false
         default: ''
         type: string
@@ -68,7 +68,7 @@ jobs:
           $sourceVersionPath = Join-Path $env:GITHUB_WORKSPACE 'version.json'
           $sourceVersion = Get-Content -LiteralPath $sourceVersionPath -Raw | ConvertFrom-Json
           $displayVersion = [string]$sourceVersion.displayVersion
-          if ([string]::IsNullOrWhiteSpace($displayVersion)) { $displayVersion = '0.1' }
+          if ([string]::IsNullOrWhiteSpace($displayVersion)) { $displayVersion = '0.2' }
 
           $fastTester = $false
           $leanUpdate = $false

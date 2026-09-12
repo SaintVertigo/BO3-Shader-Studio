@@ -84,8 +84,10 @@ enum class PreviewMesh
     Sphere = 0,
     Cube = 1,
     Plane = 2,
-    Card = 3,
-    Custom = 4
+    Cylinder = 3,
+    Monkey = 4,
+    Card = 5,
+    Custom = 6
 };
 
 constexpr int kMaterialTextureSlotCount = 8;

@@ -3488,7 +3488,7 @@ private:
     void loadAppMetadata()
     {
         appVersion_ = "1.0.0"; // internal monotonic updater version
-        displayVersion_ = "0.1";
+        displayVersion_ = "0.2";
         githubRepository_.clear();
         updateAssetPrefix_ = "BO3_Shader_Studio_Update";
         defaultUpdateChannel_ = "stable";
@@ -16883,8 +16883,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         camera3D_->setToolButtonStyle(Qt::ToolButtonTextOnly);
         camera3D_->setObjectName("PreviewModeToggle");
         camera3D_->setToolTip("Toggle interactive 3D camera navigation. Off uses the shader's normal 2D/fullscreen preview.");
-        meshCombo_ = new QComboBox(); meshCombo_->addItems(QStringList{"Sphere", "Cube", "Plane", "Card", "Custom Model"});
-        meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. APE Match uses Treyarch's local APE sphere/cube/plane geometry when available. Custom Model supports OBJ, ASCII FBX, XMODEL_EXPORT, and BO3 XMODEL_BIN.");
+        meshCombo_ = new QComboBox(); meshCombo_->addItems(QStringList{"Sphere", "Cube", "Plane", "Cylinder", "Monkey", "Card", "Custom Model"});
+        meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. APE Match uses Treyarch's actual local APE sphere/cube/plane/cylinder/monkey XMODEL_BIN assets when available. Custom Model supports OBJ, ASCII FBX, XMODEL_EXPORT, and BO3 XMODEL_BIN.");
         loadModelQuickButton_ = new QPushButton("Load Model...");
         loadModelQuickButton_->setToolTip("Import a custom OBJ, ASCII FBX, XMODEL_EXPORT, or BO3 XMODEL_BIN preview mesh.");
         gbufferViewCombo_ = new QComboBox(); gbufferViewCombo_->addItems(QStringList{"Final Lit", "RT0", "RT1", "RT2", "RT3", "Depth", "Albedo", "Normal", "Specular", "Gloss", "AO", "Emissive", "Input Albedo (t0)"});
@@ -17568,8 +17568,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(preview_) preview_->renderer().SetLiveSplitFraction(static_cast<float>(value) / 100.0f);
         });
         connect(meshCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
-            if(index == 4 && preview_ && !preview_->renderer().HasCustomModel()) { chooseCustomModel(); return; }
-            preview_->renderer().SetPreviewMesh(static_cast<PreviewMesh>(std::clamp(index,0,4))); updateCameraUi();
+            const int customIndex = static_cast<int>(PreviewMesh::Custom);
+            if(index == customIndex && preview_ && !preview_->renderer().HasCustomModel()) { chooseCustomModel(); return; }
+            preview_->renderer().SetPreviewMesh(static_cast<PreviewMesh>(std::clamp(index, 0, customIndex))); updateCameraUi();
         });
         connect(loadModelQuickButton_, &QPushButton::clicked, this, [this]{ chooseCustomModel(); });
         connect(gbufferViewCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){ preview_->renderer().SetGBufferView(static_cast<GBufferView>(std::clamp(index,0,12))); });
@@ -17876,7 +17877,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         profileRow->addStretch(1);
         outer->addLayout(profileRow);
 
-        apePresetInfoLabel_ = new QLabel("APE Match data ready: Day / Morning / Sunset / Night SSI presets + HDR environments.");
+        apePresetInfoLabel_ = new QLabel("APE Match 0.2 ready: GDT/SSI Morning / Day / Sunset / Night + native APE reference models.");
         apePresetInfoLabel_->setObjectName("CompactHelp");
         apePresetInfoLabel_->setWordWrap(true);
         outer->addWidget(apePresetInfoLabel_);
@@ -20934,7 +20935,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         if(meshCombo_)
         {
-            QSignalBlocker blocker(meshCombo_); meshCombo_->setCurrentIndex(4);
+            QSignalBlocker blocker(meshCombo_); meshCombo_->setCurrentIndex(static_cast<int>(PreviewMesh::Custom));
         }
         syncSceneControlsFromRenderer(); updateCameraUi();
         statusBar()->showMessage(QString("Custom model loaded: %1").arg(QFileInfo(path).fileName()),3500);
@@ -20996,23 +20997,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return dir.absolutePath();
     }
 
+    QString resolveApeAssetPath(const QString& root, const QString& relative) const
+    {
+        // BO3/Mod Tools layouts in the wild expose source assets either directly
+        // under the selected root or under share/raw. Accept both so APE Match
+        // can use the same GDT/XMODEL/HDR assets without forcing a particular
+        // install-root convention.
+        const QString cleanRelative = QDir::cleanPath(relative);
+        const QString direct = QDir(root).filePath(cleanRelative);
+        if (QFileInfo::exists(direct)) return QDir::cleanPath(direct);
+        const QString shareRaw = QDir(root).filePath(QStringLiteral("share/raw/") + cleanRelative);
+        if (QFileInfo::exists(shareRaw)) return QDir::cleanPath(shareRaw);
+        return QDir::cleanPath(direct);
+    }
+
     void loadApeReferencePreviewMeshes(const QString& root)
     {
         if (!preview_ || root.isEmpty()) return;
         auto& r = preview_->renderer();
 
         struct RefMesh { PreviewMesh mesh; const char* file; };
+        // code.gdt is authoritative for the Asset Property Editor preview set.
+        // The plane's shipped filename is p7_ape_preview_plane_LOD0.XMODEL_BIN;
+        // the old Studio path used a non-existent ape_preview_plane.XMODEL_BIN.
         static constexpr RefMesh refs[] = {
-            {PreviewMesh::Sphere, "ape_preview_sphere.XMODEL_BIN"},
-            {PreviewMesh::Cube,   "ape_preview_cube.XMODEL_BIN"},
-            {PreviewMesh::Plane,  "ape_preview_plane.XMODEL_BIN"}
+            {PreviewMesh::Sphere,   "ape_preview_sphere.XMODEL_BIN"},
+            {PreviewMesh::Cube,     "ape_preview_cube.XMODEL_BIN"},
+            {PreviewMesh::Plane,    "p7_ape_preview_plane_LOD0.XMODEL_BIN"},
+            {PreviewMesh::Cylinder, "ape_preview_cylinder.XMODEL_BIN"},
+            {PreviewMesh::Monkey,   "ape_preview_monkey.XMODEL_BIN"}
         };
 
         for (const auto& ref : refs)
         {
             if (r.HasApeReferenceMesh(ref.mesh)) continue;
-            const QString absolute = QDir(root).filePath(
-                QStringLiteral("model_export/code/") + QString::fromLatin1(ref.file));
+            const QString absolute = resolveApeAssetPath(
+                root, QStringLiteral("model_export/code/") + QString::fromLatin1(ref.file));
             if (!QFileInfo::exists(absolute)) continue;
             std::wstring ignored;
             r.LoadApeReferenceMesh(ref.mesh, fs::path(absolute.toStdWString()), ignored);
@@ -21037,7 +21057,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         auto loadLatLong = [&](const QString& relative) -> bool
         {
-            const QString absolute = QDir(root).filePath(relative);
+            const QString absolute = resolveApeAssetPath(root, relative);
             if (!QFileInfo::exists(absolute))
             {
                 failureDescription = QString("Missing local APE HDR source: %1")
@@ -21063,7 +21083,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             for (int i = 0; i < suffixes.size(); ++i)
             {
                 const QString relative = directory + "/" + stem + "_" + suffixes[i] + ".exr";
-                const QString absolute = QDir(root).filePath(relative);
+                const QString absolute = resolveApeAssetPath(root, relative);
                 if (!QFileInfo::exists(absolute))
                 {
                     failureDescription = QString("Missing local APE HDR cubemap face: %1")
@@ -21075,7 +21095,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             }
 
             std::wstring error;
-            if (!preview_->renderer().LoadEnvironmentCubemapFaces(faces, error, 4096, 2048))
+            if (!preview_->renderer().LoadEnvironmentCubemapFaces(faces, error, 6144, 3072))
             {
                 failureDescription = QString("Could not reconstruct APE HDR cubemap:\n%1")
                     .arg(ToQString(error));
@@ -21203,14 +21223,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         struct ApePreset
         {
             const char* name;
-            float sunR, sunG, sunB;
+
+            // source_data/ssi.gdt authoring values
+            float sunSrgbR, sunSrgbG, sunSrgbB;
             float ssiPitch, ssiYaw;
             float stops, ev, evComp, evMin, evMax;
             float penumbra;
+            int bounceCount;
+            bool dynamicShadow;
+            bool enableSun;
+            float specComp;
+
+            // Stock sky material GDT values. skyScaleRGB is intentionally kept
+            // for audit/display only: Treyarch's material.awi marks it obsolete.
+            const char* skyMaterialType;
+            float skyRotationGdt;
+            float skyScaleRgbGdt;
+            float skySizeGdt;
+            float skyStopsGdt;
+            bool cubeSource;
+
+            // Capture-derived Studio bridge. These are not replacements for the
+            // GDT values above; they account for APE's captured HDR/probe/display
+            // domains which are not directly expressed by the authoring GDT.
             float previewExposureEv;
             float ambient;
             float shadow;
-            float environmentRotation;
             float diffuseProbeScale;
             float specularProbeScale;
             float sunIrradianceScale;
@@ -21219,28 +21257,45 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             float directSpecularScale;
         };
 
-        // Source of truth for the SSI fields is Treyarch's shipped source_data/ssi.gdt.
-        // The trailing calibration values bridge Studio's normalized HDR domain
-        // and APE's relative-HDR scene constants. Phase 1ad also carries a
-        // direct diffuse/specular split so Night can preserve its tiny white
-        // hotspot without lighting half the sphere like Day. Phase 1o
-        // replaces the BRDF, reflection LOD, sky-yaw, sun shadow and presentation
-        // equations with values captured directly from APE.
-        // Phase 1g no longer subtracts EV from Stops to invent a light intensity: APE
-        // exposes probe exposure and sun intensity as separate scene constants.
+        // Version 0.2 makes the shipped BO3 asset definitions the source of truth.
+        // SSI colorSRGB is AUTHORING sRGB, while CoreSunConstants is linear. Day's
+        // captured CoreSunConstants exactly matches this conversion, so apply the
+        // same conversion to Morning/Sunset/Night instead of feeding sRGB values
+        // into the linear lighting equation.
+        auto srgbToLinear = [](float value) -> float
+        {
+            value = std::clamp(value, 0.0f, 1.0f);
+            return value <= 0.04045f
+                ? value / 12.92f
+                : std::pow((value + 0.055f) / 1.055f, 2.4f);
+        };
+        auto wrapDegrees = [](float degrees) -> float
+        {
+            degrees = std::fmod(degrees, 360.0f);
+            return degrees < 0.0f ? degrees + 360.0f : degrees;
+        };
+
+        // APE Day capture: source GDT skyRotation=75, while gScene.skyRotation
+        // is (-0.994521916, 0.1045283) = 174 degrees. The shared t6_skybox frame
+        // therefore contributes a +99-degree visible-sky basis offset. The baked
+        // t51 material probe is independently capture-aligned at 134.75 degrees,
+        // i.e. +59.75 degrees from the same Day GDT rotation. Apply those shared
+        // frame offsets to all four stock presets rather than inventing unrelated
+        // per-preset yaws.
+        constexpr float kApeVisibleSkyGdtYawOffset = 99.0f;
+        constexpr float kApeProbeGdtYawOffset = 59.75f;
+
         static constexpr ApePreset presets[] = {
-            // name       sun RGB                         SSI pitch/yaw   stops          EV    cmp   range       pen  display  ambient shadow envYaw  diffGI specGI sunGI probeExp directD directS
-            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f, 263.0f, 11.29999785f, 13.5f, 0.0f, -32.0f, 31.0f, 1.0f, -0.15f, 0.95f, 0.48f, 120.0f, 1.40f, 0.120f, 2.6f, 0.90f, 1.0f, 1.0f},
-            // Day energy is capture-derived, not eyeballed:
+            // name      SSI sRGB                         pitch  yaw    SSI stops       EV    cmp   min    max    pen  bounce dyn sun spec  sky type          rot   oldScale size     skyStops          cube  disp   amb   shad  diff  spec   sun         probe      dirD  dirS
+            {"Morning", 1.0f,      0.8941f,   0.7411f,   165.0f,263.0f,11.29999785f, 13.5f, 0.0f,-32.0f,31.0f, 1.0f, 4, true,true,0.0f, "sky_hdr",         0.0f, 1097.5f,8000.0f, 10.1000052244f, true,  -0.15f,0.95f,0.48f,1.40f,0.120f,2.6f,       0.90f,     1.0f, 1.0f},
+            // Day energy is capture-derived:
             // sun.color * invExposure = 16384 / 7765.01172 = 2.1099775
             // globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.2500001
-            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 172.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f, 1.0f, 1.0f},
-            {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f, 1.0f, 1.0f},
-            // Night screenshot parity: APE's sphere is mostly indirect teal light
-            // with only a compact white specular point. Keep the hotspot by
-            // separating direct diffuse from direct specular instead of dimming
-            // the entire direct branch together.
-            {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.80f, 1.00f, 0.60f, 120.0f, 3.80f, 0.180f, 0.050f, 0.85f, 1.0f, 28.0f}
+            {"Day",     1.0f,      0.9764f,   0.9490f,   125.0f,150.0f,14.0f,        15.0f, 0.0f,  1.0f,16.0f, 1.5f, 4, true,true,0.0f, "sky_latlong_hdr",75.0f,2048.0f,65000.0f,13.5f,         false,  0.00f,1.00f,1.00f,1.00f,1.000f,2.1099775f, 0.2500001f,1.0f, 1.0f},
+            {"Sunset",  1.0f,      0.7681509943f,0.5457246493f,158.0f,300.0f,11.0f, 12.5f, 0.0f,  8.0f,12.5f, 1.5f, 4, true,true,0.0f, "sky_latlong_hdr",110.0f,107.63f,65000.0f,10.15f,       false,  0.20f,0.95f,0.52f,1.50f,0.125f,3.2f,       0.98f,     1.0f, 1.0f},
+            // Keep the successful 1ad Night direct/indirect split; only the
+            // source inputs are corrected to their actual GDT semantics here.
+            {"Night",   0.7912983684f,1.0f,   1.0f,      130.0f,140.0f,-2.2f,         6.0f, 2.5f,  3.0f, 3.5f, 1.5f, 4, true,true,0.0f, "sky_hdr",        70.0f,0.75f,  8000.0f, 4.4f,          true,   2.80f,1.00f,0.60f,3.80f,0.180f,0.050f,     0.85f,     1.0f,28.0f}
         };
         const ApePreset& p = presets[std::clamp(index, 0, 3)];
         auto& r = preview_->renderer();
@@ -21250,7 +21305,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         r.SetGroundEnabled(false); // APE's material viewport environment already contains its floor/background
         r.SetToneMapMode(2);
         r.SetLookdevExposureEV(p.previewExposureEv);
-        r.SetLightColor(p.sunR, p.sunG, p.sunB);
+        r.SetLightColor(srgbToLinear(p.sunSrgbR),
+                        srgbToLinear(p.sunSrgbG),
+                        srgbToLinear(p.sunSrgbB));
 
         // Lighting selection in APE does not re-frame the asset. Preserve the
         // current orbit while switching Morning/Day/Sunset/Night; only entering
@@ -21280,17 +21337,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // SetLightAngles() intentionally couples manual APE edits to the HDR rig.
         // A preset is an absolute reference state, so restore its authored
         // environment orientation *after* installing the SSI sun direction.
-        r.SetEnvironmentRotationDegrees(p.environmentRotation);
-        // Phase 1ab separates the visible Day panorama from the baked material
-        // reflection probe. Screenshot fitting of the actual Reset viewport puts
-        // the visible Day sky at 172.75 degrees, while the captured t51 cube-face
-        // reconstruction remains 134.75 degrees. APE does not use one yaw for both.
-        if (index == 1) r.SetApeProbeRotationDegrees(134.75f);
-        else r.SetApeProbeRotationDegrees(p.environmentRotation);
+        const float visibleSkyYaw = wrapDegrees(p.skyRotationGdt + kApeVisibleSkyGdtYawOffset);
+        const float bakedProbeYaw = wrapDegrees(p.skyRotationGdt + kApeProbeGdtYawOffset);
+        r.SetEnvironmentRotationDegrees(visibleSkyYaw);
+        // APE keeps the visible sky and baked material probe in distinct frames.
+        // Version 0.2 preserves the Phase 1ad handedness fix, but derives both
+        // preset base orientations from the stock sky material's GDT rotation.
+        r.SetApeProbeRotationDegrees(bakedProbeYaw);
         // ToolsGfx keeps sun and probe energy separate from display exposure.
         // Keep the ordinary light intensity at unity and apply the APE-specific
         // irradiance/probe calibration in the deferred compositor instead.
-        r.SetLightIntensity(1.0f);
+        r.SetLightIntensity(p.enableSun ? 1.0f : 0.0f);
         r.SetApeLightingCalibration(p.diffuseProbeScale, p.specularProbeScale,
                                     p.sunIrradianceScale, p.probeExposure,
                                     p.directDiffuseScale, p.directSpecularScale);
@@ -21299,7 +21356,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         else
             r.ResetApeGlobalProbeAverageColorToEnvironment();
         r.SetAmbientIntensity(p.ambient);
-        r.SetShadowStrength(p.shadow);
+        r.SetShadowStrength(p.dynamicShadow ? p.shadow : 0.0f);
         r.SetContactShadowStrength(0.0f);
         // APE material preview exposure stays stable while orbiting/dollying.
         // Material mode has no temporal auto-iris, but clear any history left by
@@ -21313,28 +21370,41 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             const PreviewMesh activeMesh = r.GetPreviewMesh();
             const bool nativeApeMesh = r.HasApeReferenceMesh(activeMesh);
-            const QString truth = QString("APE %1 | SSI Pitch %2 / Yaw %3 | Stops %4 | EV %5 | EV Comp %6 | EV range %7..%8 | calibrated camera")
+            const QString truth = QString("APE %1 | SSI Pitch %2 / Yaw %3 | Stops %4 | EV %5 | %6 | GDT sky rot %7 / stops %8 | %9")
                 .arg(QString::fromLatin1(p.name))
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
-                .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
-                .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1ab APE mesh/UV frame + fixed viewport camera | Phase 1aa unconstrained resize | Phase 1z environment frame | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
-                    .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
+                .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2)
+                .arg(QString::fromLatin1(p.skyMaterialType))
+                .arg(p.skyRotationGdt, 0, 'f', 2).arg(p.skyStopsGdt, 0, 'f', 3)
+                .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
+            const QString sourceAudit = QString(
+                "SSI colorSRGB %1 %2 %3 -> linear %4 %5 %6\n"
+                "SSI: bounceCount=%7 dynamicShadow=%8 enablesun=%9 spec_comp=%10 EVComp=%11 EVRange=%12..%13 penumbra=%14\n"
+                "Sky material: type=%15 skyRotation=%16 skyStops=%17 skySize=%18 skyScaleRGB=%19 (obsolete in material.awi)\n"
+                "APE effective frames: visible sky yaw=%20 probe yaw=%21\n"
+                "BO3 gloss domain: 0..17; t7_script_wall primary authored range: 0..13")
+                .arg(p.sunSrgbR,0,'f',6).arg(p.sunSrgbG,0,'f',6).arg(p.sunSrgbB,0,'f',6)
+                .arg(srgbToLinear(p.sunSrgbR),0,'f',6).arg(srgbToLinear(p.sunSrgbG),0,'f',6).arg(srgbToLinear(p.sunSrgbB),0,'f',6)
+                .arg(p.bounceCount).arg(p.dynamicShadow ? 1 : 0).arg(p.enableSun ? 1 : 0).arg(p.specComp,0,'f',2)
+                .arg(p.evComp,0,'f',2).arg(p.evMin,0,'f',2).arg(p.evMax,0,'f',2).arg(p.penumbra,0,'f',2)
+                .arg(QString::fromLatin1(p.skyMaterialType)).arg(p.skyRotationGdt,0,'f',3).arg(p.skyStopsGdt,0,'f',6)
+                .arg(p.skySizeGdt,0,'f',1).arg(p.skyScaleRgbGdt,0,'f',3)
+                .arg(visibleSkyYaw,0,'f',3).arg(bakedProbeYaw,0,'f',3);
             if (environmentLoaded)
             {
                 apePresetInfoLabel_->setText(truth + " | Local HDR source loaded");
-                apePresetInfoLabel_->setToolTip(environmentSource);
+                apePresetInfoLabel_->setToolTip(sourceAudit + "\nHDR source: " + environmentSource);
             }
             else
             {
                 apePresetInfoLabel_->setText(truth + " | " + environmentFailure);
-                apePresetInfoLabel_->setToolTip(environmentFailure);
+                apePresetInfoLabel_->setToolTip(sourceAudit + "\n" + environmentFailure);
             }
         }
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1ab mesh/UV frame + separate sky/probe orientation active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: 0.2 GDT/SSI preset + native APE reference geometry active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }
@@ -21699,7 +21769,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QMap<int, QMap<QString, QString>> temporaryPreviewMappings_;
     bool temporaryPreviewValidationPassed_ = false;
     QString appVersion_ = "1.0.0"; // internal updater version, intentionally not shown in normal UI
-    QString displayVersion_ = "0.1";
+    QString displayVersion_ = "0.2";
     QString githubRepository_;
     QString updateAssetPrefix_ = "BO3_Shader_Studio_Update";
     QString defaultUpdateChannel_ = "stable";

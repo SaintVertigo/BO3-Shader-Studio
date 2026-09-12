@@ -1,0 +1,237 @@
+{
+  "schema": 1,
+  "sources": {
+    "ssi": "source_data/ssi.gdt",
+    "daySunsetSkyMaterials": "source_data/t7_techart_props.gdt",
+    "morningSkyMaterial": "source_data/t7_skybox.gdt",
+    "referenceMaterial": "source_data/sp_proto_props.gdt",
+    "apePreviewModels": "source_data/code.gdt",
+    "materialUiDefinitions": "deffiles/material.awi"
+  },
+  "notes": {
+    "ssiColor": "colorSRGB is authored sRGB and is converted to linear before lighting.",
+    "skyScaleRGB": "material.awi marks skyScaleRGB obsolete; it is retained for auditing but is not treated as an active renderer multiplier.",
+    "gloss": "BO3 absolute gloss domain is 0..17. t7_script_wall authors its primary gloss range as 0..13; auxiliary ranges default to 0..17.",
+    "dayCapturedSkyFrame": "Day GDT skyRotation 75 maps to captured TOOLSGFX gScene.skyRotation angle 174 degrees, establishing the shared +99 degree visible-sky frame offset.",
+    "dayCapturedProbeFrame": "Day captured baked material probe aligns at 134.75 degrees, establishing the shared +59.75 degree probe frame offset relative to the Day GDT skyRotation."
+  },
+  "environments": [
+    {
+      "name": "Morning",
+      "ssi": {
+        "colorSRGB": [
+          1.0,
+          0.8941,
+          0.7411
+        ],
+        "pitch": 165.0,
+        "yaw": 263.0,
+        "stops": 11.299997849428,
+        "ev": 13.5,
+        "evcmp": 0.0,
+        "evmin": -32.0,
+        "evmax": 31.0,
+        "penumbra_inches": 1.0,
+        "bounceCount": 4,
+        "dynamicShadow": 1,
+        "enablesun": 1,
+        "spec_comp": 0.0,
+        "skyboxmodel": "skybox_default_day_clear_0700",
+        "colorLinear": [
+          1.0,
+          0.775787598874,
+          0.508764024736
+        ]
+      },
+      "skyMaterial": {
+        "name": "mtl_skybox_default_day_clear_0700",
+        "materialType": "sky_hdr",
+        "sourceType": "Cube",
+        "baseImageStem": "model_export/t7_skybox/skybox_default/skybox_default_day_clear_0700",
+        "skyRotation": 0.0,
+        "skyScaleRGB": 1097.5,
+        "skySize": 8000.0,
+        "skyStops": 10.1000052244227,
+        "studioVisibleYaw": 99.0,
+        "studioProbeYaw": 59.75
+      }
+    },
+    {
+      "name": "Day",
+      "ssi": {
+        "colorSRGB": [
+          1.0,
+          0.9764,
+          0.949
+        ],
+        "pitch": 125.0,
+        "yaw": 150.0,
+        "stops": 14.0,
+        "ev": 15.0,
+        "evcmp": 0.0,
+        "evmin": 1.0,
+        "evmax": 16.0,
+        "penumbra_inches": 1.5,
+        "bounceCount": 4,
+        "dynamicShadow": 1,
+        "enablesun": 1,
+        "spec_comp": 0.0,
+        "skyboxmodel": "skybox_default_day",
+        "colorLinear": [
+          1.0,
+          0.947150955773,
+          0.887881501119
+        ]
+      },
+      "skyMaterial": {
+        "name": "mtl_skybox_default_day",
+        "materialType": "sky_latlong_hdr",
+        "sourceType": "Texture",
+        "baseImage": "model_export/t7_skybox/skybox_default/skybox_default_day_ll.exr",
+        "skyRotation": 75.0,
+        "skyScaleRGB": 2048.0,
+        "skySize": 65000.0,
+        "skyStops": 13.5,
+        "studioVisibleYaw": 174.0,
+        "studioProbeYaw": 134.75
+      }
+    },
+    {
+      "name": "Sunset",
+      "ssi": {
+        "colorSRGB": [
+          1.0,
+          0.768150994270625,
+          0.545724649348492
+        ],
+        "pitch": 158.0,
+        "yaw": 300.0,
+        "stops": 11.0,
+        "ev": 12.5,
+        "evcmp": 0.0,
+        "evmin": 8.0,
+        "evmax": 12.5,
+        "penumbra_inches": 1.5,
+        "bounceCount": 4,
+        "dynamicShadow": 1,
+        "enablesun": 1,
+        "spec_comp": 0.0,
+        "skyboxmodel": "skybox_default_sunset",
+        "colorLinear": [
+          1.0,
+          0.551245318135,
+          0.258830340153
+        ]
+      },
+      "skyMaterial": {
+        "name": "mtl_skybox_default_sunset",
+        "materialType": "sky_latlong_hdr",
+        "sourceType": "Texture",
+        "baseImage": "model_export/t7_skybox/skybox_default/skybox_default_sunset_ll.exr",
+        "skyRotation": 110.0,
+        "skyScaleRGB": 107.63,
+        "skySize": 65000.0,
+        "skyStops": 10.15,
+        "studioVisibleYaw": 209.0,
+        "studioProbeYaw": 169.75
+      }
+    },
+    {
+      "name": "Night",
+      "ssi": {
+        "colorSRGB": [
+          0.791298368368055,
+          1.0,
+          1.0
+        ],
+        "pitch": 130.0,
+        "yaw": 140.0,
+        "stops": -2.2,
+        "ev": 6.0,
+        "evcmp": 2.5,
+        "evmin": 3.0,
+        "evmax": 3.5,
+        "penumbra_inches": 1.5,
+        "bounceCount": 4,
+        "dynamicShadow": 1,
+        "enablesun": 1,
+        "spec_comp": 0.0,
+        "skyboxmodel": "skybox_default_night",
+        "colorLinear": [
+          0.589183404311,
+          1.0,
+          1.0
+        ]
+      },
+      "skyMaterial": {
+        "name": "mtl_skybox_default_night",
+        "materialType": "sky_hdr",
+        "sourceType": "Cube",
+        "baseImageStem": "model_export/t7_skybox/zm_factory/Temp/zm_skybox_factory_05",
+        "skyRotation": 70.0,
+        "skyScaleRGB": 0.75,
+        "skySize": 8000.0,
+        "skyStops": 4.4,
+        "studioVisibleYaw": 169.0,
+        "studioProbeYaw": 129.75
+      }
+    }
+  ],
+  "referenceMaterial": {
+    "name": "t7_script_wall",
+    "materialType": "lit",
+    "colorMap": "core_script_wall_c",
+    "colorTint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "filterColor": "aniso2x (mip linear)",
+    "fixedGloss": 0,
+    "glossRangeMin": 0.0,
+    "glossRangeMax": 13.0,
+    "absoluteGlossDomainMax": 17.0,
+    "specMapEnable": 0,
+    "specTint": [
+      0.2,
+      0.2,
+      0.2
+    ],
+    "specAmount": 1.0,
+    "scaleRGB": 8.0
+  },
+  "apePreviewModels": {
+    "Sphere": "code/ape_preview_sphere.XMODEL_BIN",
+    "Cube": "code/ape_preview_cube.XMODEL_BIN",
+    "Plane": "code/p7_ape_preview_plane_LOD0.XMODEL_BIN",
+    "Cylinder": "code/ape_preview_cylinder.XMODEL_BIN",
+    "Monkey": "code/ape_preview_monkey.XMODEL_BIN"
+  },
+  "applicationPolicy": {
+    "directlyApplied": [
+      "SSI colorSRGB -> linear sun color",
+      "SSI pitch/yaw",
+      "enablesun",
+      "dynamicShadow gate",
+      "sky material source type/path",
+      "skyRotation via captured APE frame offsets"
+    ],
+    "captureCalibrated": [
+      "display exposure domain",
+      "sun irradiance energy",
+      "diffuse/specular probe energy",
+      "Night direct diffuse/specular split",
+      "baked probe response"
+    ],
+    "auditOnlyUntilRuntimeTransformIsProven": [
+      "SSI stops/ev/evcmp/evmin/evmax",
+      "penumbra_inches while APE shadow tree is unresolved",
+      "bounceCount",
+      "spec_comp",
+      "skyStops",
+      "skySize",
+      "skyScaleRGB (obsolete)"
+    ]
+  }
+}

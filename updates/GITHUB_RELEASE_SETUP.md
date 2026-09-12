@@ -21,17 +21,17 @@ Typical update flow:
 edit files -> git commit -> git push -> GitHub builds/releases -> testers update in-app
 ```
 
-The visible version is read from `version.json` -> `displayVersion`. It can stay at `0.1` across many tester builds. GitHub uses a separate monotonically increasing internal version only for update ordering; that number is intentionally hidden from the normal update UI.
+The visible version is read from `version.json` -> `displayVersion`. It can stay at the current visible line (now `0.2`) across many tester builds. GitHub uses a separate monotonically increasing internal version only for update ordering; that number is intentionally hidden from the normal update UI.
 
 ## Changing the visible version
 
-To move from `0.1` to `0.2`, change:
+The project is now on visible version `0.2`. For the next visible release, change:
 
 ```json
-"displayVersion": "0.2"
+"displayVersion": "0.3"
 ```
 
-in `version.json`, commit, and push. The resulting automatic tester release is titled **BO3 Shader Studio 0.2**.
+in `version.json`, commit, and push. The resulting automatic tester release is titled **BO3 Shader Studio 0.3**.
 
 ## Stable releases
 

@@ -478,3 +478,15 @@ The captured APE material vertex shader forwards its runtime TEXCOORD input dire
 From the latest Reset pair, the sphere occupies about 59.1% of APE's usable preview height. With the captured 39.430488° vertical FOV, the fixed reference dolly is approximately 4.83 sphere radii. Resizing changes viewport dimensions/aspect only.
 
 The aligned 1ab A/B pair still showed about 18% missing directional range through the main reflective region and about 29% near grazing. Phase 1ac therefore expands the existing mean-preserving probe deviation to 2.58→3.07 without changing average probe energy. The visible lat-long background also samples LOD 0.35 to avoid the overly crisp mip-0 presentation.
+
+
+## Version 0.2 — shipped GDT / AWI source of truth
+
+Version 0.2 adds an asset-definition layer above the existing capture/disassembly evidence. The shipped BO3 files supplied for the parity pass establish the following:
+
+- `ssi.gdt` provides the stock Morning/Day/Sunset/Night sun `colorSRGB`, pitch/yaw, Stops, EV fields, penumbra, bounce count, dynamic-shadow state and `skyboxmodel`. `colorSRGB` is authoring-space sRGB; it must be converted to linear for lighting. The captured Day sun constant independently validates that conversion.
+- The sky material GDTs show that Morning/Night are `sky_hdr` Cube sources, while Day/Sunset are `sky_latlong_hdr` Texture sources. Their `skyRotation`, `skyStops` and `skySize` values are retained exactly. `material.awi` labels `skyScaleRGB` obsolete, so it is audit metadata rather than an active Studio multiplier.
+- `code.gdt` names the actual APE preview XMODEL_BIN assets. In particular the plane is `p7_ape_preview_plane_LOD0.XMODEL_BIN`; the Studio's former `ape_preview_plane.XMODEL_BIN` path was wrong.
+- `sp_proto_props.gdt` defines `t7_script_wall` as `lit`, uses `core_script_wall_c`, white tint and `aniso2x (mip linear)`, with primary gloss 0..13. `material.awi` confirms BO3's allowed gloss domain extends to 17; the auxiliary gloss ranges use 0..17.
+
+These definitions constrain preset inputs and asset selection. Captured shader disassembly still has higher authority for runtime equations where a GDT field is only authoring metadata or is transformed before reaching the shader.

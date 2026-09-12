@@ -2,7 +2,7 @@
   "product": "BO3 HLSL Previewer",
   "displayProduct": "BO3 Shader Studio",
   "version": "1.0.0",
-  "displayVersion": "0.1",
+  "displayVersion": "0.2",
   "updateFormat": 1,
   "githubRepository": "__GITHUB_REPOSITORY__",
   "updateAssetPrefix": "BO3_Shader_Studio_Update",

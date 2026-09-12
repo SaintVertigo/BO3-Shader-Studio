@@ -1133,7 +1133,12 @@ public:
 
             const UINT srcW = static_cast<UINT>(sourceW);
             const UINT srcH = static_cast<UINT>(sourceH);
-            const UINT maxFaceDimension = 1024;
+            // Version 0.2: Morning/Night are authored as real Cube images. The
+            // old 1024-face cap discarded detail before the cubemap was even
+            // reconstructed for the viewport. Keep up to 1536 per face; this
+            // matches a 6144x3072 equirectangular reconstruction while avoiding
+            // the ~1 GiB CPU peak of a 2048-face/8K conversion.
+            const UINT maxFaceDimension = 1536;
             const float reduction = std::min(1.0f, static_cast<float>(maxFaceDimension) /
                 static_cast<float>(std::max(srcW, srcH)));
             FloatFace face;
@@ -1167,8 +1172,9 @@ public:
             loaded[faceIndex] = std::move(face);
         }
 
-        // Reconstructed APE cubemaps use a 4K lat-long by default, but permit
-        // up to the same 8K/4K ceiling as native Day/Sunset lat-longs.
+        // Reconstructed APE cubemaps use a 6K/3K target in 0.2 (selected by
+        // the stock-preset loader) and still permit up to the same 8K/4K ceiling
+        // as native Day/Sunset lat-longs.
         outputWidth = std::clamp<UINT>(outputWidth, 256u, 8192u);
         outputHeight = std::clamp<UINT>(outputHeight, 128u, 4096u);
         if (outputWidth != outputHeight * 2u) outputWidth = outputHeight * 2u;
@@ -2738,8 +2744,10 @@ public:
         case PreviewMesh::Sphere: target = &apeSphereMesh_; break;
         case PreviewMesh::Cube: target = &apeCubeMesh_; break;
         case PreviewMesh::Plane: target = &apePlaneMesh_; break;
+        case PreviewMesh::Cylinder: target = &apeCylinderMesh_; break;
+        case PreviewMesh::Monkey: target = &apeMonkeyMesh_; break;
         default:
-            error = L"APE reference-mesh loading currently supports Sphere, Cube, and Plane.";
+            error = L"APE reference-mesh loading supports Sphere, Cube, Plane, Cylinder, and Monkey.";
             return false;
         }
 
@@ -2769,6 +2777,8 @@ public:
         apeSphereMesh_ = {};
         apeCubeMesh_ = {};
         apePlaneMesh_ = {};
+        apeCylinderMesh_ = {};
+        apeMonkeyMesh_ = {};
     }
 
     bool HasApeReferenceMesh(PreviewMesh mesh) const
@@ -2779,6 +2789,8 @@ public:
         case PreviewMesh::Sphere: candidate = &apeSphereMesh_; break;
         case PreviewMesh::Cube: candidate = &apeCubeMesh_; break;
         case PreviewMesh::Plane: candidate = &apePlaneMesh_; break;
+        case PreviewMesh::Cylinder: candidate = &apeCylinderMesh_; break;
+        case PreviewMesh::Monkey: candidate = &apeMonkeyMesh_; break;
         default: return false;
         }
         return candidate->vb && candidate->ib && candidate->indexCount > 0;
@@ -3794,14 +3806,18 @@ private:
         case PreviewMesh::Sphere: previewMeshKind = 1.0f; break;
         case PreviewMesh::Cube: previewMeshKind = 2.0f; break;
         case PreviewMesh::Plane: previewMeshKind = 3.0f; break;
-        case PreviewMesh::Card: previewMeshKind = 4.0f; break;
-        case PreviewMesh::Custom: previewMeshKind = 5.0f; break;
+        case PreviewMesh::Cylinder: previewMeshKind = 4.0f; break;
+        case PreviewMesh::Monkey: previewMeshKind = 5.0f; break;
+        case PreviewMesh::Card: previewMeshKind = 6.0f; break;
+        case PreviewMesh::Custom: previewMeshKind = 7.0f; break;
         default: break;
         }
         const bool nativeApeReferenceMesh = materialPreviewProfile_ != MaterialPreviewProfile::LookDev &&
             ((previewMesh_ == PreviewMesh::Sphere && HasApeReferenceMesh(PreviewMesh::Sphere)) ||
              (previewMesh_ == PreviewMesh::Cube && HasApeReferenceMesh(PreviewMesh::Cube)) ||
-             (previewMesh_ == PreviewMesh::Plane && HasApeReferenceMesh(PreviewMesh::Plane)));
+             (previewMesh_ == PreviewMesh::Plane && HasApeReferenceMesh(PreviewMesh::Plane)) ||
+             (previewMesh_ == PreviewMesh::Cylinder && HasApeReferenceMesh(PreviewMesh::Cylinder)) ||
+             (previewMesh_ == PreviewMesh::Monkey && HasApeReferenceMesh(PreviewMesh::Monkey)));
         data.debugSettings = {
             static_cast<float>(gbufferView_),
             static_cast<float>(materialPreviewProfile_),
@@ -4327,6 +4343,8 @@ private:
             if (previewMesh_ == PreviewMesh::Sphere && HasApeReferenceMesh(PreviewMesh::Sphere)) return &apeSphereMesh_;
             if (previewMesh_ == PreviewMesh::Cube && HasApeReferenceMesh(PreviewMesh::Cube)) return &apeCubeMesh_;
             if (previewMesh_ == PreviewMesh::Plane && HasApeReferenceMesh(PreviewMesh::Plane)) return &apePlaneMesh_;
+            if (previewMesh_ == PreviewMesh::Cylinder && HasApeReferenceMesh(PreviewMesh::Cylinder)) return &apeCylinderMesh_;
+            if (previewMesh_ == PreviewMesh::Monkey && HasApeReferenceMesh(PreviewMesh::Monkey)) return &apeMonkeyMesh_;
         }
         if (previewMesh_ == PreviewMesh::Cube) return &cubeMesh_;
         if (previewMesh_ == PreviewMesh::Plane) return &planeMesh_;
@@ -7182,6 +7200,8 @@ PS_OUT ps_main(VS_OUT i)
     PreviewMeshBuffers apeSphereMesh_;
     PreviewMeshBuffers apeCubeMesh_;
     PreviewMeshBuffers apePlaneMesh_;
+    PreviewMeshBuffers apeCylinderMesh_;
+    PreviewMeshBuffers apeMonkeyMesh_;
     PreviewMeshBuffers customMesh_;
     fs::path customModelPath_;
     std::wstring customModelFormat_;
