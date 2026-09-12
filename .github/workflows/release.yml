@@ -341,6 +341,61 @@ jobs:
           SCCACHE_IGNORE_SERVER_IO_ERROR: '1'
         run: tools\ci_build_release.cmd
 
+      - name: Stage portable distribution
+        if: steps.build_runtime.outcome == 'success'
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          if (-not (Test-Path -LiteralPath (Join-Path $dist 'BO3HLSLPreviewer.exe'))) {
+            throw 'Build completed without dist\BO3HLSLPreviewer.exe.'
+          }
+
+          # ci_build_release.cmd currently returns as soon as the linker/jom step
+          # completes on GitHub's Windows runner, so do not rely on its post-build
+          # lines to populate the portable distribution. Stage all app-owned data
+          # here in an explicit workflow step that has its own log/output.
+          $items = @(
+            'bo3_compat',
+            'shaders',
+            'presets',
+            'ui',
+            'export_templates',
+            'tests'
+          )
+          foreach ($item in $items) {
+            $source = Join-Path $env:GITHUB_WORKSPACE $item
+            if (Test-Path -LiteralPath $source) {
+              $destination = Join-Path $dist $item
+              if (Test-Path -LiteralPath $destination) {
+                Remove-Item -LiteralPath $destination -Recurse -Force
+              }
+              Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
+            }
+          }
+
+          $versionSource = Join-Path $env:GITHUB_WORKSPACE 'version.json'
+          if (Test-Path -LiteralPath $versionSource) {
+            Copy-Item -LiteralPath $versionSource -Destination (Join-Path $dist 'version.json') -Force
+          }
+
+          $leanTester = ($env:BO3_FAST_TESTER -eq '1' -and $env:BO3_LEAN_UPDATE -eq '1')
+          if ($leanTester) {
+            Write-Host 'Lean tester build: portable Qt/runtime deployment is intentionally omitted from the updater payload.'
+          }
+          else {
+            # Run deployment here even though ci_build_release.cmd also contains a
+            # defensive call. GitHub's log proves that call is not reached after
+            # jom/link on the hosted runner. The deployment script is idempotent.
+            & .\tools\deploy_qt_runtime.ps1 `
+              -Executable (Join-Path $dist 'BO3HLSLPreviewer.exe') `
+              -DistDir $dist
+          }
+
+          Write-Host 'Portable distribution staging complete.'
+          Get-ChildItem -LiteralPath $dist | Sort-Object Name | ForEach-Object {
+            Write-Host ('  ' + $_.Name)
+          }
+
       - name: Show compiler-cache statistics
         if: always() && env.BO3_FAST_TESTER == '1' && steps.build_runtime.outcome == 'success'
         continue-on-error: true

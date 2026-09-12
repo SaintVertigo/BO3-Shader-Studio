@@ -13,13 +13,24 @@ if (-not (Test-Path -LiteralPath $exe)) {
 }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-$windeploy = Get-Command windeployqt.exe -ErrorAction SilentlyContinue
-if (-not $windeploy) { throw 'windeployqt.exe is not on PATH.' }
-$qmake = Get-Command qmake.exe -ErrorAction SilentlyContinue
-if (-not $qmake) { throw 'qmake.exe is not on PATH.' }
+function Resolve-QtTool([string]$Name) {
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
 
-Write-Host "Deploying Qt runtime with: $($windeploy.Source)"
-& $windeploy.Source --release --force --no-translations --compiler-runtime --dir $dist $exe
+    if (-not [string]::IsNullOrWhiteSpace($env:QT_ROOT_DIR)) {
+        $candidate = Join-Path $env:QT_ROOT_DIR ('bin\\' + $Name)
+        if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+    }
+    return $null
+}
+
+$windeploy = Resolve-QtTool 'windeployqt.exe'
+if (-not $windeploy) { throw 'windeployqt.exe was not found on PATH or under QT_ROOT_DIR\\bin.' }
+$qmake = Resolve-QtTool 'qmake.exe'
+if (-not $qmake) { throw 'qmake.exe was not found on PATH or under QT_ROOT_DIR\\bin.' }
+
+Write-Host "Deploying Qt runtime with: $windeploy"
+& $windeploy --release --force --no-translations --compiler-runtime --dir $dist $exe
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
 
 # The user's known-good portable build contains the complete runtime/plugin set
@@ -27,8 +38,8 @@ if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCOD
 # only show up on a clean end-user machine. Query the installed Qt kit directly
 # and make the portable folder match that proven distribution rather than only
 # checking the few DLLs needed for CI startup.
-$qtBins = (& $qmake.Source -query QT_INSTALL_BINS).Trim()
-$qtPlugins = (& $qmake.Source -query QT_INSTALL_PLUGINS).Trim()
+$qtBins = (& $qmake -query QT_INSTALL_BINS).Trim()
+$qtPlugins = (& $qmake -query QT_INSTALL_PLUGINS).Trim()
 if (-not $qtBins -or -not (Test-Path -LiteralPath $qtBins)) {
     throw "qmake returned an invalid QT_INSTALL_BINS path: $qtBins"
 }
@@ -156,10 +167,30 @@ Copy-RequiredFile $d3dCompiler (Join-Path $dist 'd3dcompiler_47.dll') 'd3dcompil
 # Match the existing working portable archive by shipping Microsoft's x64 VC++
 # redistributable installer as a fallback for machines without the runtime.
 $vcRedist = $null
+
+# vcvars64.bat runs inside the compile cmd step, and environment changes from
+# that process do not survive into this separate GitHub Actions PowerShell step.
+# Resolve Visual Studio independently so VC redist discovery cannot depend on
+# VCToolsRedistDir/VSINSTALLDIR leaking across process boundaries.
+$vsRoot = $null
+$vswhereCandidates = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
+    (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+foreach ($vswhere in $vswhereCandidates) {
+    $resolved = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+    if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+        $vsRoot = $resolved.Trim()
+        break
+    }
+}
+
 $vcRoots = @(
     $env:VCToolsRedistDir,
-    $(if ($env:VSINSTALLDIR) { Join-Path $env:VSINSTALLDIR 'VC\Redist\MSVC' } else { $null })
-) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+    $(if ($env:VSINSTALLDIR) { Join-Path $env:VSINSTALLDIR 'VC\Redist\MSVC' } else { $null }),
+    $(if ($vsRoot) { Join-Path $vsRoot 'VC\Redist\MSVC' } else { $null })
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+
 foreach ($vcRoot in $vcRoots) {
     $hit = Get-ChildItem -LiteralPath $vcRoot -Filter 'vc_redist.x64.exe' -File -Recurse -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending |
