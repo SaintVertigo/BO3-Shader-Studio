@@ -93,6 +93,7 @@ $portableRequired = @(
     'Qt6QmlModels.dll',
     'Qt6QmlWorkerScript.dll',
     'Qt6Quick.dll',
+    'Qt6QuickWidgets.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll',
     'd3dcompiler_47.dll',

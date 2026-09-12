@@ -1,4 +1,4 @@
-QT += widgets network qml quick
+QT += widgets network qml quick quickwidgets
 CONFIG += c++17 release windows
 CONFIG -= debug debug_and_release
 TEMPLATE = app

@@ -170,11 +170,12 @@ Item {
                     opacity: frontend.beginnerMode ? 0 : 1
                     glassOpacity: 0.92
                     Behavior on opacity { NumberAnimation { duration: frontend.animationsEnabled ? 230 : 0 } }
-                    WindowContainer {
+                    Item {
+                        id: advancedSlot
+                        objectName: "advancedSlot"
                         anchors.fill: parent
                         anchors.margins: 8
-                        visible: root.advancedMounted && frontend.advancedEditorWindow !== null
-                        window: frontend.advancedEditorWindow
+                        visible: root.advancedMounted
                     }
                     Rectangle {
                         anchors.fill: parent
@@ -240,11 +241,11 @@ Item {
                     border.width: 1
                     border.color: Qt.rgba(frontend.textColor.r, frontend.textColor.g, frontend.textColor.b, 0.09)
                     clip: true
-                    WindowContainer {
-                        id: previewContainer
+                    Item {
+                        id: previewSlot
+                        objectName: "previewSlot"
                         anchors.fill: parent
                         anchors.margins: 1
-                        window: frontend.previewWindow
                     }
                     Rectangle { anchors.fill: parent; color: "transparent"; border.width: 1; border.color: Qt.rgba(frontend.accentColor.r, frontend.accentColor.g, frontend.accentColor.b, 0.10); radius: 12 }
                 }

@@ -78,6 +78,8 @@
 #include <QProgressDialog>
 #include <QPropertyAnimation>
 #include <QQuickView>
+#include <QQuickWidget>
+#include <QQuickItem>
 #include <QQmlContext>
 #include <QQmlError>
 #include <QCursor>
@@ -315,6 +317,43 @@ bool WaitForQuickFrontendLoad(QQuickView* quickView, QStringList* errorsOut = nu
     }
 
     return quickView->status() == QQuickView::Ready && quickView->rootObject() != nullptr;
+}
+
+// QQuickWidget is the stable integration path for the redesigned shell.  It
+// behaves as a real QWidget, which lets the existing native Direct3D preview
+// remain a sibling widget instead of being reparented through nested native
+// WindowContainer hierarchies.
+bool WaitForQuickFrontendLoad(QQuickWidget* quickWidget, QStringList* errorsOut = nullptr)
+{
+    if(!quickWidget) return false;
+
+    if(quickWidget->status() == QQuickWidget::Loading)
+    {
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(quickWidget, &QQuickWidget::statusChanged, &loop,
+                         [&loop](QQuickWidget::Status status)
+        {
+            if(status != QQuickWidget::Loading) loop.quit();
+        });
+        timeout.start(3000);
+        loop.exec();
+    }
+
+    if(errorsOut)
+    {
+        errorsOut->clear();
+        for(const QQmlError& error : quickWidget->errors())
+            errorsOut->append(error.toString());
+        if(quickWidget->status() == QQuickWidget::Loading)
+            errorsOut->append(QStringLiteral("Timed out while loading qrc:/frontend/Main.qml"));
+        if(!quickWidget->rootObject())
+            errorsOut->append(QStringLiteral("QQuickWidget did not create a root QML object."));
+    }
+
+    return quickWidget->status() == QQuickWidget::Ready && quickWidget->rootObject() != nullptr;
 }
 
 QString WriteQmlFrontendStartupLog(const QStringList& errors)
@@ -3606,8 +3645,10 @@ protected:
         QMainWindow::resizeEvent(event);
         if(previewSettingsOverlayHost_ && previewSettingsOverlayHost_->isVisible())
             QTimer::singleShot(0, this, [this]{ positionPreviewSettingsPopup(); });
-        if(beginnerUiMode_ && beginnerBuilderPanel_)
+        if(beginnerUiMode_ && beginnerBuilderPanel_ && !qmlFrontendActive_)
             QTimer::singleShot(0, this, [this]{ updateBeginnerResponsiveLayout(); });
+        if(qmlFrontendActive_)
+            QTimer::singleShot(0, this, [this]{ syncQmlNativeSurfaces(); });
     }
 
     void dragEnterEvent(QDragEnterEvent* event) override
@@ -16882,6 +16923,41 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
+    void syncQmlNativeSurfaces()
+    {
+        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_) return;
+        QQuickItem* rootItem = qmlQuickWidget_->rootObject();
+        if(!rootItem) return;
+
+        auto geometryFor = [rootItem](QQuickItem* item) -> QRect
+        {
+            if(!item) return QRect();
+            const QPointF topLeft = item->mapToItem(rootItem, QPointF(0.0, 0.0));
+            return QRect(qRound(topLeft.x()), qRound(topLeft.y()),
+                         qMax(1, qRound(item->width())), qMax(1, qRound(item->height())));
+        };
+
+        if(preview_ && qmlPreviewSlot_)
+        {
+            const QRect rect = geometryFor(qmlPreviewSlot_);
+            if(rect.isValid() && rect.width() > 1 && rect.height() > 1)
+            {
+                if(preview_->geometry() != rect) preview_->setGeometry(rect);
+                if(!preview_->isVisible()) preview_->show();
+                preview_->raise();
+            }
+        }
+
+        if(advancedEditorPage_ && qmlAdvancedSlot_)
+        {
+            const QRect rect = geometryFor(qmlAdvancedSlot_);
+            if(rect.isValid() && rect.width() > 1 && rect.height() > 1 && advancedEditorPage_->geometry() != rect)
+                advancedEditorPage_->setGeometry(rect);
+            advancedEditorPage_->setVisible(!beginnerUiMode_);
+            if(!beginnerUiMode_) advancedEditorPage_->raise();
+        }
+    }
+
     bool activateQmlFrontend()
     {
         if(qmlFrontendActive_) return true;
@@ -16892,24 +16968,58 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         syncQmlFrontendPalette();
         syncQmlFrontendProject();
 
-        auto* quickView = new QQuickView();
-        quickView->setResizeMode(QQuickView::SizeRootObjectToView);
-        quickView->setColor(Qt::transparent);
-        quickView->rootContext()->setContextProperty(QStringLiteral("frontend"), bridge);
-        quickView->setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
+        // Keep the existing QWidget/D3D backend inside the same QWidget top-level.
+        // QQuickWidget is deliberately used instead of a QQuickView + nested
+        // WindowContainer chain: Qt documents QQuickWidget as the flexible
+        // Widgets/Quick integration path with normal widget stacking semantics.
+        auto* hybridRoot = new QWidget(this);
+        hybridRoot->setObjectName(QStringLiteral("QmlHybridRoot"));
+        hybridRoot->setMinimumSize(640, 360);
+        auto* rootLayout = new QVBoxLayout(hybridRoot);
+        rootLayout->setContentsMargins(0, 0, 0, 0);
+        rootLayout->setSpacing(0);
+
+        auto* quickWidget = new QQuickWidget(hybridRoot);
+        quickWidget->setObjectName(QStringLiteral("QmlFrontendWidget"));
+        quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        quickWidget->setClearColor(Qt::transparent);
+        quickWidget->setFocusPolicy(Qt::StrongFocus);
+        rootLayout->addWidget(quickWidget);
+        quickWidget->rootContext()->setContextProperty(QStringLiteral("frontend"), bridge);
+
+        connect(quickWidget, &QQuickWidget::sceneGraphError, this,
+                [this](QQuickWindow::SceneGraphError error, const QString& message)
+        {
+            const QString sceneGraphFailure = QStringLiteral("Qt Quick scene graph error %1: %2").arg(static_cast<int>(error)).arg(message);
+            const QString logPath = WriteQmlFrontendStartupLog(QStringList{sceneGraphFailure});
+            WriteCliOutput(QString("QML scene graph FAILED:\n%1\nLog: %2\n").arg(sceneGraphFailure, logPath));
+            QTimer::singleShot(0, this, [this, sceneGraphFailure, logPath]
+            {
+                QMessageBox box(QMessageBox::Critical,
+                                QStringLiteral("Qt Quick Rendering Failed"),
+                                QStringLiteral("The redesigned front end could not initialize its renderer."),
+                                QMessageBox::Ok, this);
+                box.setInformativeText(QStringLiteral("Startup details were written to:\n%1").arg(logPath));
+                box.setDetailedText(sceneGraphFailure);
+                box.exec();
+            });
+        });
+
+        // The QML-owned dialogs need an ordinary application window as transient
+        // parent.  The Direct3D/editor surfaces are no longer handed to QML as
+        // QWindows; they remain QWidget siblings layered over QML placeholders.
+        winId();
+        bridge->setNativeWindows(windowHandle(), nullptr, nullptr);
+        quickWidget->setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
+
         QStringList qmlErrors;
-        if(!WaitForQuickFrontendLoad(quickView, &qmlErrors))
+        if(!WaitForQuickFrontendLoad(quickWidget, &qmlErrors))
         {
             const QString logPath = WriteQmlFrontendStartupLog(qmlErrors);
             const QString details = qmlErrors.isEmpty()
                 ? QStringLiteral("The QML engine did not report a detailed error.")
                 : qmlErrors.join(QStringLiteral("\n"));
-            WriteCliOutput(QString("QML front-end startup FAILED:\n%1\nLog: %2\n")
-                           .arg(details, logPath));
-
-            // Never make a failed QML startup look like a successful old build.
-            // Keep the stable QWidget UI available for recovery, but label it and
-            // show the exact failure after the main window becomes visible.
+            WriteCliOutput(QString("QML front-end startup FAILED:\n%1\nLog: %2\n").arg(details, logPath));
             setWindowTitle(QString("BO3 Shader Studio %1 [QML FALLBACK]").arg(displayVersion_));
             statusBar()->showMessage(QStringLiteral("QML front end failed to load — legacy recovery UI active."));
             QTimer::singleShot(0, this, [this, details, logPath]
@@ -16922,8 +17032,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 box.setDetailedText(details);
                 box.exec();
             });
-
-            delete quickView;
+            delete hybridRoot;
             qmlFrontendBridge_->deleteLater();
             qmlFrontendBridge_ = nullptr;
             return false;
@@ -17000,26 +17109,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
         connect(statusBar(), &QStatusBar::messageChanged, bridge, &StudioFrontendBridge::setStatusText);
 
-        // Turn the native Direct3D viewport and the existing Advanced editor page
-        // into child windows that Qt Quick's WindowContainer can place directly in
-        // the new scene. This avoids QQuickWidget's off-screen render pass and
-        // keeps the D3D renderer byte-for-byte unchanged.
+
+        QQuickItem* rootObject = quickWidget->rootObject();
+        QQuickItem* previewSlot = rootObject ? rootObject->findChild<QQuickItem*>(QStringLiteral("previewSlot")) : nullptr;
+        QQuickItem* advancedSlot = rootObject ? rootObject->findChild<QQuickItem*>(QStringLiteral("advancedSlot")) : nullptr;
+        if(!rootObject || !previewSlot || !advancedSlot)
+        {
+            QStringList errors;
+            if(!rootObject) errors << QStringLiteral("Main.qml did not create a root QQuickItem.");
+            if(!previewSlot) errors << QStringLiteral("Main.qml is missing objectName 'previewSlot'.");
+            if(!advancedSlot) errors << QStringLiteral("Main.qml is missing objectName 'advancedSlot'.");
+            const QString logPath = WriteQmlFrontendStartupLog(errors);
+            WriteCliOutput(QString("QML hybrid surface discovery FAILED:\n%1\nLog: %2\n")
+                           .arg(errors.join(QStringLiteral("\n")), logPath));
+            delete hybridRoot;
+            qmlFrontendBridge_->deleteLater();
+            qmlFrontendBridge_ = nullptr;
+            return false;
+        }
+
+        // Detach the proven editor/preview widgets from the legacy layout, but do
+        // not turn them into top-level windows.  They stay ordinary children of
+        // hybridRoot, above the QQuickWidget.  This is the stable stacking model
+        // Qt explicitly supports for QQuickWidget.
         if(authoringStack_ && advancedEditorPage_)
             authoringStack_->removeWidget(advancedEditorPage_);
         if(advancedEditorPage_)
         {
             advancedEditorPage_->hide();
-            advancedEditorPage_->setParent(nullptr);
-            advancedEditorPage_->setWindowFlags(Qt::FramelessWindowHint);
-            advancedEditorPage_->setAttribute(Qt::WA_NativeWindow, true);
-            advancedEditorPage_->winId();
+            advancedEditorPage_->setParent(hybridRoot);
+            advancedEditorPage_->setWindowFlags(Qt::Widget);
         }
         if(preview_)
         {
             preview_->hide();
-            preview_->setParent(nullptr);
-            preview_->setWindowFlags(Qt::FramelessWindowHint);
-            preview_->winId();
+            preview_->setParent(hybridRoot);
+            preview_->setWindowFlags(Qt::Widget);
         }
 
         legacyCentralWidget_ = takeCentralWidget();
@@ -17035,29 +17160,38 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(statusBar()) statusBar()->hide();
         if(previewSettingsOverlayHost_) previewSettingsOverlayHost_->hide();
 
-        // Force the host QWindow to exist so QML tool windows can use it as a
-        // proper transient parent and stay centered on the Studio window.
-        winId();
-        bridge->setNativeWindows(windowHandle(),
-                                 preview_ ? preview_->windowHandle() : nullptr,
-                                 advancedEditorPage_ ? advancedEditorPage_->windowHandle() : nullptr);
-
-        qmlQuickView_ = quickView;
-        qmlContainerWidget_ = QWidget::createWindowContainer(quickView, this);
-        qmlContainerWidget_->setMinimumSize(640, 360);
-        qmlContainerWidget_->setFocusPolicy(Qt::StrongFocus);
-        setCentralWidget(qmlContainerWidget_);
+        qmlQuickWidget_ = quickWidget;
+        qmlHybridRoot_ = hybridRoot;
+        qmlPreviewSlot_ = previewSlot;
+        qmlAdvancedSlot_ = advancedSlot;
+        setCentralWidget(hybridRoot);
         qmlFrontendActive_ = true;
 
-        QTimer::singleShot(0, this, [this]{
-            // The native windows must exist for WindowContainer, but QML owns
-            // their on-screen visibility. The advanced editor is not flashed as
-            // a stray top-level HWND during Beginner startup.
-            if(preview_) preview_->show();
-            if(advancedEditorPage_) advancedEditorPage_->setVisible(!beginnerUiMode_);
+        auto queueGeometrySync = [this]
+        {
+            if(qmlGeometrySyncQueued_) return;
+            qmlGeometrySyncQueued_ = true;
+            QTimer::singleShot(0, this, [this]
+            {
+                qmlGeometrySyncQueued_ = false;
+                syncQmlNativeSurfaces();
+            });
+        };
+        for(QQuickItem* item : {qmlPreviewSlot_, qmlAdvancedSlot_})
+        {
+            connect(item, &QQuickItem::xChanged, this, queueGeometrySync);
+            connect(item, &QQuickItem::yChanged, this, queueGeometrySync);
+            connect(item, &QQuickItem::widthChanged, this, queueGeometrySync);
+            connect(item, &QQuickItem::heightChanged, this, queueGeometrySync);
+            connect(item, &QQuickItem::visibleChanged, this, queueGeometrySync);
+        }
+
+        QTimer::singleShot(0, this, [this]
+        {
             syncQmlFrontendUiState();
             syncQmlFrontendPalette();
             syncQmlFrontendProject();
+            syncQmlNativeSurfaces();
             if(preview_) preview_->renderNow();
         });
         return true;
@@ -19501,21 +19635,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // painting with the Direct3D child window.
         QPoint previewTopLeft;
         QPoint previewTopRight;
-        if(qmlFrontendActive_)
-        {
-            // The D3D QWidget's QWindow is positioned by QML WindowContainer, so
-            // QWidget::mapToGlobal() is no longer an authoritative coordinate
-            // source. Anchor the legacy advanced inspector to the visible shell
-            // until that dense panel is migrated to its QML drawer.
-            const QPoint shellTopLeft = mapToGlobal(QPoint(0, 0));
-            previewTopLeft = shellTopLeft + QPoint(qMax(360, width() / 4), 112);
-            previewTopRight = shellTopLeft + QPoint(width() - 12, 112);
-        }
-        else
-        {
-            previewTopLeft = preview_->mapToGlobal(QPoint(0, 0));
-            previewTopRight = preview_->mapToGlobal(QPoint(preview_->width(), 0));
-        }
+        // In the QQuickWidget hybrid shell the Direct3D preview remains a real
+        // QWidget sibling, so its QWidget geometry is authoritative in both the
+        // redesigned and legacy front ends.
+        previewTopLeft = preview_->mapToGlobal(QPoint(0, 0));
+        previewTopRight = preview_->mapToGlobal(QPoint(preview_->width(), 0));
         int x = previewTopRight.x() - popupSize.width() - 8;
         int y = previewTopLeft.y() + 8;
 
@@ -19753,7 +19877,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 const int revealDelay = effectiveAnimationsEnabled() ? 170 : 0;
                 QTimer::singleShot(revealDelay, this, [this]{
                     if(qmlFrontendActive_ && !beginnerUiMode_ && advancedEditorPage_)
+                    {
                         advancedEditorPage_->show();
+                        syncQmlNativeSurfaces();
+                    }
                 });
             }
         }
@@ -22430,10 +22557,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // proven backend/command surface during migration, while these members own
     // only the new presentation layer.
     StudioFrontendBridge* qmlFrontendBridge_ = nullptr;
-    QQuickView* qmlQuickView_ = nullptr;
-    QWidget* qmlContainerWidget_ = nullptr;
+    QQuickWidget* qmlQuickWidget_ = nullptr;
+    QWidget* qmlHybridRoot_ = nullptr;
+    QQuickItem* qmlPreviewSlot_ = nullptr;
+    QQuickItem* qmlAdvancedSlot_ = nullptr;
     QWidget* legacyCentralWidget_ = nullptr;
     bool qmlFrontendActive_ = false;
+    bool qmlGeometrySyncQueued_ = false;
 
     CodeEditor* editor_ = new CodeEditor();
     QStackedWidget* authoringStack_ = nullptr;
@@ -22797,15 +22927,39 @@ int RunBo3ShaderStudio(int argc, char* argv[])
                                QColor(QStringLiteral("#9DA8B5")),
                                QColor(QStringLiteral("#4D8FCC")));
 
-        QQuickView view;
-        view.setResizeMode(QQuickView::SizeRootObjectToView);
-        view.setColor(Qt::transparent);
+        QQuickWidget view;
+        view.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        view.setClearColor(Qt::transparent);
         view.rootContext()->setContextProperty(QStringLiteral("frontend"), &bridge);
+        QString renderError;
+        QObject::connect(&view, &QQuickWidget::sceneGraphError, &view,
+                         [&renderError](QQuickWindow::SceneGraphError error, const QString& message)
+        {
+            renderError = QStringLiteral("scene graph error %1: %2").arg(static_cast<int>(error)).arg(message);
+        });
         view.setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
 
         QStringList errors;
         const bool ready = WaitForQuickFrontendLoad(&view, &errors);
-        if(!ready)
+        if(ready)
+        {
+            // A component-only smoke test missed the previous startup failure: the
+            // scene graph is not created until the widget is actually shown.
+            // Render a few event-loop turns so CI validates the same integration
+            // class the real application uses.
+            view.resize(960, 540);
+            view.show();
+            QElapsedTimer renderTimer;
+            renderTimer.start();
+            while(renderTimer.elapsed() < 450 && renderError.isEmpty())
+            {
+                app.processEvents(QEventLoop::AllEvents, 30);
+                QThread::msleep(8);
+            }
+            view.hide();
+        }
+        if(!renderError.isEmpty()) errors << renderError;
+        if(!ready || !renderError.isEmpty())
         {
             WriteCliOutput(QStringLiteral("QML startup smoke test: FAIL\n"));
             if(errors.isEmpty())
