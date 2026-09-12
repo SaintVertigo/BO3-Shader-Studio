@@ -291,10 +291,11 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           # Preserve the conservative manual/stable release dependency path.
-          version: '6.8.*'
+          version: '6.8.3'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
+          modules: 'qtsvg'
           cache: true
 
       - name: Restore parallel make helper

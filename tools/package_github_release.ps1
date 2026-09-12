@@ -79,22 +79,39 @@ $updatePath = Join-Path $out $updateName
 $fullPath = Join-Path $out $fullName
 $staging = Join-Path $env:TEMP ("BO3ShaderStudio_Package_" + [Guid]::NewGuid().ToString('N'))
 
+$portableRequired = @(
+    'BO3HLSLPreviewer.exe',
+    'Qt6Core.dll',
+    'Qt6Gui.dll',
+    'Qt6Network.dll',
+    'Qt6Svg.dll',
+    'Qt6Widgets.dll',
+    'd3dcompiler_47.dll',
+    'dxcompiler.dll',
+    'dxil.dll',
+    'opengl32sw.dll',
+    'generic\qtuiotouchplugin.dll',
+    'iconengines\qsvgicon.dll',
+    'imageformats\qgif.dll',
+    'imageformats\qico.dll',
+    'imageformats\qjpeg.dll',
+    'imageformats\qsvg.dll',
+    'networkinformation\qnetworklistmanager.dll',
+    'platforms\qwindows.dll',
+    'styles\qmodernwindowsstyle.dll',
+    'tls\qcertonlybackend.dll',
+    'tls\qschannelbackend.dll',
+    'vc_redist.x64.exe'
+)
+
 function Assert-PortableRuntime([string]$Directory, [string]$Context) {
-    $required = @(
-        'BO3HLSLPreviewer.exe',
-        'Qt6Core.dll',
-        'Qt6Gui.dll',
-        'Qt6Widgets.dll',
-        'Qt6Network.dll',
-        'platforms\qwindows.dll'
-    )
-    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Directory $_)) })
+    $missing = @($portableRequired | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Directory $_)) })
     if ($missing.Count -gt 0) {
         throw "$Context is missing portable runtime files: $($missing -join ', '). The release will NOT be published."
     }
 }
 
-function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context) {
+function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context, [string]$Prefix = '') {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
@@ -103,17 +120,14 @@ function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context) {
             $name = $entry.FullName.Replace('/','\').TrimStart('\')
             $entries[$name.ToLowerInvariant()] = $true
         }
-        $required = @(
-            'BO3HLSLPreviewer.exe',
-            'Qt6Core.dll',
-            'Qt6Gui.dll',
-            'Qt6Widgets.dll',
-            'Qt6Network.dll',
-            'platforms\qwindows.dll'
-        )
-        $missing = @($required | Where-Object { -not $entries.ContainsKey($_.ToLowerInvariant()) })
+        $normalizedPrefix = $Prefix.Replace('/','\').Trim('\')
+        if ($normalizedPrefix) { $normalizedPrefix += '\' }
+        $missing = @($portableRequired | Where-Object {
+            $expected = ($normalizedPrefix + $_).ToLowerInvariant()
+            -not $entries.ContainsKey($expected)
+        })
         if ($missing.Count -gt 0) {
-            throw "$Context ZIP is missing portable runtime files: $($missing -join ', ')."
+            throw "$Context ZIP is missing portable runtime files under '$Prefix': $($missing -join ', ')."
         }
     }
     finally {
@@ -182,14 +196,21 @@ try {
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel $updateCompression
 
     if (-not $UpdateOnly) {
-        Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
-        Assert-ZipContainsPortableRuntime $fullPath 'Fresh-install release'
+        # Fresh-install ZIPs should unpack into one clean application directory,
+        # matching the user's known-good portable archive instead of spilling DLLs
+        # and folders into the directory where the ZIP happens to be extracted.
+        $freshRoot = Join-Path $staging 'fresh_install'
+        $freshApp = Join-Path $freshRoot 'BO3 Shader Studio'
+        New-Item -ItemType Directory -Path $freshApp -Force | Out-Null
+        Copy-Item -Path (Join-Path $dist '*') -Destination $freshApp -Recurse -Force
+        Compress-Archive -Path $freshApp -DestinationPath $fullPath -CompressionLevel Optimal
+        Assert-ZipContainsPortableRuntime $fullPath 'Fresh-install release' 'BO3 Shader Studio'
     }
 
     if (-not $LeanPayload) {
         # Manual/full updater payloads also need the complete runtime because an
         # updater may be applied to an old installation with different Qt files.
-        Assert-ZipContainsPortableRuntime $updatePath 'Full-runtime updater'
+        Assert-ZipContainsPortableRuntime $updatePath 'Full-runtime updater' 'payload'
     }
 }
 finally {
