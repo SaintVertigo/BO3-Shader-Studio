@@ -225,11 +225,11 @@ public:
         fade->setEasingCurve(QEasingCurve::InCubic);
 
         const QRect endRect = geometry();
-        QRect small = endRect.adjusted(18, 12, -18, -12);
+        const QRect shrunkenRect = endRect.adjusted(18, 12, -18, -12);
         auto* shrink = new QPropertyAnimation(this, "geometry", group);
         shrink->setDuration(165);
         shrink->setStartValue(endRect);
-        shrink->setEndValue(small);
+        shrink->setEndValue(shrunkenRect);
         shrink->setEasingCurve(QEasingCurve::InOutCubic);
         connect(group, &QParallelAnimationGroup::finished, this, [this, result]
         {
