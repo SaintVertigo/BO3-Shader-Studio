@@ -1613,12 +1613,27 @@ public:
             QString error;
             if (!preview_->ensureInitialized(error))
             {
+                qmlNativeSurfacesReady_ = false;
                 AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialization FAILED: %1").arg(error));
                 if(!error.isEmpty()) QMessageBox::critical(this, "DirectX initialization failed", error);
                 return;
             }
             SetStudioStartupPhase(9);
             AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized"));
+            if(qmlFrontendActive_)
+            {
+                // QML slot geometry may have changed repeatedly during startup.
+                // Only now is it safe to expose the native HWND-backed surfaces.
+                // This ordering avoids putting an uninitialized native child over
+                // QQuickWidget's first composition pass.
+                qmlNativeSurfacesReady_ = true;
+                syncQmlFrontendUiState();
+                syncQmlFrontendPalette();
+                syncQmlFrontendProject();
+                syncQmlNativeSurfaces();
+                SetStudioStartupPhase(10);
+                AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached after Direct3D initialization"));
+            }
             if(beginnerUiMode_)
                 startBeginnerProject(beginner::Target::PostFx, false);
             else
@@ -1627,6 +1642,11 @@ public:
         QTimer::singleShot(650, this, [this]{ showGettingStarted(false); });
         if (automaticUpdateChecksEnabled())
             QTimer::singleShot(2500, this, [this]{ checkForOnlineUpdates(false); });
+    }
+
+    bool frontendSmokeReady() const
+    {
+        return qmlFrontendActive_ && qmlNativeSurfacesReady_;
     }
 
     int runCliGlslRegression(const QString& caseSelector, bool runAll,
@@ -17080,7 +17100,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
     void syncQmlNativeSurfaces()
     {
-        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_) return;
+        // Never expose the native HWND-backed preview/editor while Qt Quick is
+        // still establishing its backing store or before Direct3D has completed
+        // initialization. Geometry signals can fire immediately when the QML
+        // root is resized, so without this gate the preview could become visible
+        // before the delayed D3D startup timer ever ran.
+        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_ || !qmlNativeSurfacesReady_) return;
         QQuickItem* rootItem = qmlQuickWidget_->rootObject();
         if(!rootItem) return;
 
@@ -17323,6 +17348,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         qmlPreviewSlot_ = previewSlot;
         qmlAdvancedSlot_ = advancedSlot;
         setCentralWidget(hybridRoot);
+        qmlNativeSurfacesReady_ = false;
         qmlFrontendActive_ = true;
 
         auto queueGeometrySync = [this]
@@ -17345,16 +17371,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
 
         SetStudioStartupPhase(6);
-        AppendStudioStartupTrace(QStringLiteral("Hybrid QML host installed; deferring native preview attach"));
-        QTimer::singleShot(700, this, [this]
-        {
-            syncQmlFrontendUiState();
-            syncQmlFrontendPalette();
-            syncQmlFrontendProject();
-            syncQmlNativeSurfaces();
-            SetStudioStartupPhase(10);
-            AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached to QML slots"));
-        });
+        AppendStudioStartupTrace(QStringLiteral("Hybrid QML host installed; native surfaces gated until Direct3D is ready"));
         return true;
     }
 
@@ -22722,6 +22739,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QWidget* qmlHybridRoot_ = nullptr;
     QQuickItem* qmlPreviewSlot_ = nullptr;
     QQuickItem* qmlAdvancedSlot_ = nullptr;
+    bool qmlNativeSurfacesReady_ = false;
     QWidget* legacyCentralWidget_ = nullptr;
     bool qmlFrontendActive_ = false;
     bool qmlGeometrySyncQueued_ = false;
@@ -23171,30 +23189,33 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         MainWindow smokeWindow;
         smokeWindow.resize(1280, 720);
         smokeWindow.show();
-        QElapsedTimer timer;
-        timer.start();
-        while(timer.elapsed() < 2400)
+
+        // Exercise the application through the real Qt event loop instead of a
+        // hand-pumped processEvents() loop. A blocking paint/native-window event
+        // then behaves exactly as it would in the shipped app, while the timeout
+        // remains owned by Qt itself.
+        int smokeResult = 1;
+        QTimer::singleShot(3200, &app, [&]
         {
-            app.processEvents(QEventLoop::AllEvents, 30);
-            QThread::msleep(8);
-        }
-        if(!smokeWindow.isVisible())
-        {
-            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (window not visible)\n"));
-            if(SUCCEEDED(com)) CoUninitialize();
-            return 1;
-        }
-        WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
-        // Do not call close() here. The normal closeEvent() runs maybeSave(), and
-        // the startup project is intentionally marked dirty. In unattended CI
-        // that opens the save-confirmation dialog and makes the smoke process
-        // look hung even though the frontend survived successfully. Hiding the
-        // test window and allowing stack destruction exercises teardown without
-        // invoking any interactive user prompt.
-        smokeWindow.hide();
-        app.processEvents(QEventLoop::AllEvents, 50);
+            if(!smokeWindow.isVisible())
+            {
+                WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (window not visible)\n"));
+            }
+            else if(!smokeWindow.frontendSmokeReady())
+            {
+                WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (QML/native surfaces not ready)\n"));
+            }
+            else
+            {
+                WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
+                smokeResult = 0;
+            }
+            smokeWindow.hide();
+            app.quit();
+        });
+        app.exec();
         if(SUCCEEDED(com)) CoUninitialize();
-        return 0;
+        return smokeResult;
     }
 
     if(publicCorpus)
