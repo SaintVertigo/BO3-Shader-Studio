@@ -1827,7 +1827,7 @@ public:
                !postHlsl.contains("BO3BeginnerStructureToneGather") ||
                !postHlsl.contains("Structure & Tone") ||
                !postHlsl.contains("explicit viewmodel/world/everything targeting") ||
-               !postHlsl.contains("Luminance Sharpness"))
+               !postHlsl.contains("// Sharpness"))
                 return "Beginner PostFX quality/depth/target modules are missing from generated BO3 coverage HLSL.";
             if(!postHlsl.contains("BO3BeginnerPencilGetGrad") ||
                !postHlsl.contains("BO3BeginnerPencilGetColHT") ||
