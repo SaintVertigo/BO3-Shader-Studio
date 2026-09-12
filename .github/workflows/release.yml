@@ -273,17 +273,30 @@ jobs:
           Write-Host "Regression selection: GLSL=$runGlsl Shadertoy=$runShadertoy PostFX=$runPostfx Package=$runPackage"
 
       - name: Install Qt (lean tester)
-        if: env.BO3_FAST_TESTER == '1'
+        if: env.BO3_FAST_TESTER == '1' && env.BO3_LEAN_UPDATE == '1'
         uses: jurplel/install-qt-action@v4
         with:
-          # Shader Studio uses QtCore/Gui/Widgets/Network only, all supplied by
-          # qtbase. Automatic Tester builds do not need the unrelated archives.
-          # Pin the exact already-proven runtime so this small cache stays stable.
+          # Ordinary UI/source tester pushes reuse the already-installed portable
+          # runtime, so only the build-time Qt Quick/Widgets archives are needed.
           version: '6.8.3'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          archives: 'qtbase'
+          archives: 'qtbase qtdeclarative'
+          cache: true
+
+      - name: Install Qt (tester with runtime migration)
+        if: env.BO3_FAST_TESTER == '1' && env.BO3_LEAN_UPDATE != '1'
+        uses: jurplel/install-qt-action@v4
+        with:
+          # Runtime-layout changes (such as the 0.3 QML migration) force a full
+          # updater payload. qtsvg is required here because the portable-runtime
+          # verifier intentionally preserves the known-good SVG plugin set.
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          archives: 'qtbase qtdeclarative qtsvg'
           cache: true
 
       - name: Install Qt (full/manual)
@@ -298,8 +311,31 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          archives: 'qtbase qtsvg'
+          archives: 'qtbase qtdeclarative qtsvg'
           cache: true
+
+      - name: Validate QML front end
+        shell: pwsh
+        run: |
+          $formatter = Get-Command qmlformat.exe -ErrorAction SilentlyContinue
+          $linter = Get-Command qmllint.exe -ErrorAction SilentlyContinue
+          if (-not $formatter) { throw 'qmlformat.exe was not installed with qtdeclarative.' }
+          if (-not $linter) { throw 'qmllint.exe was not installed with qtdeclarative.' }
+          $qmlRoot = Join-Path $env:GITHUB_WORKSPACE 'ui\qml'
+          $qmlFiles = @(Get-ChildItem -LiteralPath $qmlRoot -Filter '*.qml' -File | Sort-Object Name)
+          if ($qmlFiles.Count -eq 0) { throw 'No QML front-end files were found.' }
+          foreach ($qml in $qmlFiles) {
+            Write-Host ("Syntax checking QML: {0}" -f $qml.Name)
+            & $formatter.Source --ignore-settings $qml.FullName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "QML syntax validation failed: $($qml.FullName)" }
+            # The bridge is intentionally a runtime context property during this migration,
+            # so Qt 6.8 qmllint cannot type it ahead of time. Keep lint warnings visible
+            # without turning those expected context warnings into a CI failure; hard
+            # parse/type/import errors still return non-zero.
+            & $linter.Source --max-warnings -1 -I $qmlRoot $qml.FullName
+            if ($LASTEXITCODE -ne 0) { throw "QML lint validation failed: $($qml.FullName)" }
+          }
+          Write-Host ("QML syntax/lint validation passed for {0} file(s)." -f $qmlFiles.Count)
 
       - name: Restore parallel make helper
         if: env.BO3_FAST_TESTER == '1'

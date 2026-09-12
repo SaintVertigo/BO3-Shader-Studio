@@ -5,7 +5,7 @@ cd /d "%~dp0"
 cls
 echo ========================================
 echo   BO3 HLSL Previewer - Qt 6 Build
-echo   DirectX 11 backend + Qt Widgets UI
+echo   DirectX 11 backend + Qt Quick/QML UI
 echo   CMake is NOT required.
 echo ========================================
 echo.
@@ -205,7 +205,7 @@ if not exist "dist\BO3HLSLPreviewer.exe" (
 echo.
 echo Deploying Qt runtime files...
 if exist "%QT_BIN%windeployqt.exe" (
-    "%QT_BIN%windeployqt.exe" --release --no-translations --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"
+    "%QT_BIN%windeployqt.exe" --release --no-translations --qmldir "%CD%\ui\qml" --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"
     if errorlevel 1 echo Warning: windeployqt reported an error. The EXE itself was still built.
 ) else (
     echo Warning: windeployqt.exe was not found beside qmake.exe.

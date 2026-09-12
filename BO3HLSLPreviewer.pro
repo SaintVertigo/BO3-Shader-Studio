@@ -1,4 +1,4 @@
-QT += widgets network
+QT += widgets network qml quick
 CONFIG += c++17 release windows
 CONFIG -= debug debug_and_release
 TEMPLATE = app
@@ -27,11 +27,13 @@ SOURCES += src/main.cpp \
            src/bo3_techset.cpp \
            src/bo3_techset_writer.cpp \
            src/shadertoy_project.cpp \
+           src/studio_frontend_bridge.cpp \
            third_party/tinyexr/miniz.c
 
 INCLUDEPATH += $$PWD/third_party/tinyexr
 
-RESOURCES += resources/learning.qrc
+RESOURCES += resources/learning.qrc \
+             resources/frontend.qrc
 HEADERS += src/github_update.h \
            src/beginner_shader_builder.h \
            src/main_window.h \
@@ -51,6 +53,7 @@ HEADERS += src/github_update.h \
            src/bo3_techset.h \
            src/bo3_techset_writer.h \
            src/shadertoy_project.h \
+           src/studio_frontend_bridge.h \
            third_party/tinyexr/tinyexr.h \
            third_party/tinyexr/miniz.h
 

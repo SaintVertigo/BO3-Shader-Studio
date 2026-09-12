@@ -88,6 +88,11 @@ $portableRequired = @(
     'Qt6Core.dll',
     'Qt6Gui.dll',
     'Qt6Network.dll',
+    'Qt6Qml.dll',
+    'Qt6QmlMeta.dll',
+    'Qt6QmlModels.dll',
+    'Qt6QmlWorkerScript.dll',
+    'Qt6Quick.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll',
     'd3dcompiler_47.dll',
@@ -112,6 +117,15 @@ function Assert-PortableRuntime([string]$Directory, [string]$Context) {
     if ($missing.Count -gt 0) {
         throw "$Context is missing portable runtime files: $($missing -join ', '). The release will NOT be published."
     }
+
+    $qmlDescriptors = @(Get-ChildItem -LiteralPath $Directory -Filter 'qmldir' -File -Recurse -ErrorAction SilentlyContinue)
+    $qmlPaths = @($qmlDescriptors | ForEach-Object { $_.FullName.Replace('/','\') })
+    foreach ($module in @('QtQuick', 'QtQml')) {
+        $needle = '\' + $module + '\qmldir'
+        if (-not ($qmlPaths | Where-Object { $_.EndsWith($needle, [StringComparison]::OrdinalIgnoreCase) })) {
+            throw "$Context is missing deployed QML module '$module'. The release will NOT be published."
+        }
+    }
 }
 
 function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context, [string]$Prefix = '') {
@@ -131,6 +145,20 @@ function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context, [
         })
         if ($missing.Count -gt 0) {
             throw "$Context ZIP is missing portable runtime files under '$Prefix': $($missing -join ', ')."
+        }
+
+        foreach ($module in @('QtQuick', 'QtQml')) {
+            $moduleSuffix = ('\' + $module + '\qmldir').ToLowerInvariant()
+            $hasModule = $false
+            foreach ($entryName in $entries.Keys) {
+                if ($entryName.EndsWith($moduleSuffix, [StringComparison]::OrdinalIgnoreCase)) {
+                    $hasModule = $true
+                    break
+                }
+            }
+            if (-not $hasModule) {
+                throw "$Context ZIP is missing deployed QML module '$module'."
+            }
         }
     }
     finally {

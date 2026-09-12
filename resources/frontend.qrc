@@ -1,0 +1,12 @@
+<RCC>
+  <qresource prefix="/frontend">
+    <file alias="Main.qml">../ui/qml/Main.qml</file>
+    <file alias="GlassSurface.qml">../ui/qml/GlassSurface.qml</file>
+    <file alias="GlassButton.qml">../ui/qml/GlassButton.qml</file>
+    <file alias="BeginnerRail.qml">../ui/qml/BeginnerRail.qml</file>
+    <file alias="EffectBrowser.qml">../ui/qml/EffectBrowser.qml</file>
+    <file alias="ParameterControl.qml">../ui/qml/ParameterControl.qml</file>
+    <file alias="ColorField.qml">../ui/qml/ColorField.qml</file>
+    <file alias="TutorialOverlay.qml">../ui/qml/TutorialOverlay.qml</file>
+  </qresource>
+</RCC>

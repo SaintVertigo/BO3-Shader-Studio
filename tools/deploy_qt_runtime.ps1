@@ -30,7 +30,9 @@ $qmake = Resolve-QtTool 'qmake.exe'
 if (-not $qmake) { throw 'qmake.exe was not found on PATH or under QT_ROOT_DIR\\bin.' }
 
 Write-Host "Deploying Qt runtime with: $windeploy"
-& $windeploy --release --force --no-translations --compiler-runtime --dir $dist $exe
+$qmlDir = Join-Path $root 'ui\qml'
+if (-not (Test-Path -LiteralPath $qmlDir)) { throw "QML source directory not found: $qmlDir" }
+& $windeploy --release --force --no-translations --compiler-runtime --qmldir $qmlDir --dir $dist $exe
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
 
 # The user's known-good portable build contains the complete runtime/plugin set
@@ -63,6 +65,11 @@ $qtDlls = @(
     'Qt6Core.dll',
     'Qt6Gui.dll',
     'Qt6Network.dll',
+    'Qt6Qml.dll',
+    'Qt6QmlMeta.dll',
+    'Qt6QmlModels.dll',
+    'Qt6QmlWorkerScript.dll',
+    'Qt6Quick.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll'
 )
@@ -224,6 +231,11 @@ $required = @(
     'Qt6Core.dll',
     'Qt6Gui.dll',
     'Qt6Network.dll',
+    'Qt6Qml.dll',
+    'Qt6QmlMeta.dll',
+    'Qt6QmlModels.dll',
+    'Qt6QmlWorkerScript.dll',
+    'Qt6Quick.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll',
     'd3dcompiler_47.dll',
@@ -245,6 +257,23 @@ $required = @(
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $dist $_)) })
 if ($missing.Count -gt 0) {
     throw ('Portable runtime deployment is incomplete: ' + ($missing -join ', '))
+}
+
+# QML modules are directory-based runtime dependencies, so verify them separately
+# instead of pretending they are ordinary top-level DLLs. windeployqt may place
+# them under a qml\ prefix or directly below dist depending on the Qt tool build.
+$qmlModuleDescriptors = @(Get-ChildItem -LiteralPath $dist -Filter 'qmldir' -File -Recurse -ErrorAction SilentlyContinue)
+$qmlDescriptorPaths = @($qmlModuleDescriptors | ForEach-Object { $_.FullName.Replace('/','\') })
+$requiredQmlModules = @('QtQuick', 'QtQml')
+$missingQmlModules = @()
+foreach ($module in $requiredQmlModules) {
+    $needle = '\' + $module + '\qmldir'
+    if (-not ($qmlDescriptorPaths | Where-Object { $_.EndsWith($needle, [StringComparison]::OrdinalIgnoreCase) })) {
+        $missingQmlModules += $module
+    }
+}
+if ($missingQmlModules.Count -gt 0) {
+    throw ('Portable QML deployment is incomplete: ' + ($missingQmlModules -join ', ') + '. Verify windeployqt --qmldir output.')
 }
 
 Write-Host 'Portable runtime deployment contains every required runtime component for the current Qt kit:'
