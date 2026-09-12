@@ -31,6 +31,22 @@ if (-not $notes.Trim()) {
     $notes = "BO3 Shader Studio $DisplayVersion"
 }
 
+$downloadNotice = if ($Channel -eq 'stable') {
+@'
+## Download
+
+**Fresh install:** download `BO3_Shader_Studio.zip`.
+
+`BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip` is for Shader Studio's built-in updater and is **not** a standalone install.
+'@
+} else {
+@'
+> [!WARNING]
+> This is an automatic Tester update release. The `BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip` asset is **not** a standalone install. New users should use the stable full-build download linked from the repository README.
+'@
+}
+$notes = ($downloadNotice.Trim() + "`n`n" + $notes.Trim())
+
 # Stamp runtime metadata. `version` is intentionally an internal monotonic
 # SemVer used only for update ordering; `displayVersion` is what users see.
 $versionPath = Join-Path $dist 'version.json'
@@ -57,7 +73,7 @@ if (-not ($versionJson.PSObject.Properties.Name -contains 'defaultUpdateChannel'
 else { $versionJson.defaultUpdateChannel = $Channel }
 $versionJson | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $versionPath -Encoding UTF8
 
-$updateName = 'BO3_Shader_Studio_Update.zip'
+$updateName = 'BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip'
 $fullName = 'BO3_Shader_Studio.zip'
 $updatePath = Join-Path $out $updateName
 $fullPath = Join-Path $out $fullName

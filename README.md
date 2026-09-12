@@ -4,9 +4,12 @@ BO3 Shader Studio is a Windows shader creation, preview, conversion, and export 
 
 ## Download
 
-1. Open the [Releases](https://github.com/SaintVertigo/BO3-Shader-Studio/releases) page.
-2. Download the latest `BO3_Shader_Studio.zip` release file.
-3. Extract the ZIP to a folder on your PC.
-4. Run `BO3HLSLPreviewer.exe`.
+**New users should download the full build here:**
 
-Do not run Shader Studio directly from inside the ZIP.
+[Download BO3 Shader Studio](https://github.com/SaintVertigo/BO3-Shader-Studio/releases/latest/download/BO3_Shader_Studio.zip)
+
+1. Download `BO3_Shader_Studio.zip` from the link above.
+2. Extract the ZIP to a folder on your PC.
+3. Run `BO3HLSLPreviewer.exe`.
+
+Do not download files with `AUTO_UPDATER_ONLY` in the name for a fresh install. Those packages are used by Shader Studio's built-in updater.

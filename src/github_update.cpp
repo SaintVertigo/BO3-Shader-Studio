@@ -266,7 +266,7 @@ bool downloadReleaseAsset(const ReleaseInfo& release,
     if(tempDir.isEmpty()) tempDir = QDir::tempPath();
     QDir().mkpath(tempDir);
     QString safeName = release.assetName;
-    if(safeName.isEmpty()) safeName = QString("BO3_Shader_Studio_Update.zip");
+    if(safeName.isEmpty()) safeName = QString("BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip");
     safeName.replace(QRegularExpression("[^A-Za-z0-9_.-]"), "_");
     localPath = QDir(tempDir).filePath(safeName);
 

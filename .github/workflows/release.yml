@@ -570,3 +570,29 @@ jobs:
           $args += $assets
           & gh @args
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+
+      - name: Remove superseded automatic Tester releases
+        if: github.event_name == 'push' && env.RELEASE_CHANNEL == 'tester'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $currentTag = "v$env:RELEASE_VERSION"
+          $repo = '${{ github.repository }}'
+          $pages = gh api --paginate --slurp "repos/$repo/releases?per_page=100" | ConvertFrom-Json
+          $releases = @()
+          foreach ($page in $pages) { $releases += @($page) }
+          $oldAutomatic = @(
+            $releases | Where-Object {
+              $_.prerelease -eq $true -and
+              $_.tag_name -ne $currentTag -and
+              $_.tag_name -match '^v1\.0\.\d+$' -and
+              ([string]$_.body) -match 'Build:\s*`?[0-9a-fA-F]{7,40}`?'
+            } | Sort-Object {[datetime]$_.published_at} -Descending
+          )
+
+          foreach ($release in $oldAutomatic) {
+            Write-Host "Deleting superseded automatic Tester release/tag $($release.tag_name)"
+            gh release delete $release.tag_name --repo $repo --cleanup-tag --yes
+            if ($LASTEXITCODE -ne 0) { throw "Failed to delete old Tester release $($release.tag_name)" }
+          }

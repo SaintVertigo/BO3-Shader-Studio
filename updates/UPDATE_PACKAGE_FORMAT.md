@@ -1,6 +1,6 @@
-# BO3 HLSL Previewer update packages
+# BO3 Shader Studio update packages
 
-After version 0.6.0 is installed, normal users should not need to rebuild the program for updates.
+Normal users should use the built-in updater after installing a full BO3 Shader Studio release.
 
 An update is a ZIP with this layout:
 
@@ -39,12 +39,12 @@ The application can discover these packages from GitHub Releases when `version.j
 ```json
 {
   "githubRepository": "owner/repository",
-  "updateAssetPrefix": "BO3_HLSL_Previewer_Update_",
-  "defaultUpdateChannel": "stable"
+  "updateAssetPrefix": "BO3_Shader_Studio_Update",
+  "defaultUpdateChannel": "tester"
 }
 ```
 
-The included GitHub Actions workflow stamps these fields automatically. Update assets are named `BO3_HLSL_Previewer_Update_<version>.zip`; the app deliberately ignores the separate full-distribution ZIP.
+The included GitHub Actions workflow stamps these fields automatically. Update assets are named `BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip`. The filename intentionally makes it clear that this is not a fresh-install package. The app deliberately ignores the separate `BO3_Shader_Studio.zip` full distribution when checking for updates.
 
 Stable uses GitHub's latest non-prerelease release. Tester scans published releases and chooses the highest compatible SemVer-style version, including prereleases. Before an automatic install, the downloaded ZIP must match the SHA-256 digest exposed for the GitHub Release asset.
 

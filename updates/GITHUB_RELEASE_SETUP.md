@@ -12,8 +12,9 @@ Every push to `main` automatically:
 2. builds BO3 Shader Studio;
 3. runs the GLSL, Shadertoy, PostFX export, and BO3 package regression suites;
 4. blocks the release if any regression fails;
-5. creates `BO3_Shader_Studio.zip` and `BO3_Shader_Studio_Update.zip` plus SHA-256 files;
-6. publishes a GitHub prerelease on the Tester channel.
+5. creates the lean `BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip` package plus its SHA-256 file;
+6. publishes a GitHub prerelease on the Tester channel;
+7. removes older automatic Tester prereleases and their tags so only the current automatic Tester build remains visible.
 
 Typical update flow:
 
@@ -41,14 +42,16 @@ Stable releases are normal GitHub releases. Tester releases are prereleases. Sta
 
 ## Release assets
 
-New releases intentionally contain only the clean product assets:
+Manual Stable releases contain:
 
-- `BO3_Shader_Studio.zip`
+- `BO3_Shader_Studio.zip` — the full fresh-install package users should download
 - `BO3_Shader_Studio.zip.sha256`
-- `BO3_Shader_Studio_Update.zip`
-- `BO3_Shader_Studio_Update.zip.sha256`
+- `BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip` — built-in updater package only
+- `BO3_Shader_Studio_Update_AUTO_UPDATER_ONLY.zip.sha256`
 
-GitHub also exposes its automatic source-code archives. The old `BO3_HLSL_Previewer_*` bridge asset is no longer generated on new releases. The original 0.1 bridge release can remain available so users still on the pre-rename updater can migrate.
+Automatic Tester prereleases contain only the updater package and checksum. They are not fresh-install releases.
+
+The update asset is deliberately labeled `AUTO_UPDATER_ONLY` so users do not mistake it for the fresh-install package. GitHub also exposes its automatic source-code archives. The old `BO3_HLSL_Previewer_*` bridge asset is no longer generated on new releases. The original 0.1 bridge release can remain available so users still on the pre-rename updater can migrate.
 
 ## Public release access
 
