@@ -324,6 +324,44 @@ QString StudioStartupTracePath()
     return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("studio_startup.log"));
 }
 
+QtMessageHandler gPreviousStudioQtMessageHandler = nullptr;
+std::mutex gStudioQtMessageMutex;
+
+void StudioQtMessageHandler(QtMsgType type, const QMessageLogContext& context, const QString& message)
+{
+    // SEH/minidump handling cannot see every Qt fatal/abort path. Keep a second,
+    // very small diagnostic stream so a platform/plugin/scene-graph fatal that
+    // occurs during QWidget::show() is not silent.
+    const char* level = "DEBUG";
+    switch(type)
+    {
+        case QtInfoMsg: level = "INFO"; break;
+        case QtWarningMsg: level = "WARNING"; break;
+        case QtCriticalMsg: level = "CRITICAL"; break;
+        case QtFatalMsg: level = "FATAL"; break;
+        default: break;
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(gStudioQtMessageMutex);
+        QFile file(QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("studio_qt.log")));
+        if(file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Append))
+        {
+            QString line = QStringLiteral("[%1] [%2] %3")
+                .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")),
+                     QString::fromLatin1(level), message);
+            if(context.file && *context.file)
+                line += QStringLiteral("  (%1:%2)").arg(QString::fromUtf8(context.file)).arg(context.line);
+            line += QLatin1Char('\n');
+            file.write(line.toUtf8());
+            file.flush();
+        }
+    }
+
+    if(gPreviousStudioQtMessageHandler)
+        gPreviousStudioQtMessageHandler(type, context, message);
+}
+
 void AppendStudioStartupTrace(const QString& message, bool truncate = false)
 {
     QFile file(StudioStartupTracePath());
@@ -1618,6 +1656,30 @@ public:
         // preview on a separate turn. Legacy UI keeps its original immediate path.
         const int previewStartupDelayMs = qmlFrontendActive_ ? 500 : 0;
         QTimer::singleShot(previewStartupDelayMs, this, [this]{
+            // The QML-only shell has survived the first visible event-loop turns.
+            // It is now safe to expose the real QWidget host window to QML dialogs
+            // and to reparent the native/editor surfaces into the hybrid root.
+            if(qmlFrontendActive_)
+            {
+                if(qmlFrontendBridge_)
+                {
+                    QWindow* host = windowHandle();
+                    if(!host)
+                    {
+                        // Safe now: the top-level widget has already been shown.
+                        // Force a handle only on this post-show event-loop turn.
+                        winId();
+                        host = windowHandle();
+                    }
+                    if(qmlFrontendBridge_->hostWindow() != host)
+                    {
+                        qmlFrontendBridge_->setNativeWindows(host, nullptr, nullptr);
+                        AppendStudioStartupTrace(QStringLiteral("QML host window published after top-level show"));
+                    }
+                }
+                prepareQmlNativeSurfaceWidgets();
+            }
+
             SetStudioStartupPhase(8);
             AppendStudioStartupTrace(QStringLiteral("Initializing Direct3D preview"));
             QString error;
@@ -17140,6 +17202,31 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
+    void prepareQmlNativeSurfaceWidgets()
+    {
+        if(!qmlFrontendActive_ || !qmlHybridRoot_ || qmlNativeWidgetsAttached_) return;
+
+        // At this point the real top-level QMainWindow has already been shown and
+        // Qt Quick has an established backing store.  Only now move the existing
+        // QWidget surfaces into the hybrid host.  Keep them hidden until D3D has
+        // initialized and qmlNativeSurfacesReady_ is raised.
+        if(authoringStack_ && advancedEditorPage_)
+            authoringStack_->removeWidget(advancedEditorPage_);
+        if(advancedEditorPage_)
+        {
+            advancedEditorPage_->hide();
+            advancedEditorPage_->setParent(qmlHybridRoot_);
+        }
+        if(preview_)
+        {
+            preview_->hide();
+            preview_->setParent(qmlHybridRoot_);
+        }
+
+        qmlNativeWidgetsAttached_ = true;
+        AppendStudioStartupTrace(QStringLiteral("Native preview/editor widgets reparented after top-level show"));
+    }
+
     void syncQmlNativeSurfaces()
     {
         // Never expose the native HWND-backed preview/editor while Qt Quick is
@@ -17147,7 +17234,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // initialization. Geometry signals can fire immediately when the QML
         // root is resized, so without this gate the preview could become visible
         // before the delayed D3D startup timer ever ran.
-        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_ || !qmlNativeSurfacesReady_) return;
+        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_ ||
+           !qmlNativeWidgetsAttached_ || !qmlNativeSurfacesReady_) return;
         QQuickItem* rootItem = qmlQuickWidget_->rootObject();
         if(!rootItem) return;
 
@@ -17227,11 +17315,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             });
         });
 
-        // The QML-owned dialogs need an ordinary application window as transient
-        // parent.  The Direct3D/editor surfaces are no longer handed to QML as
-        // QWindows; they remain QWidget siblings layered over QML placeholders.
-        winId();
-        bridge->setNativeWindows(windowHandle(), nullptr, nullptr);
+        // Do not force a native QWindow for the top-level QWidget while it is
+        // still hidden.  On the real Windows startup path the first window.show()
+        // was the exact failure boundary, while QML itself had already reached
+        // Ready.  Keep the initial QML tree completely free of native-window
+        // ownership; the host QWindow is published to QML after the top-level
+        // window is visible, just before native preview integration starts.
+        bridge->setNativeWindows(nullptr, nullptr, nullptr);
         quickWidget->setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
 
         QStringList qmlErrors;
@@ -17353,24 +17443,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return false;
         }
 
-        // Detach the proven editor/preview widgets from the legacy layout, but do
-        // not turn them into top-level windows.  They stay ordinary children of
-        // hybridRoot, above the QQuickWidget.  This is the stable stacking model
-        // Qt explicitly supports for QQuickWidget.
-        if(authoringStack_ && advancedEditorPage_)
-            authoringStack_->removeWidget(advancedEditorPage_);
-        if(advancedEditorPage_)
-        {
-            advancedEditorPage_->hide();
-            advancedEditorPage_->setParent(hybridRoot);
-            advancedEditorPage_->setWindowFlags(Qt::Widget);
-        }
-        if(preview_)
-        {
-            preview_->hide();
-            preview_->setParent(hybridRoot);
-            preview_->setWindowFlags(Qt::Widget);
-        }
+        // Keep the native-backed preview and the existing editor in their proven
+        // legacy parents until *after* the new top-level window has been shown.
+        // Even hidden WA_NativeWindow children participate in Windows native
+        // hierarchy creation/reparenting. Moving the D3D widget under the
+        // QQuickWidget host during construction made window.show() the first
+        // native-composition boundary on the user's machine.  We defer that
+        // reparenting to the explicit D3D startup turn instead.
+        if(advancedEditorPage_) advancedEditorPage_->hide();
+        if(preview_) preview_->hide();
 
         legacyCentralWidget_ = takeCentralWidget();
         if(legacyCentralWidget_)
@@ -17390,6 +17471,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         qmlPreviewSlot_ = previewSlot;
         qmlAdvancedSlot_ = advancedSlot;
         setCentralWidget(hybridRoot);
+        qmlNativeWidgetsAttached_ = false;
         qmlNativeSurfacesReady_ = false;
         qmlFrontendActive_ = true;
 
@@ -22787,6 +22869,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QWidget* qmlHybridRoot_ = nullptr;
     QQuickItem* qmlPreviewSlot_ = nullptr;
     QQuickItem* qmlAdvancedSlot_ = nullptr;
+    bool qmlNativeWidgetsAttached_ = false;
     bool qmlNativeSurfacesReady_ = false;
     QWidget* legacyCentralWidget_ = nullptr;
     bool qmlFrontendActive_ = false;
@@ -23002,7 +23085,8 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     QApplication app(argc, argv);
     app.setApplicationName("BO3 Shader Studio");
-    AppendStudioStartupTrace(QStringLiteral("Process started; crash handler installed"), true);
+    gPreviousStudioQtMessageHandler = qInstallMessageHandler(StudioQtMessageHandler);
+    AppendStudioStartupTrace(QStringLiteral("Process started; crash handler + Qt message logger installed"), true);
     SetStudioStartupPhase(2);
     AppendStudioStartupTrace(QStringLiteral("QApplication ready"));
 
