@@ -23212,24 +23212,47 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         // then behaves exactly as it would in the shipped app, while the timeout
         // remains owned by Qt itself.
         int smokeResult = 1;
-        QTimer::singleShot(3200, &app, [&]
+
+        // Readiness is deliberately condition-driven instead of sampled at one
+        // fixed timestamp. On GitHub's Windows runner the APE preset can take a
+        // couple of seconds to apply after D3D initializes, so the previous
+        // 3.2-second snapshot could fail only ~100 ms before the native surfaces
+        // became ready. Poll until the real integration condition is satisfied,
+        // with a hard timeout for genuine hangs.
+        QTimer readinessPoll;
+        readinessPoll.setInterval(100);
+        QObject::connect(&readinessPoll, &QTimer::timeout, &app, [&]
         {
             if(!smokeWindow.isVisible())
             {
                 WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (window not visible)\n"));
+                readinessPoll.stop();
+                smokeWindow.hide();
+                app.quit();
+                return;
             }
-            else if(!smokeWindow.frontendSmokeReady())
+
+            if(smokeWindow.frontendSmokeReady())
             {
-                WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (QML/native surfaces not ready)\n"));
-            }
-            else
-            {
+                AppendStudioStartupTrace(QStringLiteral("Frontend integration smoke test reached ready state"));
                 WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
                 smokeResult = 0;
+                readinessPoll.stop();
+                smokeWindow.hide();
+                app.quit();
             }
+        });
+        readinessPoll.start();
+
+        QTimer::singleShot(12000, &app, [&]
+        {
+            if(smokeResult == 0) return;
+            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (QML/native surfaces not ready before timeout)\n"));
+            readinessPoll.stop();
             smokeWindow.hide();
             app.quit();
         });
+
         app.exec();
         if(SUCCEEDED(com)) CoUninitialize();
         return smokeResult;
