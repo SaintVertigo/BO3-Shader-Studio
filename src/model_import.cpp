@@ -369,10 +369,13 @@ bool loadXModelBin(const std::string& path,Mesh& out,std::string& error)
             for(std::uint16_t i=0;i<sets;++i){V2 uv{r.read<float>(),r.read<float>()};if(!have){first=uv;have=true;}}
             if(inFaces&&cornerActive&&have)
             {
-                // XMODEL UVs use the artist/DCC convention. The Studio's image
-                // upload path is top-left-origin, matching the existing
-                // XMODEL_EXPORT/OBJ importers after the V flip.
-                corner.uv={first.x,1.0f-first.y};
+                // Phase 1ac: BO3 XMODEL_BIN is already a compiled/runtime asset.
+                // APE's captured material VS forwards its runtime TEXCOORD input
+                // directly to the pixel shader (no V inversion), so preserve the
+                // packed UV exactly. The old importer treated XMODEL_BIN like a
+                // DCC interchange file and flipped V, which mirrored the APE
+                // preview sphere checker parity even after the world-frame fix.
+                corner.uv={first.x,first.y};
                 if(!finalizeCorner())return false;
             }
             continue;

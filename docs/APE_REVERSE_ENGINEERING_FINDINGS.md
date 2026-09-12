@@ -469,3 +469,12 @@ A direct numerical replay using the captured GBuffer normals, projection/camera 
 Reset-to-reset screenshots and the splitter-resize comparison exposed that Phase 1y's 5.25-radius dolly normalized the wrong quantity. APE's sphere occupies about 58.8% of material-viewport height; the captured 39.430488-degree projection therefore uses ~4.85 radii in the current Studio sphere normalization.
 
 The environment path also still contained the pre-1v X-only handedness approximation even though direct lighting had moved to the full APE/Studio transform. Studio world directions are now converted to the APE lat-long/cube sampling frame as `(StudioZ, StudioY, -StudioX)`. A captured t51 BC6H face, corrected for DDS face presentation roll, cross-correlates with the captured Day HDR at ~134.75 degrees and replaces the old 120-degree screenshot-era Day base orientation.
+
+
+## Phase 1ac — Runtime UV parity and final reset calibration
+
+The captured APE material vertex shader forwards its runtime TEXCOORD input directly to the pixel shader. BO3 `XMODEL_BIN` is already a compiled/runtime asset, so Studio must preserve its packed UV values verbatim. The old `1 - V` import conversion mirrored the stock checker parity even after the APE→Studio mesh frame was corrected. Phase 1ac removes that V inversion for `XMODEL_BIN`; only Studio's procedural fallback sphere receives the equivalent base-V correction at preview time.
+
+From the latest Reset pair, the sphere occupies about 59.1% of APE's usable preview height. With the captured 39.430488° vertical FOV, the fixed reference dolly is approximately 4.83 sphere radii. Resizing changes viewport dimensions/aspect only.
+
+The aligned 1ab A/B pair still showed about 18% missing directional range through the main reflective region and about 29% near grazing. Phase 1ac therefore expands the existing mean-preserving probe deviation to 2.58→3.07 without changing average probe energy. The visible lat-long background also samples LOD 0.35 to avoid the overly crisp mip-0 presentation.

@@ -1,7 +1,9 @@
 
 
-## Phase 1z
-APE Match now uses the full capture-derived world conversion for environment/probe directions, the captured Day probe/base environment orientation (~134.75 degrees), and a 4.85-radius Reset dolly that matches APE's viewport-relative sphere scale while resizing. Phase 1x's surface hotspot recovery and Phase 1y's probe directional-contrast recovery are preserved.
+## Phase 1ac
+APE Match now preserves native BO3 XMODEL_BIN runtime UVs exactly (fixing the remaining sphere checker parity), gives the procedural APE sphere the equivalent base V correction, uses a fixed 4.83-radius Reset camera, removes the last 48x24 Preview floor, mip-filters the visible Day environment at LOD 0.35, and applies the final mean-preserving probe directional-range calibration. Phase 1x hotspot recovery remains untouched.
+
+Phase 1z established the full capture-derived world conversion for environment/probe directions and the captured Day probe orientation (~134.75 degrees). Its 4.85-radius framing experiment was superseded by later A/B calibration; Phase 1ac is the current framing baseline.
 
 
 ## Phase 1aa

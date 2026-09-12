@@ -4263,11 +4263,20 @@ private:
         const bool directionalGeometry =
             skyShaderMode_ && !vertexOnlyShader_ &&
             (previewMode_ == PreviewMode::ForwardMaterial || previewMode_ == PreviewMode::DeferredGBuffer);
+        // Phase 1ac: native BO3 XMODEL_BIN UVs are now preserved exactly, matching
+        // APE's runtime vertex stream. Studio's procedural sphere predates that
+        // convention and stores V inverted, so only the fallback APE sphere needs
+        // a base V mirror. Apply user tiling after the base correction:
+        //   (1 - V) * scaleV = -V*scaleV + scaleV.
+        const bool apeProceduralSphereUvFallback =
+            materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch &&
+            previewMesh_ == PreviewMesh::Sphere &&
+            !HasApeReferenceMesh(PreviewMesh::Sphere);
         data.uvTransform = {
             materialUvScaleU_,
-            materialUvScaleV_,
+            apeProceduralSphereUvFallback ? -materialUvScaleV_ : materialUvScaleV_,
             (directionalGeometry && previewMesh_ == PreviewMesh::Plane) ? 1.0f : 0.0f,
-            0.0f
+            apeProceduralSphereUvFallback ? materialUvScaleV_ : 0.0f
         };
 
         D3D11_MAPPED_SUBRESOURCE mapped{};

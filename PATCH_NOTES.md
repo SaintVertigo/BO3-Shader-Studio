@@ -1,8 +1,13 @@
 # Current development
 
-- Phase 1aa removes Qt dock minimum-hint clamps so the Preview pane can resize much farther horizontally and vertically like APE.
-- Phase 1z environment-frame and viewport-camera corrections remain intact.
-- Phase 1x hotspot/normal recovery and Phase 1y probe work are preserved.
+- **Phase 1ac** fixes the remaining APE sphere texel parity by preserving compiled BO3 XMODEL_BIN UVs verbatim.
+- Reset framing is fixed at **4.83 radii** with the captured 39.430488° vertical FOV.
+- The remaining `48x24` Preview floor is removed; Phase 1aa collapsible-dock behavior is retained.
+- Visible Day background sampling uses mip-linear **LOD 0.35** instead of forced mip 0.
+- The final mean-preserving reflection-probe directional range is **2.58 → 3.07** from face-on to grazing.
+- Phase 1x radial-normal/hotspot recovery, Phase 1v world frame, and Phase 1s diffuse remain untouched.
+
+See `PATCH_NOTES_PHASE1AC.md` for details.
 
 # Phase 1z current patch
 

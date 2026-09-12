@@ -16859,7 +16859,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(close, &QPushButton::clicked, this, [this]{ closeFindBar(); });
 
         preview_ = new D3DPreviewWidget();
-        preview_->setMinimumSize(48, 24);
+        preview_->setMinimumSize(1, 1);
         preview_->setCameraChangedCallback([this]{ updateCameraUi(); });
         preview_->setSceneChangedCallback([this]{ syncSceneControlsFromRenderer(); });
         preview_->setResetRequestedCallback([this]{ resetPreviewView(); });
@@ -21251,13 +21251,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             r.ResetCamera();
             r.RotateCamera(0.0f, 22.5f);
-            // Phase 1ab: calibrate the fixed APE camera from the two Reset shots
-            // after the exact 39.430488-degree lens was already locked. Studio's
-            // 1z sphere radius was ~158.76 px versus APE's ~176.74 px. Solving
-            // the perspective sphere silhouette (not a viewport-percentage fit)
-            // gives a fixed dolly of ~4.38 radii. Resizing only changes aspect/RT
-            // size; this distance remains invariant, matching APE's viewport model.
-            r.SetCameraDistance(4.38000f);
+            // Phase 1ac: the latest Reset pair shows nearly identical raw sphere
+            // diameters, but APE's usable Preview viewport is taller. Match the
+            // fixed-camera projection rather than raw pixels: APE occupies about
+            // 59.1% of viewport height, which solves to ~4.83 radii with the
+            // captured 39.430488-degree vertical lens. Splitter resizing changes
+            // only viewport dimensions/aspect; this dolly remains invariant.
+            r.SetCameraDistance(4.83000f);
         }
 
         // Keep these angles in APE's authored Z-up SSI frame. The renderer now

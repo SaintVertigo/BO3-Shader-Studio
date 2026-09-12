@@ -177,7 +177,10 @@ float3 EnvironmentAt(float2 uv)
     float3 ray = previewCameraForward.xyz +
                  previewCameraRight.xyz * (ndc.x * previewCameraParams.x * previewCameraParams.y) +
                  previewCameraUp.xyz * (ndc.y * previewCameraParams.y);
-    return previewEnvironment.SampleLevel(previewEnvironmentSampler, VisibleSkyDirectionToEquirect(ray), 0.0).rgb;
+    // Phase 1ac: match APE's mip-linear presentation rather than forcing the
+    // sharpest lat-long mip. The forward preview already used this small LOD
+    // because mip 0 exaggerates foliage/rock microcontrast relative to APE.
+    return previewEnvironment.SampleLevel(previewEnvironmentSampler, VisibleSkyDirectionToEquirect(ray), 0.35).rgb;
 }
 
 float LinearToDisplay1(float x)
@@ -283,7 +286,12 @@ float3 RecoverApeProbeDirectionalContrast(float3 probeSample, float ndotv)
     // missing directional range. The stronger grazing correction follows the
     // measured radial error instead of globally boosting reflections.
     float grazing = 1.0 - saturate(ndotv);
-    float apeDirectionalContrast = lerp(2.18, 2.38, grazing * grazing);
+    // Phase 1ac residual calibration from the aligned 1ab Reset pair. Once UV
+    // parity and orientation are held fixed, APE still carries ~18% more
+    // directional range through the body and ~29% more in the grazing annulus.
+    // Fold that residual into the existing mean-preserving recovery rather than
+    // changing probe energy: 2.18*1.18 ~= 2.58, 2.38*1.29 ~= 3.07.
+    float apeDirectionalContrast = lerp(2.58, 3.07, grazing * grazing);
     float3 probeMean = max(previewEnvironmentAmbient.rgb, 0.0);
     return max(probeMean + (probeSample - probeMean) * apeDirectionalContrast, 0.0);
 }
