@@ -281,6 +281,60 @@ void WriteCliOutput(const QString& text)
     }
 }
 
+// QML resources are local, so they normally resolve synchronously. Still wait a
+// short bounded interval for the view to leave Loading so startup diagnostics do
+// not mistake an in-flight component for a valid front end.
+bool WaitForQuickFrontendLoad(QQuickView* quickView, QStringList* errorsOut = nullptr)
+{
+    if(!quickView) return false;
+
+    if(quickView->status() == QQuickView::Loading)
+    {
+        QEventLoop loop;
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(quickView, &QQuickView::statusChanged, &loop,
+                         [&loop](QQuickView::Status status)
+        {
+            if(status != QQuickView::Loading) loop.quit();
+        });
+        timeout.start(3000);
+        loop.exec();
+    }
+
+    if(errorsOut)
+    {
+        errorsOut->clear();
+        for(const QQmlError& error : quickView->errors())
+            errorsOut->append(error.toString());
+        if(quickView->status() == QQuickView::Loading)
+            errorsOut->append(QStringLiteral("Timed out while loading qrc:/frontend/Main.qml"));
+        if(!quickView->rootObject())
+            errorsOut->append(QStringLiteral("QQuickView did not create a root QML object."));
+    }
+
+    return quickView->status() == QQuickView::Ready && quickView->rootObject() != nullptr;
+}
+
+QString WriteQmlFrontendStartupLog(const QStringList& errors)
+{
+    QString root = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    if(root.isEmpty()) root = QCoreApplication::applicationDirPath();
+    QDir().mkpath(root);
+    const QString path = QDir(root).filePath(QStringLiteral("qml_frontend_startup.log"));
+    QSaveFile file(path);
+    if(file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        const QString body = QStringLiteral("BO3 Shader Studio QML front-end startup failure\n\n")
+            + (errors.isEmpty() ? QStringLiteral("No QQmlError details were reported.\n")
+                                : errors.join(QStringLiteral("\n")) + QStringLiteral("\n"));
+        file.write(body.toUtf8());
+        file.commit();
+    }
+    return path;
+}
+
 std::wstring DeduplicateCompilerDiagnostics(const std::wstring& text)
 {
     if (text.empty()) return text;
@@ -16843,12 +16897,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         quickView->setColor(Qt::transparent);
         quickView->rootContext()->setContextProperty(QStringLiteral("frontend"), bridge);
         quickView->setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
-        if(quickView->status() == QQuickView::Error)
+        QStringList qmlErrors;
+        if(!WaitForQuickFrontendLoad(quickView, &qmlErrors))
         {
-            QStringList errors;
-            for(const QQmlError& error : quickView->errors()) errors << error.toString();
-            statusBar()->showMessage(QStringLiteral("Qt Quick front end failed to load; using legacy UI."), 7000);
-            if(!errors.isEmpty()) WriteCliOutput(QString("QML front-end error:\n%1\n").arg(errors.join("\n")));
+            const QString logPath = WriteQmlFrontendStartupLog(qmlErrors);
+            const QString details = qmlErrors.isEmpty()
+                ? QStringLiteral("The QML engine did not report a detailed error.")
+                : qmlErrors.join(QStringLiteral("\n"));
+            WriteCliOutput(QString("QML front-end startup FAILED:\n%1\nLog: %2\n")
+                           .arg(details, logPath));
+
+            // Never make a failed QML startup look like a successful old build.
+            // Keep the stable QWidget UI available for recovery, but label it and
+            // show the exact failure after the main window becomes visible.
+            setWindowTitle(QString("BO3 Shader Studio %1 [QML FALLBACK]").arg(displayVersion_));
+            statusBar()->showMessage(QStringLiteral("QML front end failed to load — legacy recovery UI active."));
+            QTimer::singleShot(0, this, [this, details, logPath]
+            {
+                QMessageBox box(QMessageBox::Critical,
+                                QStringLiteral("QML Front End Failed"),
+                                QStringLiteral("The new Qt Quick front end could not start. The legacy interface is open only as a recovery fallback."),
+                                QMessageBox::Ok, this);
+                box.setInformativeText(QStringLiteral("Exact startup errors were written to:\n%1").arg(logPath));
+                box.setDetailedText(details);
+                box.exec();
+            });
+
             delete quickView;
             qmlFrontendBridge_->deleteLater();
             qmlFrontendBridge_ = nullptr;
@@ -22582,6 +22656,7 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     bool shadertoyRegressionAll = false;
     bool postFxExportRegressionAll = false;
     bool bo3PackageRegressionAll = false;
+    bool qmlSmokeTest = false;
     bool publicCorpus = false;
     int corpusCount = 250;
     int corpusSeed = 1337;
@@ -22636,6 +22711,10 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         {
             bo3PackageRegressionAll = true;
         }
+        else if(arguments[i] == "--qml-smoke-test")
+        {
+            qmlSmokeTest = true;
+        }
         else if (arguments[i] == "--regression-case")
         {
             if (i + 1 >= arguments.size())
@@ -22689,7 +22768,8 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         ((regressionAll || !regressionCase.isEmpty()) ? 1 : 0) +
         (shadertoyRegressionAll ? 1 : 0) +
         (postFxExportRegressionAll ? 1 : 0) +
-        (bo3PackageRegressionAll ? 1 : 0);
+        (bo3PackageRegressionAll ? 1 : 0) +
+        (qmlSmokeTest ? 1 : 0);
     if(selectedCliModes > 1)
     {
         WriteCliOutput("FAIL: corpus and regression modes cannot be combined.\n");
@@ -22702,6 +22782,43 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         WriteCliOutput("FAIL: --regression-fast and --regression-shard are supported only with --regression-all.\n");
         if(SUCCEEDED(com)) CoUninitialize();
         return 2;
+    }
+
+    if(qmlSmokeTest)
+    {
+        StudioFrontendBridge bridge;
+        bridge.setUiState(true, false, QStringLiteral("0.3"));
+        bridge.setPaletteState(QStringLiteral("BO3 Dark"),
+                               QColor(QStringLiteral("#12151A")),
+                               QColor(QStringLiteral("#171B21")),
+                               QColor(QStringLiteral("#0D1014")),
+                               QColor(QStringLiteral("#242A32")),
+                               QColor(QStringLiteral("#E3E8EF")),
+                               QColor(QStringLiteral("#9DA8B5")),
+                               QColor(QStringLiteral("#4D8FCC")));
+
+        QQuickView view;
+        view.setResizeMode(QQuickView::SizeRootObjectToView);
+        view.setColor(Qt::transparent);
+        view.rootContext()->setContextProperty(QStringLiteral("frontend"), &bridge);
+        view.setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
+
+        QStringList errors;
+        const bool ready = WaitForQuickFrontendLoad(&view, &errors);
+        if(!ready)
+        {
+            WriteCliOutput(QStringLiteral("QML startup smoke test: FAIL\n"));
+            if(errors.isEmpty())
+                WriteCliOutput(QStringLiteral("No QQmlError details were reported.\n"));
+            else
+                WriteCliOutput(errors.join(QStringLiteral("\n")) + QStringLiteral("\n"));
+            if(SUCCEEDED(com)) CoUninitialize();
+            return 1;
+        }
+
+        WriteCliOutput(QStringLiteral("QML startup smoke test: PASS\n"));
+        if(SUCCEEDED(com)) CoUninitialize();
+        return 0;
     }
 
     if(publicCorpus)

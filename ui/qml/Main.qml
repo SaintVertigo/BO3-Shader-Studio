@@ -93,7 +93,7 @@ Item {
                 Row {
                     spacing: 10
                     Rectangle { width: 30; height: 30; radius: 8; color: Qt.rgba(frontend.accentColor.r, frontend.accentColor.g, frontend.accentColor.b, 0.18); border.width: 1; border.color: Qt.rgba(frontend.accentColor.r, frontend.accentColor.g, frontend.accentColor.b, 0.5); Text { anchors.centerIn: parent; text: "III"; color: "#ff7a26"; font.bold: true; font.pixelSize: 13 } }
-                    Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; Text { text: "BO3 Shader Studio " + frontend.displayVersion; color: frontend.textColor; font.pixelSize: 15; font.bold: true } Text { text: frontend.themeName; color: frontend.mutedColor; font.pixelSize: 9; letterSpacing: 0.7 } }
+                    Column { anchors.verticalCenter: parent.verticalCenter; spacing: 1; Text { text: "BO3 Shader Studio " + frontend.displayVersion; color: frontend.textColor; font.pixelSize: 15; font.bold: true } Text { text: frontend.themeName; color: frontend.mutedColor; font.pixelSize: 9; font.letterSpacing: 0.7 } }
                 }
                 Item { width: 14; height: 1 }
                 GlassButton { compact: true; width: 78; text: "Open"; glyph: "▰"; onClicked: frontend.requestOpen() }
@@ -183,7 +183,7 @@ Item {
                         radius: 16
                         Column {
                             anchors.centerIn: parent; spacing: 8
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "ADVANCED"; color: frontend.accentColor; font.pixelSize: 11; font.bold: true; letterSpacing: 1.2 }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "ADVANCED"; color: frontend.accentColor; font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2 }
                             Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Opening shader workspace…"; color: frontend.textColor; font.pixelSize: 13 }
                         }
                     }

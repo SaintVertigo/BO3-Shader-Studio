@@ -40,7 +40,7 @@ GlassSurface {
             Column {
                 width: parent.width
                 spacing: 4
-                Text { text: "BEGINNER"; color: frontend.textColor; font.pixelSize: 18; font.bold: true; letterSpacing: 0.5 }
+                Text { text: "BEGINNER"; color: frontend.textColor; font.pixelSize: 18; font.bold: true; font.letterSpacing: 0.5 }
                 Text {
                     width: parent.width
                     text: "Build BO3-compatible shaders visually with effects, sliders, and live preview."
@@ -54,7 +54,7 @@ GlassSurface {
             Column {
                 width: parent.width
                 spacing: 9
-                Text { text: "1  SHADER TYPE"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; letterSpacing: 0.9 }
+                Text { text: "1  SHADER TYPE"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.9 }
                 Row {
                     width: parent.width
                     spacing: 7
@@ -101,7 +101,7 @@ GlassSurface {
             Column {
                 width: parent.width
                 spacing: 9
-                Text { text: "2  PROJECT"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; letterSpacing: 0.9 }
+                Text { text: "2  PROJECT"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.9 }
 
                 Text { text: "Name"; color: frontend.mutedColor; font.pixelSize: 9 }
                 Rectangle {
@@ -194,7 +194,7 @@ GlassSurface {
                     color: frontend.mutedColor
                     font.pixelSize: 10
                     font.bold: true
-                    letterSpacing: 0.9
+                    font.letterSpacing: 0.9
                 }
                 Text {
                     visible: frontend.target === 0
@@ -222,7 +222,7 @@ GlassSurface {
                 spacing: 10
                 Row {
                     width: parent.width
-                    Text { text: "3  EFFECTS"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; letterSpacing: 0.9 }
+                    Text { text: "3  EFFECTS"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.9 }
                     Item { width: Math.max(4, parent.width - 115); height: 1 }
                     Text { text: frontend.activeEffects.length + " active"; color: frontend.mutedColor; font.pixelSize: 9 }
                 }
@@ -295,7 +295,7 @@ GlassSurface {
             Column {
                 width: parent.width
                 spacing: 10
-                Text { text: "4  SELECTED EFFECT"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; letterSpacing: 0.9 }
+                Text { text: "4  SELECTED EFFECT"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.9 }
 
                 Column {
                     visible: !frontend.selectedEffect.valid

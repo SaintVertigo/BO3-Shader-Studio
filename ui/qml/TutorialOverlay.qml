@@ -115,7 +115,7 @@ Window {
             spacing: 7
             Row {
                 width: parent.width
-                Text { text: "GETTING STARTED  ·  " + (tour.step + 1) + "/" + tour.totalSteps; color: frontend.accentColor; font.pixelSize: 9; font.bold: true; letterSpacing: 0.8 }
+                Text { text: "GETTING STARTED  ·  " + (tour.step + 1) + "/" + tour.totalSteps; color: frontend.accentColor; font.pixelSize: 9; font.bold: true; font.letterSpacing: 0.8 }
             }
             Text { text: tour.titleFor(tour.step); color: frontend.textColor; font.pixelSize: 17; font.bold: true }
             Text { width: parent.width; text: tour.bodyFor(tour.step); color: frontend.mutedColor; font.pixelSize: 11; wrapMode: Text.WordWrap }
