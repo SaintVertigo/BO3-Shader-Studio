@@ -23185,7 +23185,13 @@ int RunBo3ShaderStudio(int argc, char* argv[])
             return 1;
         }
         WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
-        smokeWindow.close();
+        // Do not call close() here. The normal closeEvent() runs maybeSave(), and
+        // the startup project is intentionally marked dirty. In unattended CI
+        // that opens the save-confirmation dialog and makes the smoke process
+        // look hung even though the frontend survived successfully. Hiding the
+        // test window and allowing stack destruction exercises teardown without
+        // invoking any interactive user prompt.
+        smokeWindow.hide();
         app.processEvents(QEventLoop::AllEvents, 50);
         if(SUCCEEDED(com)) CoUninitialize();
         return 0;

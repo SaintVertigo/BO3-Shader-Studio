@@ -477,6 +477,15 @@ jobs:
             -RedirectStandardError $stderrPath
           if (-not $process.WaitForExit(20000)) {
             try { $process.Kill() } catch {}
+            Write-Host 'Frontend integration smoke test timed out. Startup diagnostics follow:'
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_startup.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_startup.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_crash.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_crash.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Host }
+            if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | Write-Host }
             throw 'Frontend integration smoke test timed out.'
           }
           if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath }
