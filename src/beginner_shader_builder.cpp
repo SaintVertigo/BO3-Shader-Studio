@@ -226,29 +226,17 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             out += QString("    // %1\n    color = lerp(color, color * %2, %3);\n")
                 .arg(definition->name, colorLiteral(tint), amount);
         }
-        else if(effect.typeId == "brightness")
+        else if(effect.typeId == "color_grade")
         {
-            out += QString("    // %1\n    color += %2;\n")
-                .arg(definition->name, parameterExpr(project, effect, *definition, "amount"));
-        }
-        else if(effect.typeId == "contrast")
-        {
-            out += QString("    // %1\n    color = (color - 0.5) * %2 + 0.5;\n")
-                .arg(definition->name, parameterExpr(project, effect, *definition, "amount"));
-        }
-        else if(effect.typeId == "saturation")
-        {
-            const QString amount = parameterExpr(project, effect, *definition, "amount");
-            out += QString("    // %1\n    float %2_luma = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
-                           "    color = lerp(%2_luma.xxx, color, %3);\n")
-                .arg(definition->name, tag, amount);
-        }
-        else if(effect.typeId == "grayscale")
-        {
-            const QString amount = parameterExpr(project, effect, *definition, "amount");
-            out += QString("    // %1\n    float %2_gray = dot(color, float3(0.2126, 0.7152, 0.0722));\n"
-                           "    color = lerp(color, %2_gray.xxx, %3);\n")
-                .arg(definition->name, tag, amount);
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
+            const QString contrast = parameterExpr(project, effect, *definition, "contrast");
+            const QString saturation = parameterExpr(project, effect, *definition, "saturation");
+            out += QString("    // %1 - consolidated brightness / contrast / saturation grade\n"
+                           "    float3 %2_grade = max(color + (%3).xxx, 0.0.xxx);\n"
+                           "    %2_grade = (%2_grade - 0.5.xxx) * %4 + 0.5.xxx;\n"
+                           "    float %2_luma = dot(%2_grade, float3(0.2126, 0.7152, 0.0722));\n"
+                           "    color = lerp(%2_luma.xxx, %2_grade, %5);\n")
+                .arg(definition->name, tag, brightness, contrast, saturation);
         }
         else if(effect.typeId == "invert")
         {
@@ -641,44 +629,34 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color += %5 * (%2_glowEdge * %6);\n")
                 .arg(definition->name, tag, width, threshold, colorLiteral(glowColor), strength);
         }
-        else if(effect.typeId == "distance_tint" && project.target == Target::PostFx && hasUv)
+        else if(effect.typeId == "depth_grade" && project.target == Target::PostFx && hasUv)
         {
             const QColor nearColor = parameterColor(effect, *definition, "near_color");
             const QColor farColor = parameterColor(effect, *definition, "far_color");
-            const QString start = parameterExpr(project, effect, *definition, "start");
-            const QString end = parameterExpr(project, effect, *definition, "end");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            out += QString("    // %1 - near/far color grade from normalized Float-Z distance\n"
-                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
-                           "    float %2_t = smoothstep(min(%3,%4), max(%3 + 0.0001,%4), %2_depth01);\n"
-                           "    float3 %2_tint = lerp(%5, %6, %2_t);\n"
-                           "    color = lerp(color, color * (%2_tint * 1.65), %7);\n")
-                .arg(definition->name, tag, start, end, colorLiteral(nearColor), colorLiteral(farColor), strength);
-        }
-        else if(effect.typeId == "depth_desaturation" && project.target == Target::PostFx && hasUv)
-        {
+            const QString tintStrength = parameterExpr(project, effect, *definition, "tint_strength");
+            const QString saturation = parameterExpr(project, effect, *definition, "saturation");
+            const QString brightness = parameterExpr(project, effect, *definition, "brightness");
             const QString start = parameterExpr(project, effect, *definition, "start");
             const QString end = parameterExpr(project, effect, *definition, "end");
             const QString curve = parameterExpr(project, effect, *definition, "curve");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            out += QString("    // %1 - progressively remove color with Float-Z distance\n"
+            out += QString("    // %1 - one Float-Z distance grade for tint, saturation and brightness\n"
                            "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
-                           "    float %2_factor = BO3BeginnerDepthWindow(%2_depth01, %3, %4, %5) * %6;\n"
+                           "    float %2_factor = BO3BeginnerDepthWindow(%2_depth01, %3, %4, %5);\n"
+                           "    float3 %2_tint = lerp(%6, %7, %2_factor);\n"
+                           "    color = lerp(color, color * (%2_tint * 1.65), saturate(%8));\n"
                            "    float %2_luma = dot(color, float3(0.2126,0.7152,0.0722));\n"
-                           "    color = lerp(color, %2_luma.xxx, saturate(%2_factor));\n")
-                .arg(definition->name, tag, start, end, curve, strength);
-        }
-        else if(effect.typeId == "distance_darkening" && project.target == Target::PostFx && hasUv)
-        {
-            const QString start = parameterExpr(project, effect, *definition, "start");
-            const QString end = parameterExpr(project, effect, *definition, "end");
-            const QString curve = parameterExpr(project, effect, *definition, "curve");
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            out += QString("    // %1 - darken distant geometry without changing nearby exposure\n"
-                           "    float %2_depth01 = BO3BeginnerNormalizedDepth(BO3BeginnerSampleRawDepthPoint(uv));\n"
-                           "    float %2_factor = BO3BeginnerDepthWindow(%2_depth01, %3, %4, %5) * %6;\n"
-                           "    color *= 1.0 - saturate(%2_factor);\n")
-                .arg(definition->name, tag, start, end, curve, strength);
+                           "    color = lerp(%2_luma.xxx, color, lerp(1.0, %9, %2_factor));\n"
+                           "    color *= lerp(1.0, %10, %2_factor);\n")
+                .arg(definition->name)
+                .arg(tag)
+                .arg(start)
+                .arg(end)
+                .arg(curve)
+                .arg(colorLiteral(nearColor))
+                .arg(colorLiteral(farColor))
+                .arg(tintStrength)
+                .arg(saturation)
+                .arg(brightness);
         }
         else if(effect.typeId == "depth_pixelation" && project.target == Target::PostFx && hasUv)
         {
@@ -1084,7 +1062,7 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, color * (%2_tint * 1.6), %6);\n")
                 .arg(definition->name, tag, contrast, colorLiteral(shadowColor), colorLiteral(highlightColor), strength);
         }
-        else if(effect.typeId == "luminance_sharpness" && project.target == Target::PostFx && hasUv)
+        else if(effect.typeId == "sharpness" && project.target == Target::PostFx && hasUv)
         {
             const QString amount = parameterExpr(project, effect, *definition, "amount");
             const QString radius = parameterExpr(project, effect, *definition, "radius");
@@ -1321,31 +1299,6 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    color = lerp(color, %2_dithered, %4);\n")
                 .arg(definition->name, tag, precision, strength);
         }
-        else if(effect.typeId == "sharpness" && project.target == Target::PostFx && hasUv)
-        {
-            const QString amount = parameterExpr(project, effect, *definition, "amount");
-            const QString threshold = parameterExpr(project, effect, *definition, "threshold");
-            const QString radius = parameterExpr(project, effect, *definition, "radius");
-            out += QString("    // %1 - edge-aware 8-neighbor sharpen\n"
-                           "    float2 %2_step = PostFx_GetRenderTargetSize().zw * %3;\n"
-                           "    float3 %2_c1 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,-%2_step.y))).rgb);\n"
-                           "    float3 %2_c2 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,-%2_step.y))).rgb);\n"
-                           "    float3 %2_c3 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,-%2_step.y))).rgb);\n"
-                           "    float3 %2_c4 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,0.0))).rgb);\n"
-                           "    float3 %2_c5 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,0.0))).rgb);\n"
-                           "    float3 %2_c6 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(-%2_step.x,%2_step.y))).rgb);\n"
-                           "    float3 %2_c7 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(0.0,%2_step.y))).rgb);\n"
-                           "    float3 %2_c8 = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_step.x,%2_step.y))).rgb);\n"
-                           "    float3 %2_d1 = %2_c6 + %2_c4 + %2_c1 - %2_c3 - %2_c5 - %2_c8;\n"
-                           "    float3 %2_d2 = %2_c4 + %2_c1 + %2_c2 - %2_c5 - %2_c8 - %2_c7;\n"
-                           "    float3 %2_d3 = %2_c1 + %2_c2 + %2_c3 - %2_c8 - %2_c7 - %2_c6;\n"
-                           "    float3 %2_d4 = %2_c2 + %2_c3 + %2_c5 - %2_c7 - %2_c6 - %2_c4;\n"
-                           "    float %2_edge = length(abs(%2_d1)+abs(%2_d2)+abs(%2_d3)+abs(%2_d4)) / 6.0;\n"
-                           "    float3 %2_neighbor = (%2_c1+%2_c2+%2_c3+%2_c4+%2_c5+%2_c6+%2_c7+%2_c8) * 0.125;\n"
-                           "    float3 %2_sharp = max(color + (color - %2_neighbor) * %4, 0.0);\n"
-                           "    color = lerp(color, %2_sharp, smoothstep(%5, %5 * 2.0 + 0.0001, %2_edge));\n")
-                .arg(definition->name, tag, radius, amount, threshold);
-        }
         else if(effect.typeId == "pixel_resolution" && project.target == Target::PostFx && hasUv)
         {
             const QString width = parameterExpr(project, effect, *definition, "width");
@@ -1365,7 +1318,10 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
             const QString chroma = parameterExpr(project, effect, *definition, "chroma");
             const QString tracking = parameterExpr(project, effect, *definition, "tracking");
             const QString speed = parameterExpr(project, effect, *definition, "speed");
-            out += QString("    // %1 - row jitter, tracking tear and analog color separation\n"
+            const QString damage = parameterExpr(project, effect, *definition, "damage");
+            const QString damageBandHeight = parameterExpr(project, effect, *definition, "damage_band_height");
+            const QString damageShift = parameterExpr(project, effect, *definition, "damage_shift");
+            out += QString("    // %1 - analog tape instability with optional damaged/dropout rows\n"
                            "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
                            "    float2 %2_texel = PostFx_GetRenderTargetSize().zw;\n"
                            "    float %2_frame = floor(t * %6 * 30.0);\n"
@@ -1384,26 +1340,25 @@ QString commonEffectCode(const Project& project, bool hasTime, bool hasUv)
                            "    float3 %2_vhs = float3(%2_r, %2_base.g, %2_b);\n"
                            "    %2_vhs *= 0.97 + 0.06 * BO3BeginnerHash21(float2(0.0, %2_row + %2_frame));\n"
                            "    %2_vhs *= 1.0 - %2_tear * 0.62;\n"
-                           "    color = lerp(color, max(%2_vhs,0.0), %7);\n")
-                .arg(definition->name, tag, jitter, chroma, tracking, speed, strength);
-        }
-        else if(effect.typeId == "vhs_dropouts" && project.target == Target::PostFx && hasUv && hasTime)
-        {
-            const QString strength = parameterExpr(project, effect, *definition, "strength");
-            const QString density = parameterExpr(project, effect, *definition, "density");
-            const QString shift = parameterExpr(project, effect, *definition, "shift");
-            out += QString("    // %1 - intermittent damaged-tape dropouts\n"
-                           "    float2 %2_rt = PostFx_GetRenderTargetSize().xy;\n"
-                           "    float %2_frame = floor(t * 24.0);\n"
-                           "    float %2_row = floor(uv.y * %2_rt.y / max(2.0, %3));\n"
-                           "    float %2_gate = BO3BeginnerHash21(float2(%2_row, %2_frame));\n"
-                           "    float %2_active = step(0.86, %2_gate);\n"
-                           "    float %2_offset = (BO3BeginnerHash21(float2(%2_row + 9.0, %2_frame)) - 0.5) * %4 * 0.08;\n"
-                           "    float3 %2_shifted = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_offset,0.0))).rgb);\n"
-                           "    float %2_static = BO3BeginnerHash21(floor(input.position.xy) + %2_frame) - 0.5;\n"
-                           "    float3 %2_damaged = max(%2_shifted * (0.75 + %2_static * 0.35), 0.0);\n"
-                           "    color = lerp(color, %2_damaged, %2_active * %5);\n")
-                .arg(definition->name, tag, density, shift, strength);
+                           "    color = lerp(color, max(%2_vhs,0.0), saturate(%7));\n"
+                           "    float %2_damageRow = floor(uv.y * %2_rt.y / max(2.0, %9));\n"
+                           "    float %2_damageGate = BO3BeginnerHash21(float2(%2_damageRow, floor(t * 24.0)));\n"
+                           "    float %2_damageActive = step(0.86, %2_damageGate);\n"
+                           "    float %2_damageOffset = (BO3BeginnerHash21(float2(%2_damageRow + 9.0, floor(t * 24.0))) - 0.5) * %10 * 0.08;\n"
+                           "    float3 %2_damageShifted = PostFx_NormalizeColor(frameBuffer.Sample(bilinearClampler, saturate(uv + float2(%2_damageOffset,0.0))).rgb);\n"
+                           "    float %2_damageStatic = BO3BeginnerHash21(floor(input.position.xy) + floor(t * 24.0)) - 0.5;\n"
+                           "    float3 %2_damaged = max(%2_damageShifted * (0.75 + %2_damageStatic * 0.35), 0.0);\n"
+                           "    color = lerp(color, %2_damaged, %2_damageActive * saturate(%8));\n")
+                .arg(definition->name)
+                .arg(tag)
+                .arg(jitter)
+                .arg(chroma)
+                .arg(tracking)
+                .arg(speed)
+                .arg(strength)
+                .arg(damage)
+                .arg(damageBandHeight)
+                .arg(damageShift);
         }
         else if(effect.typeId == "sky_sun" && project.target == Target::Sky)
         {
@@ -1791,9 +1746,7 @@ bool beginnerEffectRequiresSceneDepth(const QString& typeId)
            typeId == QStringLiteral("depth_fog") ||
            typeId == QStringLiteral("depth_of_field") ||
            typeId == QStringLiteral("depth_edge_glow") ||
-           typeId == QStringLiteral("distance_tint") ||
-           typeId == QStringLiteral("depth_desaturation") ||
-           typeId == QStringLiteral("distance_darkening") ||
+           typeId == QStringLiteral("depth_grade") ||
            typeId == QStringLiteral("depth_pixelation") ||
            typeId == QStringLiteral("depth_chromatic_aberration") ||
            typeId == QStringLiteral("depth_contours") ||
@@ -1828,8 +1781,7 @@ QString optionalHelpers(const Project& project, bool forceSceneDepth = false)
         projectUsesEffect(project, "paint_strokes") ||
         projectUsesEffect(project, "pencil_sketch") ||
         projectUsesEffect(project, "red_paint_splatter") ||
-        projectUsesEffect(project, "vhs_tape") ||
-        projectUsesEffect(project, "vhs_dropouts");
+        projectUsesEffect(project, "vhs_tape");
     const bool needsMaterialProcedural = project.target == Target::Material && (
         projectUsesEffect(project, "noise") || projectUsesEffect(project, "dissolve") ||
         projectUsesEffect(project, "material_wet_concrete") || projectUsesEffect(project, "material_painted_metal") ||
@@ -3597,18 +3549,11 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx, Target::Material, Target::Sky},
                   {ColorParam("color", "Color", "Tint color.", "#73A7FF"),
                    FloatParam("amount", "Strength", "How strongly the tint affects the result.", 0.0, 1.0, 0.01, 0.35)}),
-        EffectDef("brightness", "Brightness", "Make the result brighter or darker.", "Color & Look",
+        EffectDef("color_grade", "Color Grade", "Adjust brightness, contrast and saturation together. Set Saturation to 0 for black and white.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
-                  {FloatParam("amount", "Amount", "Negative values darken; positive values brighten.", -1.0, 1.0, 0.01, 0.08)}),
-        EffectDef("contrast", "Contrast", "Increase or soften the difference between dark and bright areas.", "Color & Look",
-                  {Target::PostFx, Target::Material, Target::Sky},
-                  {FloatParam("amount", "Contrast", "1.0 keeps the original contrast.", 0.0, 2.5, 0.01, 1.15)}),
-        EffectDef("saturation", "Saturation", "Control how colorful the result is.", "Color & Look",
-                  {Target::PostFx, Target::Material, Target::Sky},
-                  {FloatParam("amount", "Saturation", "0 is monochrome, 1 is original color, above 1 is more colorful.", 0.0, 2.5, 0.01, 1.15)}),
-        EffectDef("grayscale", "Black & White", "Blend the shader toward grayscale.", "Color & Look",
-                  {Target::PostFx, Target::Material, Target::Sky},
-                  {FloatParam("amount", "Strength", "0 keeps color; 1 is fully black and white.", 0.0, 1.0, 0.01, 1.0)}),
+                  {FloatParam("brightness", "Brightness", "Negative values darken; positive values brighten.", -1.0, 1.0, 0.01, 0.0),
+                   FloatParam("contrast", "Contrast", "1.0 keeps the original contrast.", 0.0, 2.5, 0.01, 1.0),
+                   FloatParam("saturation", "Saturation", "0 is black and white, 1 is original color, above 1 is more colorful.", 0.0, 2.5, 0.01, 1.0)}),
         EffectDef("invert", "Invert Colors", "Invert the current colors, with adjustable strength.", "Color & Look",
                   {Target::PostFx, Target::Material, Target::Sky},
                   {FloatParam("amount", "Strength", "0 is unchanged; 1 is fully inverted.", 0.0, 1.0, 0.01, 1.0)}),
@@ -3673,25 +3618,16 @@ const QVector<EffectDefinition>& effectDefinitions()
                    FloatParam("strength", "Strength", "Brightness of the depth edge glow.", 0.0, 3.0, 0.01, 0.75),
                    FloatParam("width", "Width", "Screen-space depth sampling radius.", 0.5, 8.0, 0.1, 2.0),
                    FloatParam("threshold", "Depth Threshold", "Reject shallow surface changes and keep stronger geometry breaks.", 0.5, 12.0, 0.1, 5.0)}),
-        EffectDef("distance_tint", "Distance Tint", "Blend between near and far colors using the real Float-Z scene distance.", "Depth & Scene",
+        EffectDef("depth_grade", "Depth Grade", "Grade near and far scene layers with one Float-Z-aware tint, saturation and brightness control.", "Depth & Scene",
                   {Target::PostFx},
-                  {ColorParam("near_color", "Near Color", "Tint used for nearby geometry.", "#FFD9B0"),
-                   ColorParam("far_color", "Far Color", "Tint used for distant geometry.", "#6A8FD4"),
-                   FloatParam("start", "Near Distance", "Start of the near-to-far color transition.", 0.0, 1.0, 0.01, 0.18),
-                   FloatParam("end", "Far Distance", "End of the near-to-far color transition.", 0.0, 1.0, 0.01, 0.78),
-                   FloatParam("strength", "Strength", "How strongly the tint changes the scene.", 0.0, 1.0, 0.01, 0.35)}),
-        EffectDef("depth_desaturation", "Depth Desaturation", "Progressively remove color with Float-Z distance while leaving nearby detail untouched.", "Depth & Scene",
-                  {Target::PostFx},
-                  {FloatParam("start", "Start Distance", "Where desaturation begins.", 0.0, 1.0, 0.01, 0.35),
-                   FloatParam("end", "Full Distance", "Where the chosen desaturation strength is fully reached.", 0.0, 1.0, 0.01, 0.82),
-                   FloatParam("curve", "Distance Curve", "Shape of the depth transition.", 0.25, 3.0, 0.05, 1.0),
-                   FloatParam("strength", "Strength", "Maximum amount of color removed.", 0.0, 1.0, 0.01, 0.75)}),
-        EffectDef("distance_darkening", "Distance Darkening", "Darken distant scene layers using Float-Z for stylized depth falloff and atmosphere.", "Depth & Scene",
-                  {Target::PostFx},
-                  {FloatParam("start", "Start Distance", "Where distant darkening begins.", 0.0, 1.0, 0.01, 0.48),
-                   FloatParam("end", "Full Distance", "Where the maximum darkening is reached.", 0.0, 1.0, 0.01, 0.92),
-                   FloatParam("curve", "Distance Curve", "Shape of the distance falloff.", 0.25, 3.0, 0.05, 1.0),
-                   FloatParam("strength", "Strength", "Maximum amount of darkening.", 0.0, 1.0, 0.01, 0.42)}),
+                  {ColorParam("near_color", "Near Color", "Tint color used for nearby geometry.", "#FFFFFF"),
+                   ColorParam("far_color", "Far Color", "Tint color used for distant geometry.", "#C8D8FF"),
+                   FloatParam("tint_strength", "Tint Strength", "How strongly the near/far colors tint the image.", 0.0, 1.0, 0.01, 0.0),
+                   FloatParam("saturation", "Far Saturation", "Saturation reached at the far distance. 0 is monochrome; 1 keeps original color.", 0.0, 2.0, 0.01, 1.0),
+                   FloatParam("brightness", "Far Brightness", "Brightness multiplier reached at the far distance.", 0.0, 2.0, 0.01, 1.0),
+                   FloatParam("start", "Start Distance", "Where the distance grade begins.", 0.0, 1.0, 0.01, 0.30),
+                   FloatParam("end", "Full Distance", "Where the far grade is fully reached.", 0.0, 1.0, 0.01, 0.85),
+                   FloatParam("curve", "Distance Curve", "Shape of the Float-Z transition.", 0.25, 3.0, 0.05, 1.0)}),
         EffectDef("depth_pixelation", "Depth Pixelation", "Increase pixel block size with scene distance for PSX, dream, scanner and stylized looks.", "Depth & Scene",
                   {Target::PostFx},
                   {FloatParam("start", "Start Distance", "Where depth-driven pixelation begins.", 0.0, 1.0, 0.01, 0.30),
@@ -3866,32 +3802,25 @@ const QVector<EffectDefinition>& effectDefinitions()
                   {Target::PostFx},
                   {FloatParam("strength", "Strength", "How strongly the dithered image replaces the original.", 0.0, 1.0, 0.01, 1.0),
                    FloatParam("color_precision", "Low Color Precision", "0 keeps full color precision; 1 quantizes toward a 5-bit-per-channel look.", 0.0, 1.0, 0.01, 0.65)}),
-        EffectDef("luminance_sharpness", "Luminance Sharpness", "Sharpen local luminance detail while scaling RGB together, reducing colored halos around edges.", "Color & Look",
+        EffectDef("sharpness", "Sharpness", "Sharpen local luminance detail while scaling RGB together to reduce colored halos around edges.", "Color & Look",
                   {Target::PostFx},
                   {FloatParam("amount", "Amount", "Strength of the luminance detail boost.", 0.0, 8.0, 0.05, 1.35),
                    FloatParam("radius", "Radius", "Sampling radius in screen pixels.", 0.5, 3.0, 0.05, 1.0),
                    FloatParam("threshold", "Detail Threshold", "Ignore tiny local luminance ranges so flat areas remain clean.", 0.0005, 0.05, 0.0005, 0.003)}),
-        EffectDef("sharpness", "Sharpness", "Sharpen real image detail with an edge-aware 8-neighbor filter instead of a simple brightness boost.", "Color & Look",
-                  {Target::PostFx},
-                  {FloatParam("amount", "Amount", "Strength of the local detail boost.", 0.0, 3.0, 0.01, 0.65),
-                   FloatParam("threshold", "Edge Threshold", "Ignore very small changes so flat areas stay clean.", 0.0, 1.0, 0.005, 0.055),
-                   FloatParam("radius", "Radius", "Sampling radius in screen pixels.", 0.5, 3.0, 0.05, 1.0)}),
         EffectDef("pixel_resolution", "Pixel Resolution", "Lower the virtual screen resolution while preserving the full output size.", "Retro & Display",
                   {Target::PostFx},
                   {FloatParam("width", "Virtual Width", "Approximate horizontal pixel count used for the low-resolution image.", 80.0, 1920.0, 1.0, 320.0),
                    FloatParam("strength", "Strength", "Blend between the full-resolution and pixel-resolution image.", 0.0, 1.0, 0.01, 1.0)}),
-        EffectDef("vhs_tape", "VHS Tape", "Add row jitter, tracking tears and analog color separation without turning the whole picture into random static.", "Retro & Display",
+        EffectDef("vhs_tape", "VHS Tape", "Add analog row jitter, tracking tears and color bleed, with optional damaged-tape dropout controls.", "Retro & Display",
                   {Target::PostFx},
-                  {FloatParam("strength", "Strength", "Overall amount of the VHS treatment.", 0.0, 1.0, 0.01, 0.65),
+                  {FloatParam("strength", "Tape Strength", "Overall amount of the VHS treatment.", 0.0, 1.0, 0.01, 0.65),
                    FloatParam("jitter", "Horizontal Jitter", "How strongly tape-line instability shifts the image.", 0.0, 3.0, 0.01, 0.85),
                    FloatParam("chroma", "Color Bleed", "Horizontal red/blue channel separation.", 0.0, 3.0, 0.01, 0.75),
                    FloatParam("tracking", "Tracking Tear", "How strongly occasional horizontal tears distort the image.", 0.0, 2.0, 0.01, 0.70),
-                   FloatParam("speed", "Tape Speed", "Animation speed of the analog instability.", 0.05, 3.0, 0.01, 1.0)}),
-        EffectDef("vhs_dropouts", "VHS Dropouts", "Add intermittent damaged-tape rows, image shifts and static bursts.", "Retro & Display",
-                  {Target::PostFx},
-                  {FloatParam("strength", "Strength", "How visible the damaged tape rows become.", 0.0, 1.0, 0.01, 0.55),
-                   FloatParam("density", "Band Height", "Approximate height of dropout bands in pixels.", 2.0, 40.0, 1.0, 9.0),
-                   FloatParam("shift", "Horizontal Shift", "How far damaged rows can pull sideways.", 0.0, 2.0, 0.01, 0.70)}),
+                   FloatParam("speed", "Tape Speed", "Animation speed of the analog instability.", 0.05, 3.0, 0.01, 1.0),
+                   FloatParam("damage", "Tape Damage", "Optional damaged/dropout rows. 0 disables the damage layer.", 0.0, 1.0, 0.01, 0.0),
+                   FloatParam("damage_band_height", "Damage Band Height", "Approximate height of damaged tape bands in pixels.", 2.0, 40.0, 1.0, 9.0),
+                   FloatParam("damage_shift", "Damage Shift", "How far damaged rows can pull sideways.", 0.0, 2.0, 0.01, 0.70)}),
 
         EffectDef("pulse", "Animated Pulse", "Rhythmically brighten and dim the result.", "Animation",
                   {Target::PostFx, Target::Material, Target::Sky},
@@ -4274,14 +4203,13 @@ Project makePreset(const QString& presetId, Target target)
     if(target == Target::PostFx && id == "cinematic")
     {
         project.name = "Cinematic Screen";
-        add("contrast", {{"amount", 1.18}});
-        add("saturation", {{"amount", 0.92}});
+        add("color_grade", {{"contrast", 1.18}, {"saturation", 0.92}});
         add("vignette", {{"strength", 0.34}, {"size", 0.72}, {"softness", 0.38}});
     }
     else if(target == Target::PostFx && id == "retro_crt")
     {
         project.name = "Retro CRT";
-        add("saturation", {{"amount", 0.84}});
+        add("color_grade", {{"saturation", 0.84}});
         add("scanlines", {{"amount", 0.18}, {"density", 190.0}, {"speed", 0.20}});
         add("film_grain", {{"amount", 0.22}, {"grain_size", 1.30}, {"speed", 1.0}});
         add("chromatic_aberration", {{"amount", 0.0025}, {"strength", 0.38}});
@@ -4301,7 +4229,7 @@ Project makePreset(const QString& presetId, Target target)
         add("emission", {{"color", "#45DFFF"}, {"strength", 1.35}});
         add("edge_glow", {{"color", "#8FF5FF"}, {"strength", 1.10}, {"power", 2.2}});
         add("pulse", {{"amount", 0.16}, {"speed", 0.65}});
-        add("saturation", {{"amount", 1.35}});
+        add("color_grade", {{"saturation", 1.35}});
     }
     else if(target == Target::Material && id == "hologram")
     {
@@ -4323,8 +4251,7 @@ Project makePreset(const QString& presetId, Target target)
         project.settings["groundColor"] = "#120A16";
         add("sky_sun", {{"color", "#FFF1D2"}, {"time_of_day", 17.35}, {"azimuth", 0.14}, {"height", 0.86}, {"size", 0.006}, {"softness", 0.002}, {"brightness", 2.2}, {"glow", 0.44}, {"atmosphere", 0.94}, {"haze", 0.46}});
         add("sky_clouds", {{"color", "#E8C2B0"}, {"brightness", 1.05}, {"opacity", 0.46}, {"height", 0.10}, {"scale", 2.8}, {"coverage", 0.54}, {"direction", 18.0}, {"speed", 0.12}});
-        add("saturation", {{"amount", 1.18}});
-        add("contrast", {{"amount", 1.06}});
+        add("color_grade", {{"saturation", 1.18}, {"contrast", 1.06}});
     }
     else if(target == Target::Sky && id == "lake_sunset")
     {
@@ -4457,7 +4384,19 @@ bool projectFromJson(const QJsonObject& object, Project& project, QString& error
     {
         if(!value.isObject()) continue;
         const QJsonObject item = value.toObject();
-        const QString typeId = item.value("type").toString();
+        const QString savedTypeId = item.value("type").toString();
+        QString typeId = savedTypeId;
+        if(savedTypeId == QStringLiteral("brightness") || savedTypeId == QStringLiteral("contrast") ||
+           savedTypeId == QStringLiteral("saturation") || savedTypeId == QStringLiteral("grayscale"))
+            typeId = QStringLiteral("color_grade");
+        else if(savedTypeId == QStringLiteral("distance_tint") || savedTypeId == QStringLiteral("depth_desaturation") ||
+                savedTypeId == QStringLiteral("distance_darkening"))
+            typeId = QStringLiteral("depth_grade");
+        else if(savedTypeId == QStringLiteral("luminance_sharpness"))
+            typeId = QStringLiteral("sharpness");
+        else if(savedTypeId == QStringLiteral("vhs_dropouts"))
+            typeId = QStringLiteral("vhs_tape");
+
         const EffectDefinition* definition = effectDefinition(typeId);
         if(!definition || !supportsTarget(*definition, target)) continue;
         Effect effect = makeDefaultEffect(typeId);
@@ -4467,12 +4406,68 @@ bool projectFromJson(const QJsonObject& object, Project& project, QString& error
         if(item.value("parameters").isObject())
         {
             const QJsonObject parameters = item.value("parameters").toObject();
+
+            // 0.3 project migration keeps the old visual stack order but maps retired
+            // controls onto the consolidated effects with neutral values for the
+            // controls that did not exist in the saved effect.
+            if(typeId == QStringLiteral("color_grade") && savedTypeId != typeId)
+            {
+                const double amount = parameters.value(QStringLiteral("amount")).toDouble();
+                effect.parameters[QStringLiteral("brightness")] = savedTypeId == QStringLiteral("brightness") ? std::clamp(amount, -1.0, 1.0) : 0.0;
+                effect.parameters[QStringLiteral("contrast")] = savedTypeId == QStringLiteral("contrast") ? std::clamp(amount, 0.0, 2.5) : 1.0;
+                if(savedTypeId == QStringLiteral("saturation"))
+                    effect.parameters[QStringLiteral("saturation")] = std::clamp(amount, 0.0, 2.5);
+                else if(savedTypeId == QStringLiteral("grayscale"))
+                    effect.parameters[QStringLiteral("saturation")] = 1.0 - std::clamp(amount, 0.0, 1.0);
+                else
+                    effect.parameters[QStringLiteral("saturation")] = 1.0;
+            }
+            else if(typeId == QStringLiteral("depth_grade") && savedTypeId != typeId)
+            {
+                const auto number = [&parameters](const char* key, double fallback)
+                { return parameters.value(QString::fromLatin1(key)).toDouble(fallback); };
+                effect.parameters[QStringLiteral("tint_strength")] = 0.0;
+                effect.parameters[QStringLiteral("saturation")] = 1.0;
+                effect.parameters[QStringLiteral("brightness")] = 1.0;
+                effect.parameters[QStringLiteral("start")] = std::clamp(number("start", 0.30), 0.0, 1.0);
+                effect.parameters[QStringLiteral("end")] = std::clamp(number("end", 0.85), 0.0, 1.0);
+                effect.parameters[QStringLiteral("curve")] = std::clamp(number("curve", 1.0), 0.25, 3.0);
+                if(savedTypeId == QStringLiteral("distance_tint"))
+                {
+                    QColor nearColor(parameters.value(QStringLiteral("near_color")).toString());
+                    QColor farColor(parameters.value(QStringLiteral("far_color")).toString());
+                    if(nearColor.isValid()) effect.parameters[QStringLiteral("near_color")] = nearColor.name(QColor::HexRgb);
+                    if(farColor.isValid()) effect.parameters[QStringLiteral("far_color")] = farColor.name(QColor::HexRgb);
+                    effect.parameters[QStringLiteral("tint_strength")] = std::clamp(number("strength", 0.35), 0.0, 1.0);
+                }
+                else if(savedTypeId == QStringLiteral("depth_desaturation"))
+                    effect.parameters[QStringLiteral("saturation")] = 1.0 - std::clamp(number("strength", 0.75), 0.0, 1.0);
+                else if(savedTypeId == QStringLiteral("distance_darkening"))
+                    effect.parameters[QStringLiteral("brightness")] = 1.0 - std::clamp(number("strength", 0.42), 0.0, 1.0);
+            }
+            else if(typeId == QStringLiteral("vhs_tape") && savedTypeId == QStringLiteral("vhs_dropouts"))
+            {
+                effect.parameters[QStringLiteral("strength")] = 0.0;
+                effect.parameters[QStringLiteral("jitter")] = 0.0;
+                effect.parameters[QStringLiteral("chroma")] = 0.0;
+                effect.parameters[QStringLiteral("tracking")] = 0.0;
+                effect.parameters[QStringLiteral("damage")] = std::clamp(parameters.value(QStringLiteral("strength")).toDouble(0.55), 0.0, 1.0);
+                effect.parameters[QStringLiteral("damage_band_height")] = std::clamp(parameters.value(QStringLiteral("density")).toDouble(9.0), 2.0, 40.0);
+                effect.parameters[QStringLiteral("damage_shift")] = std::clamp(parameters.value(QStringLiteral("shift")).toDouble(0.70), 0.0, 2.0);
+            }
+
             for(const ParameterDefinition& parameter : definition->parameters)
             {
                 // Pencil Sketch migration: early builds exposed the paper-response
                 // control under the misleading key sky_whiteness. Preserve saved
                 // projects while moving the UI/runtime name to paper_whiteness.
                 QString sourceKey = parameter.key;
+                // Consolidated legacy effects were handled above because their
+                // parameter names intentionally changed in 0.3.
+                if(savedTypeId != typeId &&
+                   (typeId == QStringLiteral("color_grade") || typeId == QStringLiteral("depth_grade") ||
+                    (typeId == QStringLiteral("vhs_tape") && savedTypeId == QStringLiteral("vhs_dropouts"))))
+                    continue;
                 if(typeId == QStringLiteral("pencil_sketch") &&
                    parameter.key == QStringLiteral("paper_whiteness") &&
                    !parameters.contains(sourceKey) &&

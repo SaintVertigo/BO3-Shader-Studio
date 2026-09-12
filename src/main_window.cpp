@@ -76,6 +76,9 @@
 #include <QPainterPath>
 #include <QProcess>
 #include <QProgressDialog>
+#include <QPropertyAnimation>
+#include <QGraphicsOpacityEffect>
+#include <QSplashScreen>
 #include <QPixmap>
 #include <QPaintEngine>
 #include <QPlainTextEdit>
@@ -558,9 +561,34 @@ public:
             if (dy) lineNumberArea_->scroll(0, dy); else lineNumberArea_->update(0, rect.y(), lineNumberArea_->width(), rect.height());
             if (rect.contains(viewport()->rect())) updateLineNumberAreaWidth();
         });
-        connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this]{ updateCurrentLineHighlight(); });
+        connect(this, &QPlainTextEdit::cursorPositionChanged, this, [this]{ updateDecorations(); });
         updateLineNumberAreaWidth();
-        updateCurrentLineHighlight();
+        updateDecorations();
+    }
+
+    void setEditorTheme(const QColor& editorBase, const QColor& text, const QColor& gutterBase,
+                        const QColor& gutterText, const QColor& currentLine, const QColor& accent)
+    {
+        editorBase_ = editorBase;
+        editorText_ = text;
+        gutterBase_ = gutterBase;
+        gutterText_ = gutterText;
+        currentLine_ = currentLine;
+        accent_ = accent;
+        QPalette p = palette();
+        p.setColor(QPalette::Base, editorBase_);
+        p.setColor(QPalette::Text, editorText_);
+        p.setColor(QPalette::Highlight, accent_);
+        p.setColor(QPalette::HighlightedText, QColor(Qt::white));
+        setPalette(p);
+        if(lineNumberArea_) lineNumberArea_->update();
+        updateDecorations();
+    }
+
+    void setDiagnosticLines(const QSet<int>& oneBasedLines)
+    {
+        diagnosticLines_ = oneBasedLines;
+        updateDecorations();
     }
 
     ViewState captureViewState() const
@@ -594,7 +622,7 @@ public:
     void lineNumberAreaPaintEvent(QPaintEvent* event)
     {
         QPainter painter(lineNumberArea_);
-        painter.fillRect(event->rect(), QColor("#181A1E"));
+        painter.fillRect(event->rect(), gutterBase_);
         QTextBlock block = firstVisibleBlock();
         int blockNumber = block.blockNumber();
         int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
@@ -603,7 +631,7 @@ public:
         {
             if (block.isVisible() && bottom >= event->rect().top())
             {
-                painter.setPen(blockNumber == textCursor().blockNumber() ? QColor("#D7DAE0") : QColor("#6B7280"));
+                painter.setPen(blockNumber == textCursor().blockNumber() ? editorText_ : gutterText_);
                 painter.drawText(0, top, lineNumberArea_->width() - 7, fontMetrics().height(), Qt::AlignRight, QString::number(blockNumber + 1));
             }
             block = block.next();
@@ -616,14 +644,14 @@ public:
     void setSearchSelections(const QList<QTextEdit::ExtraSelection>& selections)
     {
         searchSelections_ = selections;
-        updateCurrentLineHighlight();
+        updateDecorations();
     }
 
 protected:
     void focusInEvent(QFocusEvent* event) override
     {
         QPlainTextEdit::focusInEvent(event);
-        updateCurrentLineHighlight();
+        updateDecorations();
         ensureCursorVisible();
         viewport()->update();
     }
@@ -665,24 +693,80 @@ protected:
 
 private:
     void updateLineNumberAreaWidth() { setViewportMargins(lineNumberAreaWidth(), 0, 0, 0); }
-    void updateCurrentLineHighlight()
+
+    void appendBracketSelections(QList<QTextEdit::ExtraSelection>& extras) const
+    {
+        const QString text = toPlainText();
+        const QTextCursor c = textCursor();
+        int pos = c.position();
+        int bracketPos = -1;
+        if(pos > 0 && QStringLiteral("()[]{}").contains(text.value(pos - 1))) bracketPos = pos - 1;
+        else if(pos < text.size() && QStringLiteral("()[]{}").contains(text.value(pos))) bracketPos = pos;
+        if(bracketPos < 0) return;
+        const QChar ch = text[bracketPos];
+        const QString opens = QStringLiteral("([{");
+        const QString closes = QStringLiteral(")]}");
+        const int openIndex = opens.indexOf(ch);
+        const int closeIndex = closes.indexOf(ch);
+        const bool forward = openIndex >= 0;
+        const QChar mate = forward ? closes[openIndex] : opens[closeIndex];
+        int depth = 0;
+        int matePos = -1;
+        for(int i = bracketPos; forward ? i < text.size() : i >= 0; forward ? ++i : --i)
+        {
+            if(text[i] == ch) ++depth;
+            else if(text[i] == mate && --depth == 0) { matePos = i; break; }
+        }
+        if(matePos < 0) return;
+        for(int at : {bracketPos, matePos})
+        {
+            QTextEdit::ExtraSelection sel;
+            QTextCursor cursor(document());
+            cursor.setPosition(at); cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 1);
+            sel.cursor = cursor;
+            sel.format.setBackground(accent_.lighter(135));
+            sel.format.setForeground(Qt::black);
+            extras.append(sel);
+        }
+    }
+
+    void updateDecorations()
     {
         QList<QTextEdit::ExtraSelection> extras = searchSelections_;
         if (!isReadOnly())
         {
             QTextEdit::ExtraSelection selection;
-            selection.format.setBackground(QColor("#20242B"));
+            selection.format.setBackground(currentLine_);
             selection.format.setProperty(QTextFormat::FullWidthSelection, true);
             selection.cursor = textCursor();
             selection.cursor.clearSelection();
             extras.prepend(selection);
         }
+        for(int line : diagnosticLines_)
+        {
+            const QTextBlock block = document()->findBlockByNumber(line - 1);
+            if(!block.isValid()) continue;
+            QTextEdit::ExtraSelection diagnostic;
+            diagnostic.cursor = QTextCursor(block);
+            diagnostic.cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+            diagnostic.format.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+            diagnostic.format.setUnderlineColor(QColor("#E5484D"));
+            extras.append(diagnostic);
+        }
+        appendBracketSelections(extras);
         setExtraSelections(extras);
         if (lineNumberArea_) lineNumberArea_->update();
     }
 
     LineNumberArea* lineNumberArea_ = nullptr;
     QList<QTextEdit::ExtraSelection> searchSelections_;
+    QSet<int> diagnosticLines_;
+    QColor editorBase_ = QColor("#0C0F13");
+    QColor editorText_ = QColor("#E3E8EF");
+    QColor gutterBase_ = QColor("#181A1E");
+    QColor gutterText_ = QColor("#6B7280");
+    QColor currentLine_ = QColor("#20242B");
+    QColor accent_ = QColor("#4D8FCC");
     double wheelLines_ = 0.0;
 
     friend class LineNumberArea;
@@ -1221,7 +1305,9 @@ public:
         resize(1680, 960);
         setMinimumSize(900, 440);
         setAcceptDrops(true);
+        { QSettings settings("OpenAI", "BO3HLSLPreviewer"); animationsEnabled_ = settings.value("ui/animationsEnabled", true).toBool(); }
         buildUi();
+        setAnimated(effectiveAnimationsEnabled());
         applyDarkTheme();
         const bool restoredWorkspace = restoreWorkspace(false);
         if (!restoredWorkspace) applyWorkspacePreset("Balanced");
@@ -1278,6 +1364,7 @@ public:
             else
                 openBundledSample();
         });
+        QTimer::singleShot(650, this, [this]{ showGettingStarted(false); });
         if (automaticUpdateChecksEnabled())
             QTimer::singleShot(2500, this, [this]{ checkForOnlineUpdates(false); });
     }
@@ -3488,7 +3575,7 @@ private:
     void loadAppMetadata()
     {
         appVersion_ = "1.0.0"; // internal monotonic updater version
-        displayVersion_ = "0.2";
+        displayVersion_ = "0.3";
         githubRepository_.clear();
         updateAssetPrefix_ = "BO3_Shader_Studio_Update";
         defaultUpdateChannel_ = "stable";
@@ -14804,7 +14891,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void updateBeginnerResponsiveLayout()
     {
         if(!beginnerBuilderPanel_) return;
-        const bool compact = beginnerBuilderPanel_->width() < 720;
+        const bool compact = beginnerBuilderPanel_->width() < 1000;
         if(beginnerCompactLayout_ == compact) return;
         beginnerCompactLayout_ = compact;
 
@@ -14926,11 +15013,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             beginnerPreviewImageToolbarButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::PostFx);
         if(beginnerDepthToolbarAction_)
             beginnerDepthToolbarAction_->setVisible(!beginnerUiMode_);
-        if(beginnerDepthSceneToolbarAction_)
-            beginnerDepthSceneToolbarAction_->setVisible(beginnerUiMode_ && beginnerProjectUsesSceneDepth());
-        if(beginnerLiveGameToolbarAction_)
-            beginnerLiveGameToolbarAction_->setVisible(beginnerUiMode_ && beginnerProjectActive_ &&
-                beginnerProject_.target == beginner::Target::PostFx);
+        if(beginnerDepthSceneToolbarAction_) beginnerDepthSceneToolbarAction_->setVisible(false);
+        if(beginnerLiveGameToolbarAction_) beginnerLiveGameToolbarAction_->setVisible(false);
         if(loadModelQuickButton_)
             loadModelQuickButton_->setVisible(!beginnerUiMode_ || beginnerProject_.target == beginner::Target::Material);
     }
@@ -15367,7 +15451,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(beginnerEffectsGroup_)
             beginnerEffectsGroup_->setTitle("3. Effects");
         if(beginnerParamsGroup_)
-            beginnerParamsGroup_->setTitle("Adjust Selected Effect");
+            beginnerParamsGroup_->setTitle("4. Selected Effect");
         refreshBeginnerPresetCombo();
         rebuildBeginnerBaseAppearance();
         updateBeginnerBuilderSummary();
@@ -15715,8 +15799,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         BeginnerEffectBrowserDialog dlg(this);
         dlg.setWindowTitle("Add an Effect");
-        dlg.resize(980, 690);
-        dlg.setMinimumSize(720, 520);
+        dlg.resize(920, 640);
+        dlg.setMinimumSize(700, 500);
 
         const int browserStateIndex = qBound(0, static_cast<int>(beginnerProject_.target), 2);
         const QString savedCategory = beginnerEffectBrowserCategory_[browserStateIndex].isEmpty()
@@ -15726,8 +15810,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const int savedScrollY = qMax(0, beginnerEffectBrowserScrollY_[browserStateIndex]);
 
         auto* root = new QVBoxLayout(&dlg);
-        root->setContentsMargins(16, 14, 16, 14);
-        root->setSpacing(8);
+        root->setContentsMargins(12, 10, 12, 10);
+        root->setSpacing(6);
 
         auto* title = new QLabel("Add an effect");
         title->setObjectName("InspectorTitle");
@@ -15750,14 +15834,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         body->setSpacing(12);
 
         auto* categoryList = new QListWidget();
-        categoryList->setMaximumWidth(176);
-        categoryList->setMinimumWidth(142);
+        categoryList->setMaximumWidth(158);
+        categoryList->setMinimumWidth(132);
         categoryList->setSpacing(2);
         categoryList->addItem("All Effects");
         QStringList categories;
         for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
         {
             if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
+            if(definition.id == QStringLiteral("depth_heatmap") || definition.id == QStringLiteral("depth_isolation")) continue;
             if(!categories.contains(definition.category)) categories << definition.category;
         }
         for(const QString& category : categories) categoryList->addItem(category);
@@ -15779,8 +15864,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* cardHost = new QWidget();
         auto* cardGrid = new QGridLayout(cardHost);
         cardGrid->setContentsMargins(0, 0, 0, 0);
-        cardGrid->setHorizontalSpacing(10);
-        cardGrid->setVerticalSpacing(10);
+        cardGrid->setHorizontalSpacing(8);
+        cardGrid->setVerticalSpacing(7);
         scroll->setWidget(cardHost);
         body->addWidget(scroll, 1);
         root->addLayout(body, 1);
@@ -15808,6 +15893,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 // browser should contain Material effects, not a wall of disabled
                 // Screen/Sky cards that can never be selected.
                 if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
+                if(definition.id == QStringLiteral("depth_heatmap") || definition.id == QStringLiteral("depth_isolation")) continue;
                 if(selectedCategory != "All Effects" && definition.category != selectedCategory) continue;
                 if(!query.isEmpty() &&
                    !definition.name.contains(query, Qt::CaseInsensitive) &&
@@ -15829,7 +15915,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 auto* card = new BeginnerEffectCard();
                 card->setObjectName("BeginnerEffectCard");
                 card->setProperty("supported", true);
-                card->setMinimumHeight(currentColumns == 1 ? 122 : 136);
+                card->setMinimumHeight(currentColumns == 1 ? 94 : 104);
                 card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
                 card->setCursor(Qt::PointingHandCursor);
                 card->setToolTip("Double-click anywhere on this card to add the effect.");
@@ -15840,8 +15926,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 };
 
                 auto* layout = new QVBoxLayout(card);
-                layout->setContentsMargins(12, 10, 12, 10);
-                layout->setSpacing(5);
+                layout->setContentsMargins(10, 7, 10, 7);
+                layout->setSpacing(3);
 
                 // The old effect-browser artwork was decorative/generated and
                 // frequently misleading. Keep cards compact and descriptive so
@@ -15864,19 +15950,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 layout->addWidget(description);
                 layout->addStretch(1);
 
+                auto* footer = new QHBoxLayout();
+                footer->setSpacing(6);
                 auto* availability = new QLabel();
-                availability->setWordWrap(true);
+                availability->setWordWrap(false);
                 const bool usesSceneDepth = beginnerEffectUsesSceneDepth(definition.id);
                 availability->setText(usesSceneDepth
-                    ? QString::fromUtf8("✓ BO3 compatible   •   Scene/Float-Z sampling")
-                    : QString::fromUtf8("✓ BO3 compatible"));
+                    ? QString::fromUtf8("✓ BO3   •   Float-Z")
+                    : QString::fromUtf8("✓ BO3"));
                 availability->setObjectName("EffectAvailabilityGood");
                 availability->setAttribute(Qt::WA_TransparentForMouseEvents);
-                layout->addWidget(availability);
+                footer->addWidget(availability, 1);
 
-                auto* add = new QPushButton("+ Add Effect");
+                auto* add = new QPushButton("+ Add");
                 add->setObjectName("PrimaryAction");
-                layout->addWidget(add);
+                add->setMaximumWidth(82);
+                footer->addWidget(add);
+                layout->addLayout(footer);
                 connect(add, &QPushButton::clicked, &dlg, [this, &dlg, id = definition.id]
                 {
                     addBeginnerEffect(id);
@@ -16202,6 +16292,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         auto* panel = new QWidget(this);
         panel->setObjectName("BeginnerBuilderPanel");
+        panel->setMinimumWidth(310);
+        panel->setMaximumWidth(430);
         auto* root = new QVBoxLayout(panel);
         root->setContentsMargins(10, 8, 10, 8);
         root->setSpacing(8);
@@ -16224,6 +16316,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         root->addLayout(heroRow);
 
         auto* targetGroup = new QGroupBox("1. Shader Type");
+        beginnerTargetGroup_ = targetGroup;
         auto* targetLayout = new QVBoxLayout(targetGroup);
         auto* targetCards = new QHBoxLayout();
         const QStringList targetShort = {"Changes the game screen", "Changes a model / surface", "Creates the environment"};
@@ -16248,15 +16341,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         targetLayout->addWidget(beginnerTargetDescription_);
         root->addWidget(targetGroup);
 
-        auto* body = new QSplitter(Qt::Horizontal);
-        beginnerBodySplitter_ = body;
-        body->setChildrenCollapsible(false);
-        body->setHandleWidth(5);
-
-        auto* left = new QWidget();
-        auto* leftLayout = new QVBoxLayout(left);
-        leftLayout->setContentsMargins(0, 0, 6, 0);
+        auto* body = new QScrollArea();
+        beginnerBodySplitter_ = nullptr;
+        body->setWidgetResizable(true);
+        body->setFrameShape(QFrame::NoFrame);
+        body->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* rail = new QWidget();
+        auto* leftLayout = new QVBoxLayout(rail);
+        leftLayout->setContentsMargins(0, 0, 3, 0);
         leftLayout->setSpacing(8);
+        body->setWidget(rail);
 
         auto* projectGroup = new QGroupBox("2. Project");
         auto* projectLayout = new QVBoxLayout(projectGroup);
@@ -16348,42 +16442,27 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         effectsLayout->addWidget(beginnerSummaryLabel_);
         leftLayout->addWidget(beginnerEffectsGroup_, 1);
 
-        auto* right = new QWidget();
-        auto* rightLayout = new QVBoxLayout(right);
-        rightLayout->setContentsMargins(6, 0, 0, 0);
-        rightLayout->setSpacing(8);
-        beginnerParamsGroup_ = new QGroupBox("Adjust Selected Effect");
+        beginnerParamsGroup_ = new QGroupBox("4. Selected Effect");
         auto* paramsOuterLayout = new QVBoxLayout(beginnerParamsGroup_);
         paramsOuterLayout->setContentsMargins(4, 7, 4, 4);
-        auto* paramsScroll = new QScrollArea();
-        paramsScroll->setWidgetResizable(true);
-        paramsScroll->setFrameShape(QFrame::NoFrame);
-        paramsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* paramsContent = new QWidget();
         beginnerEffectParamsLayout_ = new QVBoxLayout(paramsContent);
         beginnerEffectParamsLayout_->setContentsMargins(7, 4, 7, 7);
         beginnerEffectParamsLayout_->setSpacing(8);
-        paramsScroll->setWidget(paramsContent);
-        paramsOuterLayout->addWidget(paramsScroll, 1);
-        rightLayout->addWidget(beginnerParamsGroup_, 1);
+        paramsOuterLayout->addWidget(paramsContent);
+        leftLayout->addWidget(beginnerParamsGroup_);
 
-        auto* actions = new QHBoxLayout();
+        auto* actions = new QVBoxLayout();
         auto* viewCode = new QPushButton("Learn How It Works");
         viewCode->setToolTip("See the visual recipe behind this shader. Generated HLSL is optional.");
-        auto* replaceFiltersButton = new QPushButton("Replace Filters");
-        replaceFiltersButton->setToolTip("Replace BO3's share/raw/scripts/postfx/_filters.csc and _filters.gsh with Shader Studio's current versions. You will be warned before either file is overwritten.");
-        auto* exportButton = new QPushButton("Export to Black Ops III");
+        auto* exportButton = new QPushButton("5. Export to Black Ops III");
+        beginnerExportButton_ = exportButton;
         exportButton->setObjectName("PrimaryAction");
-        exportButton->setMinimumHeight(38);
+        exportButton->setMinimumHeight(40);
         actions->addWidget(viewCode);
-        actions->addWidget(replaceFiltersButton);
-        actions->addWidget(exportButton, 1);
-        rightLayout->addLayout(actions);
-
-        body->addWidget(left);
-        body->addWidget(right);
-        body->setStretchFactor(0, 3);
-        body->setStretchFactor(1, 4);
+        actions->addWidget(exportButton);
+        leftLayout->addLayout(actions);
+        leftLayout->addStretch(1);
         root->addWidget(body, 1);
 
         connect(beginnerPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
@@ -16434,10 +16513,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(viewCode, &QPushButton::clicked, this, [this]
         {
             showBeginnerLearningDialog();
-        });
-        connect(replaceFiltersButton, &QPushButton::clicked, this, [this]
-        {
-            replaceBo3PostFxFilters();
         });
         connect(exportButton, &QPushButton::clicked, this, [this]
         {
@@ -16499,6 +16574,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* settingsMenu = menuBar()->addMenu("&Settings");
         auto* toolsMenu = menuBar()->addMenu("&Tools");
         auto* helpMenu = menuBar()->addMenu("&Help");
+        auto* gettingStartedAction = helpMenu->addAction("Getting Started");
+        gettingStartedAction->setToolTip("Reopen the short interactive tour of the real Shader Studio interface.");
+        helpMenu->addSeparator();
         auto* learningGuideAction = helpMenu->addAction("BO3 HLSL Learning Guide...");
         learningGuideAction->setToolTip("Learn BO3 HLSL and techsets from beginner fundamentals through advanced runtime/package topics.");
         auto* techsetGuideAction = helpMenu->addAction("Techset Quick Reference...");
@@ -16551,16 +16629,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* replaceFiltersAction = toolsMenu->addAction("Replace BO3 PostFX Filters...");
         replaceFiltersAction->setToolTip("Explicitly overwrite share/raw/scripts/postfx/_filters.csc and _filters.gsh with Shader Studio's current persistent-PostFX support files. A warning is shown before anything is replaced.");
         toolsMenu->addSeparator();
-        auto* glslRegressionAction = toolsMenu->addAction("Run GLSL Converter Regression Suite");
+        auto* developerMenu = toolsMenu->addMenu("Developer / Diagnostics");
+        auto* glslRegressionAction = developerMenu->addAction("Run GLSL Converter Regression Suite");
         glslRegressionAction->setToolTip("Convert and FXC-compile the bundled GLSL regression corpus. Use this after converter changes instead of testing random shaders one at a time.");
-        auto* glslBatchValidateAction = toolsMenu->addAction("Batch Validate GLSL Folder...");
+        auto* glslBatchValidateAction = developerMenu->addAction("Batch Validate GLSL Folder...");
         glslBatchValidateAction->setToolTip("Recursively convert and FXC-compile every .glsl/.frag/.fs/.shader file in a folder as BO3 PostFX and report all failures at once.");
-        auto* glslStressAction = toolsMenu->addAction("Stress Test GLSL Converter...");
+        auto* glslStressAction = developerMenu->addAction("Stress Test GLSL Converter...");
         glslStressAction->setToolTip("Generate hundreds or thousands of deterministic valid GLSL cases, convert them, FXC-compile them, and group failures by compiler error.");
-        auto* noKeyCorpusAction = toolsMenu->addAction("Shader Corpus Test (No API Key)...");
+        auto* noKeyCorpusAction = developerMenu->addAction("Shader Corpus Test (No API Key)...");
         noKeyCorpusAction->setToolTip("Validate hundreds or thousands of real GLSL/Shadertoy shaders from the public Shaders21k corpus, a local ZIP, or a local folder. No API key required.");
-        auto* shadertoyCorpusAction = toolsMenu->addAction("Shadertoy API Corpus Test...");
+        auto* shadertoyCorpusAction = developerMenu->addAction("Shadertoy API Corpus Test...");
         shadertoyCorpusAction->setToolTip("Use your Shadertoy API key to validate Public+API Image/Buffer passes against the BO3 GLSL converter. No Python dependency required.");
+        developerMenu->addSeparator();
+        auto* depthHeatmapAction = developerMenu->addAction("Depth Heatmap");
+        auto* depthIsolationAction = developerMenu->addAction("Depth Isolation");
+        depthHeatmapAction->setToolTip("Add the depth heatmap diagnostic effect to the active Beginner PostFX stack.");
+        depthIsolationAction->setToolTip("Add the depth isolation diagnostic effect to the active Beginner PostFX stack.");
         toolsMenu->addSeparator();
 
         // One calm command bar replaces the old pair of dense toolbars. Beginner
@@ -16568,6 +16652,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // technical controls in the Preview Settings inspector instead of cramming
         // them into another horizontal row.
         auto* toolbar = addToolBar("Command Bar");
+        commandToolbar_ = toolbar;
         toolbar->setObjectName("MainToolbar");
         toolbar->setMovable(false);
         toolbar->setFloatable(false);
@@ -16674,17 +16759,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         compileStatusBadge_->setMinimumWidth(132);
         compileStatusBadge_->setAlignment(Qt::AlignCenter);
         auto* compileStatusToolbarAction = toolbar->addWidget(compileStatusBadge_);
-        advancedOnlyToolbarActions_ = {
-            beginnerDepthToolbarAction_,
-            pauseToolbarAction,
-            liveToolbarAction,
-            toolbarSpacerBAction,
-            reloadToolbarAction,
-            compileAction,
-            exportToolbarAction,
-            glslToolbarAction,
-            compileStatusToolbarAction
-        };
+        // 0.3 command bar is intentionally small. Technical commands remain in
+        // menus/inspectors instead of living permanently beside authoring actions.
+        for(QAction* action : {beginnerDepthToolbarAction_, pauseToolbarAction, liveToolbarAction,
+                               toolbarSpacerBAction, reloadToolbarAction, compileAction,
+                               glslToolbarAction, compileStatusToolbarAction})
+            if(action) action->setVisible(false);
+        advancedOnlyToolbarActions_.clear();
+        exportToolbarAction->setVisible(true);
 
         // Controls that used to occupy the second toolbar now live in a vertical
         // Preview Settings inspector. This preserves all functionality while making
@@ -16773,6 +16855,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(replaceFiltersAction, &QAction::triggered, this, [this]{ replaceBo3PostFxFilters(); });
         connect(exportFoldersAction, &QAction::triggered, this, [this]{ showBO3ExportLocations(); });
         connect(installHistoryAction, &QAction::triggered, this, [this]{ showBO3InstallHistory(); });
+        connect(gettingStartedAction, &QAction::triggered, this, [this]{ showGettingStarted(true); });
         connect(learningGuideAction, &QAction::triggered, this, [this]{ showBo3LearningGuide(-1); });
         connect(techsetGuideAction, &QAction::triggered, this, [this]{ showBo3LearningGuide(4); });
         connect(communityCreditsAction, &QAction::triggered, this, [this]{ showBo3LearningGuide(13); });
@@ -16806,6 +16889,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(glslStressAction, &QAction::triggered, this, [this]{ stressTestGlslConverter(); });
         connect(noKeyCorpusAction, &QAction::triggered, this, [this]{ runNoKeyShaderCorpusTest(); });
         connect(shadertoyCorpusAction, &QAction::triggered, this, [this]{ runShadertoyCorpusTest(); });
+        connect(depthHeatmapAction, &QAction::triggered, this, [this]{
+            if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::PostFx) startBeginnerProject(beginner::Target::PostFx, false);
+            setUiExperienceMode(true); addBeginnerEffect(QStringLiteral("depth_heatmap"));
+        });
+        connect(depthIsolationAction, &QAction::triggered, this, [this]{
+            if(!beginnerProjectActive_ || beginnerProject_.target != beginner::Target::PostFx) startBeginnerProject(beginner::Target::PostFx, false);
+            setUiExperienceMode(true); addBeginnerEffect(QStringLiteral("depth_isolation"));
+        });
 
         // Editor is the stable center of the application. Everything else is a dock
         // that can be moved, tabbed, floated, hidden and snapped back into place.
@@ -16996,7 +17087,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         materialProfileForm->setHorizontalSpacing(8);
         previewMaterialProfileCombo_ = new QComboBox();
         previewMaterialProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
-        previewMaterialProfileCombo_->setCurrentIndex(1);
+        previewMaterialProfileCombo_->setCurrentIndex(0);
         previewMaterialProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral mirrors APE's No Lighting view.");
         materialProfileForm->addRow("Profile", previewMaterialProfileCombo_);
         previewApeLightingPresetCombo_ = new QComboBox();
@@ -17430,7 +17521,38 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         uiBeginnerModeAction_ = beginnerModeAction;
         uiAdvancedModeAction_ = advancedModeAction;
         settingsMenu->addSeparator();
+        auto* animationsAction = settingsMenu->addAction("Animations");
+        animationsAction->setCheckable(true);
+        {
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            animationsEnabled_ = settings.value("ui/animationsEnabled", true).toBool();
+        }
+        animationsAction->setChecked(animationsEnabled_);
+        animationsAction->setToolTip("Use fast interface transitions. Windows reduced-motion settings are always respected.");
+        auto* accentColorAction = settingsMenu->addAction("Accent Color...");
+        auto* resetAccentAction = settingsMenu->addAction("Use Theme Accent");
+        settingsMenu->addSeparator();
         auto* keybindAction = settingsMenu->addAction("Keybinds...");
+        connect(animationsAction, &QAction::toggled, this, [this](bool enabled){
+            animationsEnabled_ = enabled;
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.setValue("ui/animationsEnabled", enabled);
+            setAnimated(effectiveAnimationsEnabled());
+        });
+        connect(accentColorAction, &QAction::triggered, this, [this]{
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            QColor current(settings.value("ui/accentColor").toString());
+            if(!current.isValid()) current = palette().color(QPalette::Highlight);
+            const QColor chosen = QColorDialog::getColor(current, this, "Accent Color");
+            if(!chosen.isValid()) return;
+            settings.setValue("ui/accentColor", chosen.name(QColor::HexRgb));
+            applyTheme(currentTheme_);
+        });
+        connect(resetAccentAction, &QAction::triggered, this, [this]{
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.remove("ui/accentColor");
+            applyTheme(currentTheme_);
+        });
         connect(keybindAction, &QAction::triggered, this, [this]{ showKeybindDialog(); });
         connect(beginnerModeAction, &QAction::triggered, this, [this]{ setUiExperienceMode(true); });
         connect(advancedModeAction, &QAction::triggered, this, [this]{ setUiExperienceMode(false); });
@@ -17471,6 +17593,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         highlighter_ = std::make_unique<HlslHighlighter>(editor_->document());
         QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont); mono.setPointSize(11);
         editor_->setFont(mono); compilerOutput_->setFont(mono); findEdit_->setFont(mono);
+        editorPositionLabel_ = new QLabel("Ln 1, Col 1");
+        editorPositionLabel_->setObjectName("CompactHelp");
+        statusBar()->addPermanentWidget(editorPositionLabel_);
+        connect(editor_, &QPlainTextEdit::cursorPositionChanged, this, [this]{
+            if(!editorPositionLabel_ || !editor_) return;
+            const QTextCursor c = editor_->textCursor();
+            editorPositionLabel_->setText(QString("Ln %1, Col %2").arg(c.blockNumber() + 1).arg(c.positionInBlock() + 1));
+        });
 
         connect(editor_, &QPlainTextEdit::textChanged, this, [this]{
             if (loadingText_) return;
@@ -17863,7 +17993,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         profileRow->addWidget(new QLabel("Preview profile:"));
         materialPreviewProfileCombo_ = new QComboBox();
         materialPreviewProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
-        materialPreviewProfileCombo_->setCurrentIndex(1); // preserve existing Studio behavior until the user opts into APE Match
+        materialPreviewProfileCombo_->setCurrentIndex(0); // APE Match is the 0.3 default material preview path
         materialPreviewProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral bypasses environment/direct lighting like APE's No Lighting mode.");
         profileRow->addWidget(materialPreviewProfileCombo_);
         profileRow->addSpacing(8);
@@ -17877,7 +18007,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         profileRow->addStretch(1);
         outer->addLayout(profileRow);
 
-        apePresetInfoLabel_ = new QLabel("APE Match 0.2 ready: GDT/SSI Morning / Day / Sunset / Night + native APE reference models.");
+        apePresetInfoLabel_ = new QLabel("APE Match ready: GDT/SSI Morning / Day / Sunset / Night + native APE reference models.");
         apePresetInfoLabel_->setObjectName("CompactHelp");
         apePresetInfoLabel_->setWordWrap(true);
         outer->addWidget(apePresetInfoLabel_);
@@ -18577,6 +18707,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const QString warnBorder = lightTheme ? "#C6A85A" : "#66552A";
 
 
+        {
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            const QColor customAccent(settings.value("ui/accentColor").toString());
+            if(customAccent.isValid()) accent = customAccent.name(QColor::HexRgb);
+        }
+
         QPalette palette;
         palette.setColor(QPalette::Window, QColor(window));
         palette.setColor(QPalette::WindowText, QColor(textColor));
@@ -18628,6 +18764,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QToolButton#PrimaryAction:hover, QPushButton#PrimaryAction:hover { background:%5; border-color:%9; color:%7; }
             QToolButton#ExperienceModeButton { min-width:72px; padding:5px 10px; }
             QToolButton#ExperienceModeButton:checked { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
+            QWidget[tutorialHighlight="true"], QGroupBox[tutorialHighlight="true"], QToolBar[tutorialHighlight="true"] { border:2px solid %9; }
             QToolButton#PreviewModeToggle { min-width:78px; padding:5px 10px; }
             QToolButton#PreviewModeToggle:checked { background:%4; border-color:%9; font-weight:600; }
             QToolButton#PreviewSettingsToggle:checked { background:%4; border-color:%9; font-weight:600; }
@@ -18685,9 +18822,113 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         for (auto it = themeActions_.begin(); it != themeActions_.end(); ++it)
             if (it.value()) it.value()->setChecked(it.key() == name);
+        if(editor_)
+        {
+            const QColor baseColor(editorBase);
+            const QColor text(textColor);
+            const QColor panelColor(panel);
+            const QColor mutedColor(muted);
+            const QColor accentColor(accent);
+            QColor currentLine = QColor(button);
+            currentLine.setAlpha(150);
+            editor_->setEditorTheme(baseColor, text, panelColor, mutedColor, currentLine, accentColor);
+        }
         QSettings settings("OpenAI", "BO3HLSLPreviewer");
         settings.setValue("ui/theme", name);
         styleNativeTitleBar();
+    }
+
+    bool effectiveAnimationsEnabled() const
+    {
+#ifdef _WIN32
+        BOOL clientAnimations = TRUE;
+        if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0) && !clientAnimations)
+            return false;
+#endif
+        return animationsEnabled_;
+    }
+
+    void animateAuthoringPage(QWidget* page)
+    {
+        if(!page || !effectiveAnimationsEnabled()) return;
+        auto* effect = new QGraphicsOpacityEffect(page);
+        page->setGraphicsEffect(effect);
+        auto* animation = new QPropertyAnimation(effect, "opacity", page);
+        animation->setDuration(120);
+        animation->setStartValue(0.30);
+        animation->setEndValue(1.0);
+        connect(animation, &QPropertyAnimation::finished, page, [page]{ page->setGraphicsEffect(nullptr); });
+        animation->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    void setTutorialHighlight(QWidget* widget, bool enabled)
+    {
+        if(!widget) return;
+        widget->setProperty("tutorialHighlight", enabled);
+        if(enabled) tutorialHighlightedWidget_ = widget;
+        else if(tutorialHighlightedWidget_ == widget) tutorialHighlightedWidget_ = nullptr;
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->update();
+    }
+
+    void showGettingStarted(bool force)
+    {
+        QSettings settings("OpenAI", "BO3HLSLPreviewer");
+        if(!force && settings.value("ui/gettingStartedComplete", false).toBool()) return;
+        if(tutorialDialog_) { tutorialDialog_->raise(); tutorialDialog_->activateWindow(); return; }
+
+        auto* dialog = new QDialog(this);
+        tutorialDialog_ = dialog;
+        dialog->setWindowTitle("Getting Started");
+        dialog->setModal(false);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setMinimumWidth(430);
+        auto* layout = new QVBoxLayout(dialog);
+        auto* title = new QLabel(); title->setObjectName("InspectorTitle");
+        auto* text = new QLabel(); text->setWordWrap(true); text->setObjectName("CompactHelp");
+        auto* buttons = new QHBoxLayout();
+        auto* back = new QPushButton("Back");
+        auto* skip = new QPushButton("Skip");
+        auto* next = new QPushButton("Next"); next->setObjectName("PrimaryAction");
+        buttons->addWidget(back); buttons->addStretch(1); buttons->addWidget(skip); buttons->addWidget(next);
+        layout->addWidget(title); layout->addWidget(text); layout->addLayout(buttons);
+
+        struct Step { QString title; QString text; QWidget* target; };
+        auto* steps = new QVector<Step>{
+            {"Welcome to BO3 Shader Studio", "This short tour points at the real controls. Beginner is visual authoring; Advanced exposes direct HLSL editing.", commandToolbar_},
+            {"Choose a target", "Pick PostFX, Material, or Sky. The authoring rail changes to the controls that actually apply to that BO3 shader type.", beginnerTargetGroup_},
+            {"Build an effect stack", "Browse effects, reorder them, and keep the stack compact. Diagnostic-only depth tools live under Tools → Developer / Diagnostics.", beginnerEffectsGroup_},
+            {"Adjust the selected effect", "Only the selected effect's useful controls are shown here, keeping the preview as the largest part of the window.", beginnerParamsGroup_},
+            {"Preview first", "The preview stays visible while you author. Material previews start in APE Match so the known-good APE parity path is the default.", previewDock_},
+            {"Export to BO3", "When the shader looks right, Export packages or installs it using the existing validated runtime/export pipeline.", beginnerExportButton_}
+        };
+        auto* index = new int(0);
+        auto refresh = [this, dialog, title, text, back, next, steps, index]()
+        {
+            for(const Step& step : *steps) setTutorialHighlight(step.target, false);
+            const Step& step = (*steps)[*index];
+            setTutorialHighlight(step.target, true);
+            title->setText(QString("%1  ·  %2/%3").arg(step.title).arg(*index + 1).arg(steps->size()));
+            text->setText(step.text);
+            back->setEnabled(*index > 0);
+            next->setText(*index + 1 == steps->size() ? "Finish" : "Next");
+            dialog->adjustSize();
+        };
+        connect(back, &QPushButton::clicked, dialog, [index, refresh]{ if(*index > 0) --*index; refresh(); });
+        connect(next, &QPushButton::clicked, dialog, [this, dialog, steps, index, refresh]{
+            if(*index + 1 < steps->size()) { ++*index; refresh(); return; }
+            QSettings settings("OpenAI", "BO3HLSLPreviewer"); settings.setValue("ui/gettingStartedComplete", true); dialog->close();
+        });
+        connect(skip, &QPushButton::clicked, dialog, [dialog]{ QSettings settings("OpenAI", "BO3HLSLPreviewer"); settings.setValue("ui/gettingStartedComplete", true); dialog->close(); });
+        connect(dialog, &QDialog::destroyed, this, [this, steps, index]{
+            if(tutorialHighlightedWidget_) setTutorialHighlight(tutorialHighlightedWidget_, false);
+            delete steps; delete index; tutorialDialog_ = nullptr; tutorialHighlightedWidget_ = nullptr;
+        });
+        // Keep track of the target so close/skip can always clear the border.
+        connect(dialog, &QDialog::finished, this, [this, steps](int){ for(const Step& step : *steps) setTutorialHighlight(step.target, false); });
+        refresh();
+        dialog->show();
     }
 
     void positionPreviewSettingsPopup()
@@ -18810,10 +19051,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         if(authoringStack_)
         {
+            authoringStack_->setMinimumWidth(beginner ? 310 : 0);
+            authoringStack_->setMaximumWidth(beginner ? 430 : QWIDGETSIZE_MAX);
             if(beginner && beginnerBuilderPanel_)
                 authoringStack_->setCurrentWidget(beginnerBuilderPanel_);
             else if(!beginner && advancedEditorPage_)
                 authoringStack_->setCurrentWidget(advancedEditorPage_);
+            animateAuthoringPage(authoringStack_->currentWidget());
         }
 
         // The inspector is an owned top-level tool window rather than a normal
@@ -18838,11 +19082,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(beginnerPreviewImageToolbarAction_)
             beginnerPreviewImageToolbarAction_->setVisible(!beginner ||
                 (beginnerProjectActive_ && beginnerProject_.target == beginner::Target::PostFx));
-        if(beginnerDepthSceneToolbarAction_)
-            beginnerDepthSceneToolbarAction_->setVisible(beginner && beginnerProjectUsesSceneDepth());
-        if(beginnerLiveGameToolbarAction_)
-            beginnerLiveGameToolbarAction_->setVisible(beginner && beginnerProjectActive_ &&
-                beginnerProject_.target == beginner::Target::PostFx);
+        if(beginnerDepthSceneToolbarAction_) beginnerDepthSceneToolbarAction_->setVisible(false);
+        if(beginnerLiveGameToolbarAction_) beginnerLiveGameToolbarAction_->setVisible(false);
 
         if(previewSettingsTitle_)
             previewSettingsTitle_->setText(beginner ? "Preview Settings" : "Advanced Preview Settings");
@@ -18891,12 +19132,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         else if(persist && (!previewMaxButton_ || !previewMaxButton_->isChecked()))
         {
-            // A deliberate switch to Advanced restores the complete authoring
-            // surface. Workspace restoration (persist=false) keeps saved state.
+            // 0.3 keeps Advanced preview-first as well. Diagnostics, resources and
+            // script-vector docks are explicit tools opened from View/Tools; mode
+            // switching must not cover the preview with every utility pane.
             for(QDockWidget* dock : {outputDock_, sourceValuesDock_, shaderParamsDock_, materialDock_,
                                      performanceDock_, sceneDock_, scriptDock_})
-                if(dock) dock->show();
-            if(outputDock_) outputDock_->raise();
+                if(dock) dock->hide();
         }
 
         if(previewSettingsToggleButton_ && previewSettingsScroll_ &&
@@ -20133,9 +20374,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (kind == OutputKind::Success) color = "#76D49B";
         else if (kind == OutputKind::Warning) color = "#E6BE55";
         else if (kind == OutputKind::Error) color = "#FF7070";
-        compilerOutput_->setStyleSheet(QString("QPlainTextEdit { background:#0F1013; border:1px solid #343941; color:%1; }").arg(color));
+        compilerOutput_->setStyleSheet(QString("QPlainTextEdit { color:%1; }").arg(color));
         compilerOutput_->setPlainText(safeText);
         compilerOutput_->moveCursor(QTextCursor::Start);
+        if(editor_)
+        {
+            QSet<int> lines;
+            const QRegularExpression linePattern(QStringLiteral(R"((?:\(|:)(\d+)(?:[,):]))"));
+            auto matches = linePattern.globalMatch(safeText);
+            while(matches.hasNext())
+            {
+                const auto match = matches.next();
+                bool ok = false;
+                const int line = match.captured(1).toInt(&ok);
+                if(ok && line > 0 && line <= editor_->blockCount()) lines.insert(line);
+            }
+            editor_->setDiagnosticLines(kind == OutputKind::Error ? lines : QSet<int>{});
+        }
     }
 
     void refreshPostFxRuntimeUi()
@@ -21404,7 +21659,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: 0.2 GDT/SSI preset + native APE reference geometry active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: GDT/SSI preset + native APE reference geometry active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }
@@ -21602,6 +21857,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QWidget* beginnerBuilderPanel_ = nullptr;
     QWidget* advancedEditorPage_ = nullptr;
     QSplitter* beginnerBodySplitter_ = nullptr;
+    QGroupBox* beginnerTargetGroup_ = nullptr;
+    QPushButton* beginnerExportButton_ = nullptr;
+    QToolBar* commandToolbar_ = nullptr;
     QToolButton* beginnerTargetButtons_[3]{};
     QLineEdit* beginnerProjectNameEdit_ = nullptr;
     QComboBox* beginnerPresetCombo_ = nullptr;
@@ -21724,6 +21982,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QWidget* findBar_ = nullptr;
     QLineEdit* findEdit_ = nullptr;
     QLabel* findCount_ = nullptr;
+    QLabel* editorPositionLabel_ = nullptr;
     QPushButton* backgroundColorButton_ = nullptr;
     QComboBox* lightingModeCombo_ = nullptr;
     QComboBox* lightingPresetCombo_ = nullptr;
@@ -21769,11 +22028,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QMap<int, QMap<QString, QString>> temporaryPreviewMappings_;
     bool temporaryPreviewValidationPassed_ = false;
     QString appVersion_ = "1.0.0"; // internal updater version, intentionally not shown in normal UI
-    QString displayVersion_ = "0.2";
+    QString displayVersion_ = "0.3";
     QString githubRepository_;
     QString updateAssetPrefix_ = "BO3_Shader_Studio_Update";
     QString defaultUpdateChannel_ = "stable";
     bool onlineUpdateCheckInProgress_ = false;
+    bool animationsEnabled_ = true;
+    QDialog* tutorialDialog_ = nullptr;
+    QWidget* tutorialHighlightedWidget_ = nullptr;
     QString currentTheme_ = "BO3 Dark";
     QString beginnerDepthPreviewSceneId_ = "shadows_of_evil";
     int beginnerDepthDebugView_ = 0;
@@ -21989,8 +22251,78 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         return result;
     }
 
+    // Fast 0.3 startup intro. It reflects the saved theme/accent and visible
+    // version while MainWindow performs its real initialization work; there is no
+    // fake progress bar or artificial delay.
+    QSettings startupSettings("OpenAI", "BO3HLSLPreviewer");
+    const QString startupTheme = startupSettings.value("ui/theme", "BO3 Dark").toString();
+    QString startupVersion = QStringLiteral("0.3");
+    for(const QString& candidate : {QDir(QCoreApplication::applicationDirPath()).filePath("version.json"),
+                                    QDir::current().filePath("version.json")})
+    {
+        QFile f(candidate);
+        if(f.open(QIODevice::ReadOnly))
+        {
+            const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+            const QString value = doc.object().value("displayVersion").toString().trimmed();
+            if(!value.isEmpty()) startupVersion = value;
+            break;
+        }
+    }
+    const QStringList startupLightThemes{
+        "Light", "Solarized Light", "Warm Paper", "Strawberry", "Sakura", "Mint Cream"
+    };
+    const bool lightSplash = startupLightThemes.contains(startupTheme);
+    QColor splashAccent(startupSettings.value("ui/accentColor").toString());
+    if(!splashAccent.isValid()) splashAccent = lightSplash ? QColor("#2F78B9") : QColor("#4D8FCC");
+    QPixmap splashPixmap(520, 238);
+    splashPixmap.fill(lightSplash ? QColor("#F7F9FB") : QColor("#12151A"));
+    {
+        QPainter painter(&splashPixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(QRect(0, 0, 6, splashPixmap.height()), splashAccent);
+        painter.setPen(lightSplash ? QColor("#1C252E") : QColor("#E3E8EF"));
+        QFont titleFont = painter.font(); titleFont.setPointSize(20); titleFont.setBold(true);
+        painter.setFont(titleFont);
+        painter.drawText(QRect(28, 44, 464, 44), Qt::AlignLeft | Qt::AlignVCenter, "BO3 SHADER STUDIO");
+        QFont subFont = painter.font(); subFont.setPointSize(10); subFont.setBold(false);
+        painter.setFont(subFont);
+        painter.setPen(lightSplash ? QColor("#5D6975") : QColor("#9DA8B5"));
+        painter.drawText(QRect(30, 96, 460, 28), Qt::AlignLeft | Qt::AlignVCenter,
+                         QString("Version %1   •   %2").arg(startupVersion, startupTheme));
+        painter.setPen(splashAccent);
+        painter.drawText(QRect(30, 166, 460, 28), Qt::AlignLeft | Qt::AlignVCenter, "Loading shaders and preview resources…");
+    }
+    QSplashScreen splash(splashPixmap);
+    splash.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    splash.show();
+    app.processEvents();
+
     MainWindow window;
+    splash.showMessage("Initializing preview…", Qt::AlignLeft | Qt::AlignBottom, splashAccent);
+    app.processEvents();
     window.show();
+
+    bool startupAnimations = startupSettings.value("ui/animationsEnabled", true).toBool();
+#ifdef _WIN32
+    BOOL clientAnimations = TRUE;
+    if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0) && !clientAnimations)
+        startupAnimations = false;
+#endif
+    if(startupAnimations)
+    {
+        auto* fade = new QPropertyAnimation(&splash, "windowOpacity", &splash);
+        fade->setDuration(140);
+        fade->setStartValue(1.0);
+        fade->setEndValue(0.0);
+        QObject::connect(fade, &QPropertyAnimation::finished, &splash, &QSplashScreen::close);
+        fade->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+    else
+    {
+        splash.close();
+    }
+
     const int result = app.exec();
     if (SUCCEEDED(com)) CoUninitialize();
     return result;

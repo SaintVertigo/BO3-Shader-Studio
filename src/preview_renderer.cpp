@@ -7067,7 +7067,7 @@ PS_OUT ps_main(VS_OUT i)
     bool environmentIsEXR_ = false;
     bool environmentAffectsLighting_ = true;
     bool fulbright_ = false;
-    MaterialPreviewProfile materialPreviewProfile_ = MaterialPreviewProfile::LookDev;
+    MaterialPreviewProfile materialPreviewProfile_ = MaterialPreviewProfile::ApeMatch;
     std::array<float, 3> lightColor_{1.0f, 1.0f, 1.0f};
     bool useExplicitLightColor_ = false;
     float environmentRotationDegrees_ = 0.0f;      // visible APE sky yaw
