@@ -1,6 +1,7 @@
 <RCC>
   <qresource prefix="/frontend">
     <file alias="Main.qml">../ui/qml/Main.qml</file>
+    <file alias="UtilityPanel.qml">../ui/qml/UtilityPanel.qml</file>
     <file alias="GlassSurface.qml">../ui/qml/GlassSurface.qml</file>
     <file alias="GlassButton.qml">../ui/qml/GlassButton.qml</file>
     <file alias="BeginnerRail.qml">../ui/qml/BeginnerRail.qml</file>

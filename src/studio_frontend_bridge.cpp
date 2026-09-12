@@ -1,6 +1,20 @@
 #include "studio_frontend_bridge.h"
 
-StudioFrontendBridge::StudioFrontendBridge(QObject* parent) : QObject(parent) {}
+void StudioFrontendBridge::showPanel(const QString& title, QWidget* panel)
+{
+    panelTitle_ = title;
+    panelModel_.setPanel(panel);
+    emit panelChanged();
+    emit panelOpenRequested();
+}
+
+StudioFrontendBridge::StudioFrontendBridge(QObject* parent) : QObject(parent)
+{
+    // QML reads selectedEffect.valid before the first Beginner project is
+    // published. Keep the property typed as a real bool from frame one instead
+    // of exposing an undefined QVariantMap entry during startup.
+    selectedEffect_.insert(QStringLiteral("valid"), false);
+}
 
 void StudioFrontendBridge::setNativeWindows(QWindow* hostWindow, QWindow* previewWindow, QWindow* advancedEditorWindow)
 {
@@ -62,7 +76,26 @@ void StudioFrontendBridge::setStatusText(const QString& text)
     emit statusChanged();
 }
 
+
+void StudioFrontendBridge::setPreviewState(bool camera3D, int meshIndex, const QString& meshName,
+                                           int apeLightingIndex, const QString& apeLightingName)
+{
+    const bool changed = previewCamera3D_ != camera3D || previewMeshIndex_ != meshIndex ||
+        previewMeshName_ != meshName || apeLightingIndex_ != apeLightingIndex ||
+        apeLightingName_ != apeLightingName;
+    previewCamera3D_ = camera3D;
+    previewMeshIndex_ = meshIndex;
+    previewMeshName_ = meshName;
+    apeLightingIndex_ = apeLightingIndex;
+    apeLightingName_ = apeLightingName;
+    if(changed) emit previewStateChanged();
+}
+
 void StudioFrontendBridge::requestMenu(const QString& menuName) { emit menuRequested(menuName); }
+void StudioFrontendBridge::requestAnimationsEnabled(bool enabled) { emit animationsEnabledRequested(enabled); }
+void StudioFrontendBridge::requestAccentColor() { emit accentColorRequested(); }
+void StudioFrontendBridge::requestResetAccent() { emit resetAccentRequested(); }
+void StudioFrontendBridge::requestKeybinds() { emit keybindsRequested(); }
 void StudioFrontendBridge::requestOpen() { emit openRequested(); }
 void StudioFrontendBridge::requestSave() { emit saveRequested(); }
 void StudioFrontendBridge::requestPreview() { emit previewRequested(); }
@@ -84,7 +117,10 @@ void StudioFrontendBridge::requestPreviewSettings() { emit previewSettingsReques
 void StudioFrontendBridge::requestFullPreview() { emit fullPreviewRequested(); }
 void StudioFrontendBridge::requestCamera3D(bool enabled) { emit camera3DRequested(enabled); }
 void StudioFrontendBridge::requestMesh(int index) { emit meshRequested(index); }
+void StudioFrontendBridge::requestApeLighting(int index) { emit apeLightingRequested(index); }
 void StudioFrontendBridge::requestBrowseEffects() { emit browseEffectsRequested(); }
 void StudioFrontendBridge::requestTutorialComplete() { emit tutorialCompleteRequested(); }
+void StudioFrontendBridge::requestClose() { emit closeRequested(); }
 void StudioFrontendBridge::showGettingStarted() { emit gettingStartedRequested(); }
 void StudioFrontendBridge::showEffectBrowser() { emit effectBrowserOpenRequested(); }
+void StudioFrontendBridge::showPreviewSettings() { emit previewSettingsOpenRequested(); }

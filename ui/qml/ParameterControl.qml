@@ -4,8 +4,11 @@ Item {
     id: root
     property var parameterData
     property string effectInstanceId: ""
+    onEffectInstanceIdChanged: colorEditor.pickerOpen = false
     width: parent ? parent.width : 320
-    height: parameterData && parameterData.kind === "float" ? 74 : 66
+    height: parameterData && parameterData.kind === "float" ? 74
+          : parameterData && parameterData.kind === "color" ? colorEditor.height + 28
+          : 66
 
     Text {
         id: title
@@ -79,7 +82,8 @@ Item {
                 var t = Math.max(0, Math.min(1, px / Math.max(1, width)))
                 var raw = parameterData.minimum + t * (parameterData.maximum - parameterData.minimum)
                 var step = Math.max(0.000001, parameterData.step)
-                var snapped = Math.round(raw / step) * step
+                var snapped = Math.max(parameterData.minimum, Math.min(parameterData.maximum,
+                    parameterData.minimum + Math.round((raw - parameterData.minimum) / step) * step))
                 frontend.requestParameterValue(parameterData.key, snapped)
             }
             onPressed: apply(mouseX)
@@ -87,39 +91,17 @@ Item {
         }
     }
 
-    Rectangle {
+    ColorField {
+        id: colorEditor
         visible: parameterData && parameterData.kind === "color"
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: title.bottom
-        anchors.topMargin: 10
-        height: 34
-        radius: 9
-        color: Qt.rgba(frontend.baseColor.r, frontend.baseColor.g, frontend.baseColor.b, 0.72)
-        border.width: 1
-        border.color: Qt.rgba(frontend.textColor.r, frontend.textColor.g, frontend.textColor.b, 0.12)
-        Rectangle {
-            anchors.left: parent.left
-            anchors.leftMargin: 7
-            anchors.verticalCenter: parent.verticalCenter
-            width: 22; height: 22; radius: 6
-            color: parameterData ? parameterData.color : "white"
-            border.width: 1
-            border.color: Qt.rgba(1,1,1,0.28)
-        }
-        TextInput {
-            id: colorInput
-            anchors.left: parent.left
-            anchors.leftMargin: 38
-            anchors.right: parent.right
-            anchors.rightMargin: 9
-            anchors.verticalCenter: parent.verticalCenter
-            text: parameterData ? String(parameterData.color) : "#ffffff"
-            color: frontend.textColor
-            selectByMouse: true
-            font.pixelSize: 12
-            onEditingFinished: frontend.requestParameterColor(parameterData.key, text)
-        }
+        anchors.topMargin: 7
+        showLabel: false
+        parameterMode: true
+        parameterKey: parameterData ? parameterData.key : ""
+        value: parameterData && parameterData.color ? parameterData.color : "#ffffff"
     }
 
     Rectangle {
@@ -137,7 +119,7 @@ Item {
             anchors.left: parent.left
             anchors.leftMargin: 11
             anchors.verticalCenter: parent.verticalCenter
-            text: parameterData && parameterData.choices.length ? parameterData.choices[parameterData.choiceIndex] : ""
+            text: parameterData && parameterData.choices && parameterData.choices.length ? parameterData.choices[parameterData.choiceIndex] : ""
             color: frontend.textColor
             font.pixelSize: 12
         }

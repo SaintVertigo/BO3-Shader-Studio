@@ -1,4 +1,4 @@
-QT += widgets network qml quick quickwidgets
+QT += widgets network qml quick quickcontrols2
 CONFIG += c++17 release windows
 CONFIG -= debug debug_and_release
 TEMPLATE = app
@@ -28,6 +28,7 @@ SOURCES += src/main.cpp \
            src/bo3_techset_writer.cpp \
            src/shadertoy_project.cpp \
            src/studio_frontend_bridge.cpp \
+           src/studio_panel_model.cpp \
            third_party/tinyexr/miniz.c
 
 INCLUDEPATH += $$PWD/third_party/tinyexr
@@ -54,6 +55,7 @@ HEADERS += src/github_update.h \
            src/bo3_techset_writer.h \
            src/shadertoy_project.h \
            src/studio_frontend_bridge.h \
+           src/studio_panel_model.h \
            third_party/tinyexr/tinyexr.h \
            third_party/tinyexr/miniz.h
 
@@ -73,7 +75,7 @@ contains(CONFIG, bo3_sccache) {
     QMAKE_CXX = sccache $$QMAKE_CXX
 }
 
-LIBS += d3d11.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib user32.lib windowsapp.lib
+LIBS += d3d11.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib user32.lib gdi32.lib windowsapp.lib
 
 DESTDIR = $$PWD/dist
 OBJECTS_DIR = $$PWD/build_qt/obj

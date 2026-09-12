@@ -32,7 +32,7 @@ if (-not $qmake) { throw 'qmake.exe was not found on PATH or under QT_ROOT_DIR\\
 Write-Host "Deploying Qt runtime with: $windeploy"
 $qmlDir = Join-Path $root 'ui\qml'
 if (-not (Test-Path -LiteralPath $qmlDir)) { throw "QML source directory not found: $qmlDir" }
-& $windeploy --release --force --no-translations --compiler-runtime --qmldir $qmlDir --dir $dist $exe
+& $windeploy --release --no-translations --compiler-runtime --qmldir $qmlDir --dir $dist $exe
 if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
 
 # The user's known-good portable build contains the complete runtime/plugin set
@@ -70,7 +70,6 @@ $qtDlls = @(
     'Qt6QmlModels.dll',
     'Qt6QmlWorkerScript.dll',
     'Qt6Quick.dll',
-    'Qt6QuickWidgets.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll'
 )
@@ -237,7 +236,6 @@ $required = @(
     'Qt6QmlModels.dll',
     'Qt6QmlWorkerScript.dll',
     'Qt6Quick.dll',
-    'Qt6QuickWidgets.dll',
     'Qt6Svg.dll',
     'Qt6Widgets.dll',
     'd3dcompiler_47.dll',
@@ -266,7 +264,7 @@ if ($missing.Count -gt 0) {
 # them under a qml\ prefix or directly below dist depending on the Qt tool build.
 $qmlModuleDescriptors = @(Get-ChildItem -LiteralPath $dist -Filter 'qmldir' -File -Recurse -ErrorAction SilentlyContinue)
 $qmlDescriptorPaths = @($qmlModuleDescriptors | ForEach-Object { $_.FullName.Replace('/','\') })
-$requiredQmlModules = @('QtQuick', 'QtQml')
+$requiredQmlModules = @('QtQuick', 'QtQuick\Controls', 'QtQuick\Controls\Basic', 'QtQml')
 $missingQmlModules = @()
 foreach ($module in $requiredQmlModules) {
     $needle = '\' + $module + '\qmldir'

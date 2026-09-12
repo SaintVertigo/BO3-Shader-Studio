@@ -78,12 +78,12 @@
 #include <QProcess>
 #include <QProgressDialog>
 #include <QPropertyAnimation>
-#include <QQuickView>
-#include <QQuickWidget>
 #include <QQuickWindow>
+#include <QQuickStyle>
 #include <QSGRendererInterface>
-#include <QQuickItem>
 #include <QQmlContext>
+#include <QQmlApplicationEngine>
+#include <QQmlEngine>
 #include <QQmlError>
 #include <QCursor>
 #include <QWindow>
@@ -216,14 +216,14 @@ const wchar_t* StudioStartupPhaseName(LONG phase)
     {
         case 1: return L"process start";
         case 2: return L"QApplication ready";
-        case 3: return L"MainWindow construction";
-        case 4: return L"QML frontend activation";
-        case 5: return L"QML component ready";
-        case 6: return L"hybrid frontend installed";
-        case 7: return L"main window shown";
-        case 8: return L"preview initialization";
-        case 9: return L"preview initialized";
-        case 10: return L"native preview attached";
+        case 3: return L"pure QML top-level loading";
+        case 4: return L"pure QML first frame presented";
+        case 5: return L"hidden backend construction";
+        case 6: return L"pure QML/backend bridge attach";
+        case 7: return L"pure QML frontend active";
+        case 8: return L"native preview initialization";
+        case 9: return L"native preview initialized";
+        case 10: return L"WindowContainer surfaces published";
         case 11: return L"event loop stable";
         default: return L"unknown";
     }
@@ -330,8 +330,8 @@ std::mutex gStudioQtMessageMutex;
 void StudioQtMessageHandler(QtMsgType type, const QMessageLogContext& context, const QString& message)
 {
     // SEH/minidump handling cannot see every Qt fatal/abort path. Keep a second,
-    // very small diagnostic stream so a platform/plugin/scene-graph fatal that
-    // occurs during QWidget::show() is not silent.
+    // very small diagnostic stream so a platform/plugin/scene-graph failure in
+    // either the pure QML shell or native preview integration is not silent.
     const char* level = "DEBUG";
     switch(type)
     {
@@ -455,76 +455,6 @@ void WriteCliOutput(const QString& text)
 // QML resources are local, so they normally resolve synchronously. Still wait a
 // short bounded interval for the view to leave Loading so startup diagnostics do
 // not mistake an in-flight component for a valid front end.
-bool WaitForQuickFrontendLoad(QQuickView* quickView, QStringList* errorsOut = nullptr)
-{
-    if(!quickView) return false;
-
-    if(quickView->status() == QQuickView::Loading)
-    {
-        QEventLoop loop;
-        QTimer timeout;
-        timeout.setSingleShot(true);
-        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-        QObject::connect(quickView, &QQuickView::statusChanged, &loop,
-                         [&loop](QQuickView::Status status)
-        {
-            if(status != QQuickView::Loading) loop.quit();
-        });
-        timeout.start(3000);
-        loop.exec();
-    }
-
-    if(errorsOut)
-    {
-        errorsOut->clear();
-        for(const QQmlError& error : quickView->errors())
-            errorsOut->append(error.toString());
-        if(quickView->status() == QQuickView::Loading)
-            errorsOut->append(QStringLiteral("Timed out while loading qrc:/frontend/Main.qml"));
-        if(!quickView->rootObject())
-            errorsOut->append(QStringLiteral("QQuickView did not create a root QML object."));
-    }
-
-    return quickView->status() == QQuickView::Ready && quickView->rootObject() != nullptr;
-}
-
-// QQuickWidget is the stable integration path for the redesigned shell.  It
-// behaves as a real QWidget, which lets the existing native Direct3D preview
-// remain a sibling widget instead of being reparented through nested native
-// WindowContainer hierarchies.
-bool WaitForQuickFrontendLoad(QQuickWidget* quickWidget, QStringList* errorsOut = nullptr)
-{
-    if(!quickWidget) return false;
-
-    if(quickWidget->status() == QQuickWidget::Loading)
-    {
-        QEventLoop loop;
-        QTimer timeout;
-        timeout.setSingleShot(true);
-        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-        QObject::connect(quickWidget, &QQuickWidget::statusChanged, &loop,
-                         [&loop](QQuickWidget::Status status)
-        {
-            if(status != QQuickWidget::Loading) loop.quit();
-        });
-        timeout.start(3000);
-        loop.exec();
-    }
-
-    if(errorsOut)
-    {
-        errorsOut->clear();
-        for(const QQmlError& error : quickWidget->errors())
-            errorsOut->append(error.toString());
-        if(quickWidget->status() == QQuickWidget::Loading)
-            errorsOut->append(QStringLiteral("Timed out while loading qrc:/frontend/Main.qml"));
-        if(!quickWidget->rootObject())
-            errorsOut->append(QStringLiteral("QQuickWidget did not create a root QML object."));
-    }
-
-    return quickWidget->status() == QQuickWidget::Ready && quickWidget->rootObject() != nullptr;
-}
-
 QString WriteQmlFrontendStartupLog(const QStringList& errors)
 {
     // Keep startup diagnostics beside the portable executable so a user can zip
@@ -543,6 +473,99 @@ QString WriteQmlFrontendStartupLog(const QStringList& errors)
         file.commit();
     }
     return path;
+}
+
+
+QQuickWindow* LoadPureQmlFrontend(QQmlApplicationEngine& engine,
+                                  StudioFrontendBridge& bridge,
+                                  QStringList* errorsOut = nullptr)
+{
+    QStringList warnings;
+    const QMetaObject::Connection warningConnection = QObject::connect(
+        &engine, &QQmlEngine::warnings, &engine,
+        [&warnings](const QList<QQmlError>& errors)
+        {
+            for(const QQmlError& error : errors)
+                warnings.append(error.toString());
+        });
+
+    engine.rootContext()->setContextProperty(QStringLiteral("frontend"), &bridge);
+    engine.load(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
+    QObject::disconnect(warningConnection);
+
+    if(errorsOut)
+        *errorsOut = warnings;
+
+    const QList<QObject*> roots = engine.rootObjects();
+    if(roots.isEmpty())
+    {
+        if(errorsOut) errorsOut->append(QStringLiteral("Main.qml did not create a root object."));
+        return nullptr;
+    }
+
+    auto* window = qobject_cast<QQuickWindow*>(roots.constFirst());
+    if(!window)
+    {
+        if(errorsOut)
+            errorsOut->append(QStringLiteral("Main.qml root is not a QQuickWindow. The pure frontend requires a top-level Window."));
+        return nullptr;
+    }
+
+    bridge.setNativeWindows(window, nullptr, nullptr);
+    return window;
+}
+
+bool WaitForPureQmlFirstFrame(QQuickWindow* window,
+                              int timeoutMs,
+                              QString* errorOut = nullptr)
+{
+    if(!window)
+    {
+        if(errorOut) *errorOut = QStringLiteral("No QQuickWindow was created.");
+        return false;
+    }
+
+    bool framePresented = false;
+    QString sceneGraphError;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+
+    const QMetaObject::Connection frameConnection = QObject::connect(
+        window, &QQuickWindow::frameSwapped, &loop,
+        [&]
+        {
+            framePresented = true;
+            loop.quit();
+        }, Qt::QueuedConnection);
+    const QMetaObject::Connection errorConnection = QObject::connect(
+        window, &QQuickWindow::sceneGraphError, &loop,
+        [&](QQuickWindow::SceneGraphError error, const QString& message)
+        {
+            sceneGraphError = QStringLiteral("Qt Quick scene graph error %1: %2")
+                .arg(static_cast<int>(error)).arg(message);
+            loop.quit();
+        }, Qt::QueuedConnection);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    timeout.start(std::max(1000, timeoutMs));
+    window->show();
+    loop.exec();
+
+    QObject::disconnect(frameConnection);
+    QObject::disconnect(errorConnection);
+
+    if(!framePresented)
+    {
+        if(errorOut)
+            *errorOut = !sceneGraphError.isEmpty()
+                ? sceneGraphError
+                : QStringLiteral("The pure QML top-level window did not present a frame within %1 ms.").arg(timeoutMs);
+        return false;
+    }
+
+    if(errorOut) errorOut->clear();
+    return true;
 }
 
 std::wstring DeduplicateCompilerDiagnostics(const std::wstring& text)
@@ -1167,35 +1190,27 @@ public:
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
 
-        // Resizing a D3D11 swapchain also rebuilds the GBuffer/depth targets.
-        // Throttle native resize work to roughly one update per display frame
-        // instead of waiting until a splitter drag ends. The old trailing
-        // debounce left newly exposed native-window pixels stale on Windows,
-        // producing repeated/ghosted strips of the Qt UI beside Preview.
-        resizeTimer_.setSingleShot(true);
-        resizeTimer_.setInterval(16);
-        connect(&resizeTimer_, &QTimer::timeout, this, [this]{
-            syncNativeSize();
-            if(initialized_) renderer_.Render();
-        });
-
+        // Coalesce native geometry at the render boundary. A trailing debounce
+        // stretches an old backbuffer throughout a drag and distorts the camera.
+        // No QWidget geometry writes occur here: WindowContainer owns geometry.
         frameTimer_.setInterval(16);
         frameTimer_.setTimerType(Qt::PreciseTimer);
         connect(&frameTimer_, &QTimer::timeout, this, [this]{
-            if (initialized_ && window() && window()->isVisible() && !resizeTimer_.isActive())
-                renderer_.Render();
+            // WindowContainer controls the backing QWindow's visibility directly.
+            // QWidget::isVisible() can remain true while the embedded native
+            // child is hidden, so key rendering off the actual QWindow instead.
+            QWindow* nativeWindow = windowHandle();
+            if (initialized_ && nativeWindow && nativeWindow->isVisible())
+                renderNow();
         });
         frameTimer_.start();
     }
 
     QPaintEngine* paintEngine() const override
     {
-        // Before the deferred native/D3D transition, remain an ordinary QWidget
-        // so the first QML top-level show uses Qt's normal backing-store path.
-        // Once WA_PaintOnScreen is enabled the widget is owned by Direct3D and
-        // must not expose a Qt paint engine.
-        if(testAttribute(Qt::WA_PaintOnScreen)) return nullptr;
-        return QWidget::paintEngine();
+        // This widget never draws through Qt's raster paint engine. Native HWND
+        // creation is still deferred to ensureInitialized after the QML frame.
+        return nullptr;
     }
 
     bool ensureInitialized(QString& error)
@@ -1207,10 +1222,10 @@ public:
         // force native windows (and, without WA_DontCreateNativeAncestors, their
         // ancestors too). The guard is deliberately set first.
         setAttribute(Qt::WA_DontCreateNativeAncestors, true);
-        setAttribute(Qt::WA_NativeWindow, true);
-        setAttribute(Qt::WA_PaintOnScreen, true);
         setAttribute(Qt::WA_NoSystemBackground, true);
         setAttribute(Qt::WA_OpaquePaintEvent, true);
+        setAttribute(Qt::WA_PaintOnScreen, true);
+        setAttribute(Qt::WA_NativeWindow, true);
 
         HWND hwnd = reinterpret_cast<HWND>(winId());
         std::wstring nativeError;
@@ -1239,8 +1254,9 @@ public:
     // preview pixels are refreshed before the overlay is shown at its new size.
     void renderNow()
     {
-        if (initialized_ && !resizeTimer_.isActive())
-            renderer_.Render();
+        if (!initialized_) return;
+        syncNativeSize();
+        renderer_.Render();
     }
 
     void setCameraInteractionEnabled(bool enabled)
@@ -1267,6 +1283,16 @@ public:
     }
 
     bool cameraInteractionEnabled() const { return cameraInteractionEnabled_; }
+
+    // Qt Quick WindowContainer owns the backing QWindow geometry. Do not call
+    // QWidget::resize() in response to QWindow size signals: on Windows that
+    // creates a QWidgetWindow <-> WindowContainer geometry feedback loop. Update
+    // clipping only when rendering the next frame at the current native size.
+    void syncEmbeddedWindowSize()
+    {
+        if (!initialized_) return;
+        update();
+    }
 
     void setCameraChangedCallback(std::function<void()> callback)
     {
@@ -1318,6 +1344,7 @@ protected:
         ensureInitialized(ignored);
         if (initialized_)
         {
+            syncNativeClip();
             syncNativeSize();
             renderer_.Render();
         }
@@ -1325,12 +1352,11 @@ protected:
     void resizeEvent(QResizeEvent* event) override
     {
         QWidget::resizeEvent(event);
-        // Start only when idle: this turns the single-shot timer into a
-        // 16 ms throttle during continuous dock/splitter drags. Restarting it
-        // on every resize event would recreate the old end-of-drag debounce.
-        if (initialized_ && !resizeTimer_.isActive()) resizeTimer_.start();
+        if (!initialized_) return;
+        // The frame pump reads the final HWND size once per frame.
+        update();
     }
-    void paintEvent(QPaintEvent*) override { if (initialized_ && !resizeTimer_.isActive()) renderer_.Render(); }
+    void paintEvent(QPaintEvent*) override { renderNow(); }
 
     void mousePressEvent(QMouseEvent* event) override
     {
@@ -1504,19 +1530,42 @@ protected:
     }
 
 private:
+    void syncNativeClip()
+    {
+#ifdef _WIN32
+        if (!initialized_) return;
+        HWND hwnd = reinterpret_cast<HWND>(winId());
+        if (!hwnd) return;
+        RECT rc{};
+        if (!GetClientRect(hwnd, &rc)) return;
+        const int w = std::max<LONG>(1, rc.right - rc.left);
+        const int h = std::max<LONG>(1, rc.bottom - rc.top);
+        const QSize clipSize(w, h);
+        if (nativeClipSize_ == clipSize) return;
+        const int radius = std::max(10, static_cast<int>(std::lround(14.0 * devicePixelRatioF())));
+        HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, radius * 2, radius * 2);
+        if (!region) return;
+        // On success Windows owns the region handle; on failure we must release it.
+        if (SetWindowRgn(hwnd, region, FALSE) == 0) DeleteObject(region);
+        else nativeClipSize_ = clipSize;
+#endif
+    }
+
     void syncNativeSize()
     {
         if (!initialized_) return;
+        HWND hwnd = reinterpret_cast<HWND>(winId());
         RECT rc{};
-        if (!GetClientRect(reinterpret_cast<HWND>(winId()), &rc)) return;
+        if (!GetClientRect(hwnd, &rc)) return;
         const UINT w = static_cast<UINT>(std::max<LONG>(1, rc.right - rc.left));
         const UINT h = static_cast<UINT>(std::max<LONG>(1, rc.bottom - rc.top));
+        syncNativeClip();
         renderer_.Resize(w, h);
     }
 
+    QSize nativeClipSize_;
     PreviewRenderer renderer_;
     QTimer frameTimer_;
-    QTimer resizeTimer_;
     bool initialized_ = false;
     bool cameraInteractionEnabled_ = false;
     bool cameraDragging_ = false;
@@ -1588,7 +1637,8 @@ protected:
 class MainWindow final : public QMainWindow
 {
 public:
-    explicit MainWindow(bool headless = false)
+    explicit MainWindow(bool headless = false, bool externalQmlFrontend = false)
+        : externalQmlFrontend_(externalQmlFrontend)
     {
         loadAppMetadata();
         if (headless) return;
@@ -1610,19 +1660,10 @@ public:
             const bool beginnerMode = uiSettings.value("ui/experienceMode", "Beginner").toString() != "Advanced";
             setUiExperienceMode(beginnerMode, false);
         }
-        // 0.3 front-end rewrite: keep the proven QWidget/D3D backend alive, but
-        // move the visible shell to Qt Quick/QML. Set BO3_STUDIO_LEGACY_UI=1 to
-        // recover the classic front end if a machine-specific Qt Quick issue is
-        // encountered while the migration is still being proven.
-        if(!qEnvironmentVariableIsSet("BO3_STUDIO_LEGACY_UI"))
-        {
-            SetStudioStartupPhase(4);
-            AppendStudioStartupTrace(QStringLiteral("Activating Qt Quick front end"));
-            const bool qmlActivated = activateQmlFrontend();
-            AppendStudioStartupTrace(qmlActivated
-                ? QStringLiteral("Qt Quick front end activated")
-                : QStringLiteral("Qt Quick front end failed; legacy recovery UI retained"));
-        }
+        // The visible 0.3 frontend is now a real top-level QQuickWindow created
+        // by RunBo3ShaderStudio.  MainWindow is either the hidden backend for
+        // that frontend (externalQmlFrontend_ == true) or the explicit legacy
+        // recovery UI.  It never embeds Qt Quick inside QWidget anymore.
         loadPreviewDefaults();
         updateGBufferUi();
         refreshMaterialTextureUi();
@@ -1633,7 +1674,7 @@ public:
         // deliberately delayed D3D startup gate below had a chance to run.
         // Keep the legacy QWidget startup behavior unchanged, but defer the
         // QML frontend's lighting reset until after explicit D3D initialization.
-        if(!qmlFrontendActive_)
+        if(!externalQmlFrontend_)
             resetLightingControls();
         else
             AppendStudioStartupTrace(QStringLiteral("APE lighting defaults deferred until after Direct3D/native-surface readiness"));
@@ -1667,98 +1708,248 @@ public:
             }
         });
 
-        // QML and the native D3D11 preview both create graphics resources on the
-        // first visible event-loop turns. Starting both at exactly the same time
-        // made Windows exits possible before Qt could surface an error. Let the
-        // Qt Quick shell establish itself first, then initialize the proven D3D
-        // preview on a separate turn. Legacy UI keeps its original immediate path.
-        const int previewStartupDelayMs = qmlFrontendActive_ ? 500 : 0;
-        QTimer::singleShot(previewStartupDelayMs, this, [this]{
-            // The QML-only shell has survived the first visible event-loop turns.
-            // It is now safe to expose the real QWidget host window to QML dialogs
-            // and to reparent the native/editor surfaces into the hybrid root.
-            if(qmlFrontendActive_)
-            {
-                if(qmlFrontendBridge_)
+        // In explicit legacy-recovery mode this QWidget is the visible shell, so
+        // keep the proven native preview startup path.  The normal 0.3 path uses
+        // initializePureQmlNativeSurfaces() only after the independent QML
+        // top-level window has presented its first frame.
+        if(!externalQmlFrontend_)
+        {
+            QTimer::singleShot(0, this, [this]{
+                QString error;
+                if (!preview_->ensureInitialized(error))
                 {
-                    QWindow* host = windowHandle();
-                    if(!host)
-                    {
-                        // Safe now: the top-level widget has already been shown.
-                        // Force a handle only on this post-show event-loop turn.
-                        winId();
-                        host = windowHandle();
-                    }
-                    if(qmlFrontendBridge_->hostWindow() != host)
-                    {
-                        qmlFrontendBridge_->setNativeWindows(host, nullptr, nullptr);
-                        AppendStudioStartupTrace(QStringLiteral("QML host window published after top-level show"));
-                    }
+                    if(!error.isEmpty()) QMessageBox::critical(this, "DirectX initialization failed", error);
+                    return;
                 }
-                prepareQmlNativeSurfaceWidgets();
-            }
-
-            SetStudioStartupPhase(8);
-            AppendStudioStartupTrace(QStringLiteral("Initializing Direct3D preview"));
-            QString error;
-            if (!preview_->ensureInitialized(error))
-            {
-                qmlNativeSurfacesReady_ = false;
-                AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialization FAILED: %1").arg(error));
-                if(!error.isEmpty()) QMessageBox::critical(this, "DirectX initialization failed", error);
-                return;
-            }
-            SetStudioStartupPhase(9);
-            AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized"));
-            if(qmlFrontendActive_)
-            {
-                // D3D is the only hard dependency for exposing the native preview.
-                // Do NOT hold the entire front end hostage while APE loads HDR
-                // assets or probes the user's BO3 installation. On CI that work
-                // took ~11 seconds, and on a fresh machine it could also open a
-                // hidden native folder picker during startup.
-                qmlNativeSurfacesReady_ = true;
-                syncQmlFrontendUiState();
-                syncQmlFrontendPalette();
-                syncQmlFrontendProject();
-                syncQmlNativeSurfaces();
-                SetStudioStartupPhase(10);
-                AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached immediately after Direct3D initialization"));
-
-                // Apply APE's authored lighting after the shell is already live.
-                // This startup pass is deliberately non-interactive: if no BO3
-                // root is configured, keep the calibrated fallback environment
-                // instead of blocking behind QFileDialog. Explicit APE actions
-                // later still use the normal interactive asset prompt.
-                QTimer::singleShot(150, this, [this]{
-                    const PreviewMode startupMode = preview_->renderer().GetPreviewMode();
-                    const bool materialMode = startupMode == PreviewMode::ForwardMaterial ||
-                                              startupMode == PreviewMode::DeferredGBuffer;
-                    if(materialMode && preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
-                    {
-                        AppendStudioStartupTrace(QStringLiteral("Applying deferred non-interactive APE lighting defaults"));
-                        resetLightingControls(false);
-                        AppendStudioStartupTrace(QStringLiteral("Deferred APE lighting defaults complete"));
-                    }
-                    else
-                    {
-                        AppendStudioStartupTrace(QStringLiteral("Deferred APE lighting startup skipped for non-material preview"));
-                    }
-                });
-            }
-            if(beginnerUiMode_)
-                startBeginnerProject(beginner::Target::PostFx, false);
-            else
-                openBundledSample();
-        });
+                if(beginnerUiMode_)
+                    startBeginnerProject(beginner::Target::PostFx, false);
+                else
+                    openBundledSample();
+            });
+        }
         QTimer::singleShot(650, this, [this]{ showGettingStarted(false); });
         if (automaticUpdateChecksEnabled())
             QTimer::singleShot(2500, this, [this]{ checkForOnlineUpdates(false); });
     }
 
+    ~MainWindow() override
+    {
+        // In the pure-QML frontend the preview/editor widgets are intentionally
+        // detached from this hidden QMainWindow so their backing QWindows can be
+        // owned geometrically by QML WindowContainer. Destroy the detached
+        // widgets explicitly after the QML engine/window has already gone away.
+        if(externalQmlFrontend_)
+        {
+            AppendStudioStartupTrace(QStringLiteral("Destroying detached backend widgets"));
+            if(preview_ && preview_->parent() == nullptr)
+            {
+                preview_->hide();
+                AppendStudioStartupTrace(QStringLiteral("Destroying preview widget"));
+                delete preview_;
+                AppendStudioStartupTrace(QStringLiteral("Preview widget destroyed"));
+                preview_ = nullptr;
+            }
+            if(advancedEditorPage_ && advancedEditorPage_->parent() == nullptr)
+            {
+                // QSyntaxHighlighter is both held by unique_ptr and parented to
+                // the editor document. Release it before deleting that document;
+                // otherwise the member destructor double-deletes it on shutdown.
+                highlighter_.reset();
+                advancedEditorPage_->hide();
+                AppendStudioStartupTrace(QStringLiteral("Destroying editor widget"));
+                delete advancedEditorPage_;
+                AppendStudioStartupTrace(QStringLiteral("Editor widget destroyed"));
+                advancedEditorPage_ = nullptr;
+                editor_ = nullptr;
+            }
+        }
+    }
+
+    bool attachPureQmlFrontend(StudioFrontendBridge* bridge, QQuickWindow* hostWindow)
+    {
+        if(!bridge || !hostWindow || !externalQmlFrontend_)
+            return false;
+
+        qmlFrontendBridge_ = bridge;
+        qmlPureHostWindow_ = hostWindow;
+        qmlFrontendActive_ = true;
+        qmlNativeSurfacesReady_ = false;
+        bridge->setNativeWindows(hostWindow, nullptr, nullptr);
+
+        // Wire the top-level QML shell to the existing, proven C++ backend. The
+        // backend QMainWindow is never shown in this mode; it is only the owner of
+        // project, compiler, exporter, menu/action, and editor state.
+        connect(bridge, &StudioFrontendBridge::panelRequested, this, [this](const QString& title){ showQmlPanel(title); });
+        connect(bridge, &StudioFrontendBridge::menuRequested, this, [this](const QString& name){ popupQmlMenu(name); });
+        connect(bridge, &StudioFrontendBridge::animationsEnabledRequested, this, [this](bool enabled){
+            animationsEnabled_ = enabled;
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.setValue("ui/animationsEnabled", enabled);
+            setAnimated(effectiveAnimationsEnabled());
+            syncQmlFrontendUiState();
+        });
+        connect(bridge, &StudioFrontendBridge::accentColorRequested, this, [this]{
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            QColor current(settings.value("ui/accentColor").toString());
+            if(!current.isValid()) current = palette().color(QPalette::Highlight);
+            const QColor chosen = QColorDialog::getColor(current, nullptr, QStringLiteral("Accent Color"));
+            if(!chosen.isValid()) return;
+            settings.setValue("ui/accentColor", chosen.name(QColor::HexRgb));
+            applyTheme(currentTheme_);
+            syncQmlFrontendUiState();
+        });
+        connect(bridge, &StudioFrontendBridge::resetAccentRequested, this, [this]{
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.remove("ui/accentColor");
+            applyTheme(currentTheme_);
+            syncQmlFrontendUiState();
+        });
+        connect(bridge, &StudioFrontendBridge::keybindsRequested, this, [this]{ showKeybindDialog(); });
+        connect(bridge, &StudioFrontendBridge::openRequested, this, [this]{ openShaderDialog(); });
+        connect(bridge, &StudioFrontendBridge::saveRequested, this, [this]{ saveCurrentDocument(); });
+        connect(bridge, &StudioFrontendBridge::previewRequested, this, [this]{ compileEditor(); });
+        connect(bridge, &StudioFrontendBridge::exportRequested, this, [this]{ exportToBO3(); });
+        connect(bridge, &StudioFrontendBridge::modeRequested, this, [this](bool beginner){ setUiExperienceMode(beginner); });
+        connect(bridge, &StudioFrontendBridge::targetRequested, this, [this](int targetIndex){
+            const int safe = qBound(0, targetIndex, 2);
+            const beginner::Target target = static_cast<beginner::Target>(safe);
+            if(!beginnerProjectActive_) startBeginnerProject(target, true);
+            else switchBeginnerTarget(target);
+            setUiExperienceMode(true);
+            syncQmlFrontendProject();
+            syncQmlFrontendPreviewState();
+        });
+        connect(bridge, &StudioFrontendBridge::projectNameRequested, this, [this](const QString& name){ setQmlProjectName(name); });
+        connect(bridge, &StudioFrontendBridge::applyPresetRequested, this, [this](const QString& presetId){
+            applyBeginnerPreset(presetId);
+            syncQmlFrontendProject();
+        });
+        connect(bridge, &StudioFrontendBridge::baseColorRequested, this, [this](const QString& key, const QColor& color){
+            setQmlBaseColor(key, color);
+        });
+        connect(bridge, &StudioFrontendBridge::addEffectRequested, this, [this](const QString& typeId){
+            addBeginnerEffect(typeId);
+            syncQmlFrontendProject();
+        });
+        connect(bridge, &StudioFrontendBridge::selectEffectRequested, this, [this](int index){
+            if(!beginnerEffectList_) return;
+            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
+            rebuildBeginnerEffectParameters();
+            syncQmlFrontendProject();
+        });
+        connect(bridge, &StudioFrontendBridge::removeEffectRequested, this, [this](int index){
+            if(!beginnerEffectList_) return;
+            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
+            removeSelectedBeginnerEffect();
+            syncQmlFrontendProject();
+        });
+        connect(bridge, &StudioFrontendBridge::moveEffectRequested, this, [this](int index, int delta){
+            if(!beginnerEffectList_) return;
+            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
+            moveSelectedBeginnerEffect(delta);
+            syncQmlFrontendProject();
+        });
+        connect(bridge, &StudioFrontendBridge::effectEnabledRequested, this, [this](int index, bool enabled){ setQmlEffectEnabled(index, enabled); });
+        connect(bridge, &StudioFrontendBridge::parameterValueRequested, this, [this](const QString& key, const QVariant& value){ setQmlParameterValue(key, value); });
+        connect(bridge, &StudioFrontendBridge::parameterColorRequested, this, [this](const QString& key, const QColor& color){ setQmlParameterColor(key, color); });
+        connect(bridge, &StudioFrontendBridge::resetPreviewRequested, this, [this]{ resetPreviewView(); syncQmlFrontendPreviewState(); });
+        connect(bridge, &StudioFrontendBridge::previewSettingsRequested, this, [this]{
+            showQmlPanel(QStringLiteral("Preview Settings"));
+        });
+        connect(bridge, &StudioFrontendBridge::fullPreviewRequested, this, [this]{
+            emit qmlFrontendBridge_->fullPreviewToggleRequested();
+        });
+        connect(bridge, &StudioFrontendBridge::camera3DRequested, this, [this](bool enabled){
+            if(beginnerUiMode_ && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::Sky)
+                beginnerSky3DView_ = enabled;
+            else
+                cameraUserOverride_ = true;
+            if(camera3D_) { QSignalBlocker blocker(camera3D_); camera3D_->setChecked(enabled); }
+            if(preview_) preview_->setCameraInteractionEnabled(enabled);
+            updateCameraUi();
+            if(preview_) preview_->renderNow();
+            syncQmlFrontendPreviewState();
+        });
+        connect(bridge, &StudioFrontendBridge::meshRequested, this, [this](int index){
+            if(!meshCombo_) return;
+            meshCombo_->setCurrentIndex(qBound(0, index, meshCombo_->count() - 1));
+            syncQmlFrontendPreviewState();
+        });
+        connect(bridge, &StudioFrontendBridge::apeLightingRequested, this, [this](int index){
+            applyApeLightingPreset(qBound(0, index, 3));
+            syncQmlFrontendPreviewState();
+        });
+        connect(bridge, &StudioFrontendBridge::browseEffectsRequested, this, [this, bridge]{ bridge->showEffectBrowser(); });
+        connect(bridge, &StudioFrontendBridge::tutorialCompleteRequested, this, []{
+            QSettings settings("OpenAI", "BO3HLSLPreviewer");
+            settings.setValue("ui/gettingStartedComplete", true);
+        });
+        connect(bridge, &StudioFrontendBridge::closeRequested, this, [this, bridge]{
+            if(maybeSave()) {
+                frontendCloseApproved_ = true;
+                saveWorkspace();
+                emit bridge->closeApproved();
+            }
+        });
+        connect(statusBar(), &QStatusBar::messageChanged, bridge, &StudioFrontendBridge::setStatusText);
+
+        syncQmlFrontendUiState();
+        syncQmlFrontendPalette();
+        syncQmlFrontendProject();
+        syncQmlFrontendPreviewState();
+        bridge->setStatusText(statusBar() ? statusBar()->currentMessage() : QString());
+
+        AppendStudioStartupTrace(QStringLiteral("Pure QML bridge attached; backend remains hidden"));
+
+        // Do native surface creation on the next GUI turn. By this point the real
+        // QQuickWindow has already presented at least one frame; QWidget native
+        // handles cannot participate in the first-frame composition path.
+        QTimer::singleShot(0, this, [this]{ initializePureQmlNativeSurfaces(); });
+        return true;
+    }
+
+    void detachPureQmlFrontend()
+    {
+        if(!externalQmlFrontend_) return;
+        AppendStudioStartupTrace(QStringLiteral("Detaching pure QML native surfaces"));
+
+        QWindow* previewWindow = preview_ ? preview_->windowHandle() : nullptr;
+        QWindow* editorWindow = advancedEditorPage_ ? advancedEditorPage_->windowHandle() : nullptr;
+        if(qmlFrontendBridge_)
+            qmlFrontendBridge_->setNativeWindows(qmlPureHostWindow_, nullptr, nullptr);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+
+        // WindowContainer temporarily reparents the backing QWindows under the
+        // QQuickWindow. Explicitly detach them before the QML engine destroys the
+        // top-level window so the QWidget owners remain authoritative at teardown.
+        if(previewWindow) previewWindow->setParent(nullptr);
+        if(editorWindow) editorWindow->setParent(nullptr);
+        if(preview_) preview_->hide();
+        if(advancedEditorPage_) advancedEditorPage_->hide();
+
+        qmlNativeSurfacesReady_ = false;
+        qmlFrontendActive_ = false;
+        qmlPureHostWindow_ = nullptr;
+        qmlFrontendBridge_ = nullptr;
+        AppendStudioStartupTrace(QStringLiteral("Pure QML native surfaces detached for shutdown"));
+    }
+
     bool frontendSmokeReady() const
     {
         return qmlFrontendActive_ && qmlNativeSurfacesReady_;
+    }
+
+    bool frontendSmokeReloadProject(const QString& directory)
+    {
+        const QString name = beginnerProject_.name;
+        const int target = static_cast<int>(beginnerProject_.target);
+        const QString path = QDir(directory).filePath("frontend-reload.bo3shader");
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) return false;
+        file.write(QJsonDocument(beginner::projectToJson(beginnerProject_)).toJson());
+        file.close();
+        return openBeginnerProject(path) && beginnerProject_.name == name &&
+            static_cast<int>(beginnerProject_.target) == target;
     }
 
     int runCliGlslRegression(const QString& caseSelector, bool runAll,
@@ -3922,10 +4113,9 @@ protected:
 
     void showEvent(QShowEvent* event) override
     {
-        // Let Qt create/show the top-level window first, then apply the optional
-        // Windows title-bar colors. This keeps theme initialization from forcing
-        // an HWND during construction and is especially important when a
-        // QQuickWidget owns the visible frontend.
+        // Legacy-recovery window only: let Qt create/show the top-level widget
+        // before applying optional Windows title-bar colors.  The normal 0.3
+        // frontend is a separate QQuickWindow and never shows this QMainWindow.
         QMainWindow::showEvent(event);
         AppendStudioStartupTrace(QStringLiteral("MainWindow showEvent entered"));
         QTimer::singleShot(0, this, [this]
@@ -3949,8 +4139,6 @@ protected:
             QTimer::singleShot(0, this, [this]{ positionPreviewSettingsPopup(); });
         if(beginnerUiMode_ && beginnerBuilderPanel_ && !qmlFrontendActive_)
             QTimer::singleShot(0, this, [this]{ updateBeginnerResponsiveLayout(); });
-        if(qmlFrontendActive_)
-            QTimer::singleShot(0, this, [this]{ syncQmlNativeSurfaces(); });
     }
 
     void dragEnterEvent(QDragEnterEvent* event) override
@@ -3965,7 +4153,7 @@ protected:
 
     void closeEvent(QCloseEvent* event) override
     {
-        if (updateInProgress_) { event->accept(); return; }
+        if (updateInProgress_ || frontendCloseApproved_) { event->accept(); return; }
         if (!maybeSave()) { event->ignore(); return; }
         saveWorkspace();
         event->accept();
@@ -15518,7 +15706,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         if(beginnerProject_.target == beginner::Target::Material)
         {
-            addColorSetting("baseColor", "Base Color", QColor("#2F78D0"));
+            addColorSetting("baseColor", "Base Color", QColor("#FFFFFF"));
         }
         else
         {
@@ -16004,7 +16192,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if(preview_) preview_->renderNow();
     }
 
-    void applyBeginnerProjectToEditor(bool immediateCompile)
+    void applyBeginnerProjectToEditor(bool immediateCompile, bool scheduleDeferredCompile = true)
     {
         if(!beginnerProjectActive_ || !editor_) return;
         const QString generated = beginner::generateHlsl(beginnerProject_);
@@ -16050,14 +16238,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(camera3D_) camera3D_->setChecked(false);
         }
         updateGBufferUi();
-        if(beginnerProject_.target == beginner::Target::Material && preview_ &&
+        // APE environment setup is target/session work, not parameter-edit work.
+        // Reloading the HDR environment for every color/effect change made Material
+        // authoring hitch badly and could keep the GUI thread busy long enough for
+        // Windows to report the Studio as unresponsive. Only an explicit/immediate
+        // Material transition performs the non-interactive APE setup here.
+        if(immediateCompile && beginnerProject_.target == beginner::Target::Material && preview_ &&
            preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
         {
             const int apeIndex = previewApeLightingPresetCombo_
                 ? previewApeLightingPresetCombo_->currentIndex()
                 : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
-            // Entering Material authoring may load the configured local HDR assets,
-            // but it must never surprise the user with a startup folder dialog.
             applyApeLightingPreset(apeIndex, false, false);
         }
         updateCameraUi();
@@ -16071,7 +16262,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             liveCompileTimer_.stop();
             compileEditor();
         }
-        else if(beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked())
+        else if(scheduleDeferredCompile && (beginnerUiMode_ || !liveCompile_ || liveCompile_->isChecked()))
         {
             if(beginnerUiMode_)
             {
@@ -16092,7 +16283,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
-    void startBeginnerProject(beginner::Target target, bool markDirty = true)
+    void startBeginnerProject(beginner::Target target, bool markDirty = true, bool compileImmediately = true)
     {
         beginnerProject_ = beginner::makeDefaultProject(target);
         beginnerProjectPath_.clear();
@@ -16105,7 +16296,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         clearBeginnerPreviewPackageState();
         refreshBeginnerProjectUi();
         if(authoringStack_ && beginnerBuilderPanel_) authoringStack_->setCurrentWidget(beginnerBuilderPanel_);
-        applyBeginnerProjectToEditor(true);
+        applyBeginnerProjectToEditor(compileImmediately, compileImmediately);
     }
 
     void newBeginnerProjectDialog()
@@ -16198,7 +16389,30 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         clearBeginnerPreviewPackageState();
         markBeginnerProjectModified();
         refreshBeginnerProjectUi();
-        applyBeginnerProjectToEditor(true);
+        if(qmlFrontendActive_)
+        {
+            // Configure the APE environment in the same event turn as the target
+            // switch. The previous 180 ms delayed setup let Qt present a default
+            // grey/checker Material frame before the real APE environment arrived.
+            // Doing the setup before returning to the event loop means the first
+            // visible Material frame is already using the authored reference path.
+            applyBeginnerProjectToEditor(false);
+            if(target == beginner::Target::Material && preview_ &&
+               preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+            {
+                const int apeIndex = previewApeLightingPresetCombo_
+                    ? previewApeLightingPresetCombo_->currentIndex()
+                    : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+                statusBar()->showMessage("Preparing APE Match environment…", 2500);
+                applyApeLightingPreset(apeIndex, false, false);
+            }
+            syncQmlFrontendProject();
+            syncQmlFrontendPreviewState();
+        }
+        else
+        {
+            applyBeginnerProjectToEditor(true);
+        }
     }
 
     void addBeginnerEffect(const QString& typeId)
@@ -17117,10 +17331,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             qmlEffectCatalog(), qmlActiveEffects(), selected, qmlSelectedEffect());
     }
 
+    void syncQmlFrontendPreviewState()
+    {
+        if(!qmlFrontendBridge_) return;
+        const bool camera3D = camera3D_ ? camera3D_->isChecked() : true;
+        const int meshIndex = meshCombo_ ? meshCombo_->currentIndex() : 0;
+        const QString meshName = meshCombo_ ? meshCombo_->currentText() : QStringLiteral("Sphere");
+        const int apeIndex = previewApeLightingPresetCombo_
+            ? previewApeLightingPresetCombo_->currentIndex()
+            : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+        static const QStringList names{QStringLiteral("Morning"), QStringLiteral("Day"),
+                                       QStringLiteral("Sunset"), QStringLiteral("Night")};
+        const int safeApe = qBound(0, apeIndex, static_cast<int>(names.size()) - 1);
+        qmlFrontendBridge_->setPreviewState(camera3D, meshIndex, meshName, safeApe, names[safeApe]);
+    }
+
     void syncQmlFrontendUiState()
     {
         if(!qmlFrontendBridge_) return;
-        qmlFrontendBridge_->setUiState(beginnerUiMode_, effectiveAnimationsEnabled(), displayVersion_);
+        // The pure-QML shell has its own explicit Animations setting. Do not let
+        // SPI_GETCLIENTAREAANIMATION silently zero out every QML Behavior: on some
+        // Windows configurations that flag is disabled even though the user wants
+        // motion in Shader Studio. The Studio toggle remains authoritative here.
+        qmlFrontendBridge_->setUiState(beginnerUiMode_, animationsEnabled_, displayVersion_);
     }
 
     void syncQmlFrontendPalette()
@@ -17219,9 +17452,40 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         syncQmlFrontendProject();
     }
 
+    void showQmlPanel(const QString& title)
+    {
+        if (!qmlFrontendBridge_) return;
+        QWidget* panel = nullptr;
+        if (title == QStringLiteral("Output / Console")) panel = outputDock_->widget();
+        else if (title == QStringLiteral("Inputs")) panel = sourceValuesPanel_;
+        else if (title == QStringLiteral("Parameters")) panel = shaderParamsPanel_;
+        else if (title == QStringLiteral("Material Textures")) panel = materialTexturesPanel_;
+        else if (title == QStringLiteral("Performance")) panel = performancePanel_;
+        else if (title == QStringLiteral("Scene / Lighting")) panel = scenePanel_;
+        else if (title == QStringLiteral("Script Vectors")) panel = scriptPanel_;
+        else if (title == QStringLiteral("Preview Settings")) panel = previewSettingsPanel_;
+        if (panel) qmlFrontendBridge_->showPanel(title, panel);
+    }
+
     void popupQmlMenu(const QString& requestedName)
     {
         const QString wanted = requestedName.trimmed();
+
+        if(qmlFrontendActive_ && wanted.compare(QStringLiteral("View"), Qt::CaseInsensitive) == 0)
+        {
+            QMenu menu;
+            for (const QString& name : {QStringLiteral("Output / Console"), QStringLiteral("Inputs"),
+                QStringLiteral("Parameters"), QStringLiteral("Material Textures"), QStringLiteral("Performance"),
+                QStringLiteral("Scene / Lighting"), QStringLiteral("Script Vectors"), QStringLiteral("Preview Settings")})
+                menu.addAction(name, this, [this, name]{ showQmlPanel(name); });
+            menu.addSeparator();
+            menu.addAction(QStringLiteral("Full Preview"), this, [this]{ emit qmlFrontendBridge_->fullPreviewToggleRequested(); });
+            menu.addAction(QStringLiteral("Add Effect Browser"), this, [this]{ qmlFrontendBridge_->showEffectBrowser(); });
+            menu.addAction(QStringLiteral("Reset Preview"), this, [this]{ resetPreviewView(); syncQmlFrontendPreviewState(); });
+            menu.exec(QCursor::pos());
+            return;
+        }
+
         for(QAction* action : menuBar()->actions())
         {
             if(!action || !action->menu()) continue;
@@ -17235,311 +17499,162 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
-    void prepareQmlNativeSurfaceWidgets()
+    void initializePureQmlNativeSurfaces()
     {
-        if(!qmlFrontendActive_ || !qmlHybridRoot_ || qmlNativeWidgetsAttached_) return;
+        if(!externalQmlFrontend_ || !qmlFrontendActive_ || !qmlFrontendBridge_ || !qmlPureHostWindow_)
+            return;
 
-        // At this point the real top-level QMainWindow has already been shown and
-        // Qt Quick has an established backing store.  Only now move the existing
-        // QWidget surfaces into the hybrid host.  Keep them hidden until D3D has
-        // initialized and qmlNativeSurfacesReady_ is raised.
+        AppendStudioStartupTrace(QStringLiteral("Pure QML native-surface initialization starting"));
+
+        // Detach only the two surfaces that must remain native. The legacy
+        // QMainWindow stays hidden and continues to own all non-visual backend
+        // state. WindowContainer will own the backing QWindow geometry/visibility
+        // after publication, so QWidget code must not attempt to position these
+        // surfaces afterwards.
         if(authoringStack_ && advancedEditorPage_)
             authoringStack_->removeWidget(advancedEditorPage_);
+
         if(advancedEditorPage_)
         {
             advancedEditorPage_->hide();
-            advancedEditorPage_->setParent(qmlHybridRoot_);
+            advancedEditorPage_->setParent(nullptr, Qt::Tool | Qt::FramelessWindowHint);
+            advancedEditorPage_->setAttribute(Qt::WA_DontCreateNativeAncestors, true);
+            advancedEditorPage_->setAttribute(Qt::WA_ShowWithoutActivating, true);
+            advancedEditorPage_->resize(760, 700);
+            advancedEditorPage_->move(-30000, -30000);
+            // Force creation only now, after the pure QML top-level has already
+            // swapped its first frame.
+            advancedEditorPage_->winId();
         }
+
         if(preview_)
         {
             preview_->hide();
-            preview_->setParent(qmlHybridRoot_);
+            preview_->setParent(nullptr, Qt::Tool | Qt::FramelessWindowHint);
+            preview_->setAttribute(Qt::WA_DontCreateNativeAncestors, true);
+            preview_->setAttribute(Qt::WA_ShowWithoutActivating, true);
+            preview_->resize(960, 720);
+            preview_->move(-30000, -30000);
         }
 
-        qmlNativeWidgetsAttached_ = true;
-        AppendStudioStartupTrace(QStringLiteral("Native preview/editor widgets reparented after top-level show"));
-    }
-
-    void syncQmlNativeSurfaces()
-    {
-        // Never expose the native HWND-backed preview/editor while Qt Quick is
-        // still establishing its backing store or before Direct3D has completed
-        // initialization. Geometry signals can fire immediately when the QML
-        // root is resized, so without this gate the preview could become visible
-        // before the delayed D3D startup timer ever ran.
-        if(!qmlFrontendActive_ || !qmlHybridRoot_ || !qmlQuickWidget_ ||
-           !qmlNativeWidgetsAttached_ || !qmlNativeSurfacesReady_) return;
-        QQuickItem* rootItem = qmlQuickWidget_->rootObject();
-        if(!rootItem) return;
-
-        auto geometryFor = [rootItem](QQuickItem* item) -> QRect
+        SetStudioStartupPhase(8);
+        AppendStudioStartupTrace(QStringLiteral("Initializing Direct3D preview after pure QML first frame"));
+        QString error;
+        if(!preview_ || !preview_->ensureInitialized(error))
         {
-            if(!item) return QRect();
-            const QPointF topLeft = item->mapToItem(rootItem, QPointF(0.0, 0.0));
-            return QRect(qRound(topLeft.x()), qRound(topLeft.y()),
-                         qMax(1, qRound(item->width())), qMax(1, qRound(item->height())));
+            qmlNativeSurfacesReady_ = false;
+            const QString message = error.isEmpty()
+                ? QStringLiteral("Direct3D preview could not create its native window.")
+                : error;
+            AppendStudioStartupTrace(QStringLiteral("Pure QML Direct3D preview initialization FAILED: %1").arg(message));
+            qmlFrontendBridge_->setStatusText(QStringLiteral("Preview initialization failed: %1").arg(message));
+            QTimer::singleShot(0, this, [message]{ QMessageBox::critical(nullptr, QStringLiteral("DirectX initialization failed"), message); });
+            return;
+        }
+        SetStudioStartupPhase(9);
+        AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized for pure QML frontend"));
+
+        QWindow* previewWindow = preview_->windowHandle();
+        QWindow* editorWindow = advancedEditorPage_ ? advancedEditorPage_->windowHandle() : nullptr;
+        if(!previewWindow || !editorWindow)
+        {
+            qmlNativeSurfacesReady_ = false;
+            QStringList missing;
+            if(!previewWindow) missing << QStringLiteral("preview QWindow");
+            if(!editorWindow) missing << QStringLiteral("advanced editor QWindow");
+            const QString message = QStringLiteral("Native surface creation failed: %1").arg(missing.join(QStringLiteral(", ")));
+            AppendStudioStartupTrace(message);
+            qmlFrontendBridge_->setStatusText(message);
+            return;
+        }
+
+        // These QWindows are backing windows owned by QWidget/C++, not QML-created
+        // objects. WindowContainer respects QQmlEngine ownership at teardown; pin
+        // them to CppOwnership so the QML engine can reparent/manage them without
+        // ever deleting the QWidget-owned window objects.
+        QQmlEngine::setObjectOwnership(previewWindow, QQmlEngine::CppOwnership);
+        QQmlEngine::setObjectOwnership(editorWindow, QQmlEngine::CppOwnership);
+
+        // WindowContainer is the one and only owner of the embedded QWindow
+        // geometry. In the previous build these signals called QWidget::resize()
+        // on the same top-level QWidget that owns each backing QWindow. On Windows
+        // that is re-entrant: WindowContainer resizes the QWindow, QWidget::resize
+        // tries to resize the QWidgetWindow again, and WindowContainer immediately
+        // corrects it. The result was an endless setGeometry loop (including
+        // impossible negative widths) that starved the GUI event loop.
+        //
+        // QWidgetWindow already propagates native resize events back to its QWidget
+        // owner. The only extra work we need is resizing the D3D swapchain, and that
+        // is intentionally queued/coalesced by D3DPreviewWidget.
+        auto schedulePreviewContainerSync = [this]
+        {
+            if(preview_) preview_->syncEmbeddedWindowSize();
         };
+        connect(previewWindow, &QWindow::widthChanged, preview_,
+                [schedulePreviewContainerSync](int){ schedulePreviewContainerSync(); });
+        connect(previewWindow, &QWindow::heightChanged, preview_,
+                [schedulePreviewContainerSync](int){ schedulePreviewContainerSync(); });
 
-        if(preview_ && qmlPreviewSlot_)
-        {
-            const QRect rect = geometryFor(qmlPreviewSlot_);
-            if(rect.isValid() && rect.width() > 1 && rect.height() > 1)
-            {
-                if(preview_->geometry() != rect) preview_->setGeometry(rect);
-                if(!preview_->isVisible()) preview_->show();
-                preview_->raise();
-            }
-        }
+        // Mark the QWidget side visible while still far off-screen. This keeps
+        // QWidget's backing-store/input state coherent. The next bridge signal
+        // hands the backing QWindows to QML WindowContainer, which reparents and
+        // positions them inside the already-visible QQuickWindow without any
+        // separate desktop flash.
+        preview_->show();
+        advancedEditorPage_->show();
+        qmlFrontendBridge_->setNativeWindows(qmlPureHostWindow_, previewWindow, editorWindow);
+        QTimer::singleShot(0, preview_, [schedulePreviewContainerSync]{ schedulePreviewContainerSync(); });
+        qmlNativeSurfacesReady_ = true;
 
-        if(advancedEditorPage_ && qmlAdvancedSlot_)
-        {
-            const QRect rect = geometryFor(qmlAdvancedSlot_);
-            if(rect.isValid() && rect.width() > 1 && rect.height() > 1 && advancedEditorPage_->geometry() != rect)
-                advancedEditorPage_->setGeometry(rect);
-            advancedEditorPage_->setVisible(!beginnerUiMode_);
-            if(!beginnerUiMode_) advancedEditorPage_->raise();
-        }
-    }
-
-    bool activateQmlFrontend()
-    {
-        if(qmlFrontendActive_) return true;
-
-        auto* bridge = new StudioFrontendBridge(this);
-        qmlFrontendBridge_ = bridge;
         syncQmlFrontendUiState();
         syncQmlFrontendPalette();
         syncQmlFrontendProject();
+        SetStudioStartupPhase(10);
+        AppendStudioStartupTrace(QStringLiteral("Pure QML WindowContainer surfaces published"));
 
-        // Keep the existing QWidget/D3D backend inside the same QWidget top-level.
-        // QQuickWidget is deliberately used instead of a QQuickView + nested
-        // WindowContainer chain: Qt documents QQuickWidget as the flexible
-        // Widgets/Quick integration path with normal widget stacking semantics.
-        auto* hybridRoot = new QWidget(this);
-        hybridRoot->setObjectName(QStringLiteral("QmlHybridRoot"));
-        hybridRoot->setMinimumSize(640, 360);
-        auto* rootLayout = new QVBoxLayout(hybridRoot);
-        rootLayout->setContentsMargins(0, 0, 0, 0);
-        rootLayout->setSpacing(0);
-
-        auto* quickWidget = new QQuickWidget(hybridRoot);
-        quickWidget->setObjectName(QStringLiteral("QmlFrontendWidget"));
-        quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
-        // The glass design is composited inside QML; the QWidget host itself does
-        // not need an alpha surface. Keeping the offscreen Quick target opaque
-        // removes an unnecessary Windows composition path during first show.
-        quickWidget->setClearColor(QColor(QStringLiteral("#0D1117")));
-        quickWidget->setFocusPolicy(Qt::StrongFocus);
-        rootLayout->addWidget(quickWidget);
-        quickWidget->rootContext()->setContextProperty(QStringLiteral("frontend"), bridge);
-
-        connect(quickWidget, &QQuickWidget::sceneGraphError, this,
-                [this](QQuickWindow::SceneGraphError error, const QString& message)
+        if(beginnerUiMode_)
         {
-            const QString sceneGraphFailure = QStringLiteral("Qt Quick scene graph error %1: %2").arg(static_cast<int>(error)).arg(message);
-            const QString logPath = WriteQmlFrontendStartupLog(QStringList{sceneGraphFailure});
-            WriteCliOutput(QString("QML scene graph FAILED:\n%1\nLog: %2\n").arg(sceneGraphFailure, logPath));
-            QTimer::singleShot(0, this, [this, sceneGraphFailure, logPath]
+            // Build/publish the default project immediately, but do not compile it
+            // inside the same native-surface startup callback. That callback also
+            // initializes D3D and used to keep the GUI thread busy long enough for
+            // Windows to display a false "not responding" prompt while the splash
+            // was still fading. Give Qt a clean event-loop turn first.
+            startBeginnerProject(beginner::Target::PostFx, false, false);
+            syncQmlFrontendProject();
+            QTimer::singleShot(260, this, [this]
             {
-                QMessageBox box(QMessageBox::Critical,
-                                QStringLiteral("Qt Quick Rendering Failed"),
-                                QStringLiteral("The redesigned front end could not initialize its renderer."),
-                                QMessageBox::Ok, this);
-                box.setInformativeText(QStringLiteral("Startup details were written to:\n%1").arg(logPath));
-                box.setDetailedText(sceneGraphFailure);
-                box.exec();
+                if(!qmlFrontendActive_ || !beginnerProjectActive_) return;
+                AppendStudioStartupTrace(QStringLiteral("Deferred initial Beginner preview compile starting"));
+                if(qmlFrontendBridge_) qmlFrontendBridge_->setStatusText(QStringLiteral("Compiling preview…"));
+                compileEditor();
+                if(qmlFrontendBridge_) qmlFrontendBridge_->setStatusText(QStringLiteral("Ready"));
+                AppendStudioStartupTrace(QStringLiteral("Deferred initial Beginner preview compile complete"));
             });
-        });
+        }
+        else
+            openBundledSample();
 
-        // Do not force a native QWindow for the top-level QWidget while it is
-        // still hidden.  On the real Windows startup path the first window.show()
-        // was the exact failure boundary, while QML itself had already reached
-        // Ready.  Keep the initial QML tree completely free of native-window
-        // ownership; the host QWindow is published to QML after the top-level
-        // window is visible, just before native preview integration starts.
-        bridge->setNativeWindows(nullptr, nullptr, nullptr);
-        quickWidget->setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
-
-        QStringList qmlErrors;
-        if(!WaitForQuickFrontendLoad(quickWidget, &qmlErrors))
+        // Do APE environment work after the shell and preview are already live.
+        // Automatic startup remains non-interactive; explicit APE operations may
+        // still request a BO3 root later if the user needs local assets.
+        QTimer::singleShot(150, this, [this]
         {
-            const QString logPath = WriteQmlFrontendStartupLog(qmlErrors);
-            const QString details = qmlErrors.isEmpty()
-                ? QStringLiteral("The QML engine did not report a detailed error.")
-                : qmlErrors.join(QStringLiteral("\n"));
-            WriteCliOutput(QString("QML front-end startup FAILED:\n%1\nLog: %2\n").arg(details, logPath));
-            setWindowTitle(QString("BO3 Shader Studio %1 [QML FALLBACK]").arg(displayVersion_));
-            statusBar()->showMessage(QStringLiteral("QML front end failed to load — legacy recovery UI active."));
-            QTimer::singleShot(0, this, [this, details, logPath]
+            if(!preview_) return;
+            const PreviewMode startupMode = preview_->renderer().GetPreviewMode();
+            const bool materialMode = startupMode == PreviewMode::ForwardMaterial ||
+                                      startupMode == PreviewMode::DeferredGBuffer;
+            if(materialMode && preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
             {
-                QMessageBox box(QMessageBox::Critical,
-                                QStringLiteral("QML Front End Failed"),
-                                QStringLiteral("The new Qt Quick front end could not start. The legacy interface is open only as a recovery fallback."),
-                                QMessageBox::Ok, this);
-                box.setInformativeText(QStringLiteral("Exact startup errors were written to:\n%1").arg(logPath));
-                box.setDetailedText(details);
-                box.exec();
-            });
-            delete hybridRoot;
-            qmlFrontendBridge_->deleteLater();
-            qmlFrontendBridge_ = nullptr;
-            return false;
-        }
-
-        SetStudioStartupPhase(5);
-        AppendStudioStartupTrace(QStringLiteral("Main.qml component reached Ready"));
-        if(quickWidget->quickWindow() && quickWidget->quickWindow()->rendererInterface())
-        {
-            const int api = static_cast<int>(quickWidget->quickWindow()->rendererInterface()->graphicsApi());
-            AppendStudioStartupTrace(QStringLiteral("Qt Quick graphics API selected: %1").arg(api));
-        }
-
-        // Wire the QML shell to the existing, already-proven backend commands.
-        connect(bridge, &StudioFrontendBridge::menuRequested, this, [this](const QString& name){ popupQmlMenu(name); });
-        connect(bridge, &StudioFrontendBridge::openRequested, this, [this]{ openShaderDialog(); });
-        connect(bridge, &StudioFrontendBridge::saveRequested, this, [this]{ saveCurrentDocument(); });
-        connect(bridge, &StudioFrontendBridge::previewRequested, this, [this]{ compileEditor(); });
-        connect(bridge, &StudioFrontendBridge::exportRequested, this, [this]{ exportToBO3(); });
-        connect(bridge, &StudioFrontendBridge::modeRequested, this, [this](bool beginner){ setUiExperienceMode(beginner); });
-        connect(bridge, &StudioFrontendBridge::targetRequested, this, [this](int targetIndex){
-            const int safe = qBound(0, targetIndex, 2);
-            const beginner::Target target = static_cast<beginner::Target>(safe);
-            if(!beginnerProjectActive_) startBeginnerProject(target, true);
-            else switchBeginnerTarget(target);
-            setUiExperienceMode(true);
-            syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::projectNameRequested, this, [this](const QString& name){ setQmlProjectName(name); });
-        connect(bridge, &StudioFrontendBridge::applyPresetRequested, this, [this](const QString& presetId){
-            applyBeginnerPreset(presetId);
-            syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::baseColorRequested, this, [this](const QString& key, const QColor& color){
-            setQmlBaseColor(key, color);
-        });
-        connect(bridge, &StudioFrontendBridge::addEffectRequested, this, [this](const QString& typeId){
-            addBeginnerEffect(typeId); syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::selectEffectRequested, this, [this](int index){
-            if(!beginnerEffectList_) return;
-            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
-            rebuildBeginnerEffectParameters();
-            syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::removeEffectRequested, this, [this](int index){
-            if(!beginnerEffectList_) return;
-            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
-            removeSelectedBeginnerEffect();
-            syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::moveEffectRequested, this, [this](int index, int delta){
-            if(!beginnerEffectList_) return;
-            beginnerEffectList_->setCurrentRow(qBound(-1, index, beginnerEffectList_->count() - 1));
-            moveSelectedBeginnerEffect(delta);
-            syncQmlFrontendProject();
-        });
-        connect(bridge, &StudioFrontendBridge::effectEnabledRequested, this, [this](int index, bool enabled){ setQmlEffectEnabled(index, enabled); });
-        connect(bridge, &StudioFrontendBridge::parameterValueRequested, this, [this](const QString& key, const QVariant& value){ setQmlParameterValue(key, value); });
-        connect(bridge, &StudioFrontendBridge::parameterColorRequested, this, [this](const QString& key, const QColor& color){ setQmlParameterColor(key, color); });
-        connect(bridge, &StudioFrontendBridge::resetPreviewRequested, this, [this]{ resetPreviewView(); });
-        connect(bridge, &StudioFrontendBridge::previewSettingsRequested, this, [this]{
-            if(previewSettingsToggleButton_) previewSettingsToggleButton_->setChecked(!previewSettingsToggleButton_->isChecked());
-        });
-        connect(bridge, &StudioFrontendBridge::fullPreviewRequested, this, [this]{
-            if(previewMaxButton_) previewMaxButton_->setChecked(!previewMaxButton_->isChecked());
-        });
-        connect(bridge, &StudioFrontendBridge::camera3DRequested, this, [this](bool enabled){
-            cameraUserOverride_ = true;
-            if(preview_) preview_->setCameraInteractionEnabled(enabled);
-            if(camera3D_) { QSignalBlocker blocker(camera3D_); camera3D_->setChecked(enabled); }
-            updateCameraUi();
-        });
-        connect(bridge, &StudioFrontendBridge::meshRequested, this, [this](int index){
-            if(!meshCombo_) return;
-            meshCombo_->setCurrentIndex(qBound(0, index, meshCombo_->count() - 1));
-        });
-        connect(bridge, &StudioFrontendBridge::browseEffectsRequested, this, [this]{ showBeginnerEffectBrowser(); });
-        connect(bridge, &StudioFrontendBridge::tutorialCompleteRequested, this, []{
-            QSettings settings("OpenAI", "BO3HLSLPreviewer");
-            settings.setValue("ui/gettingStartedComplete", true);
-        });
-        connect(statusBar(), &QStatusBar::messageChanged, bridge, &StudioFrontendBridge::setStatusText);
-
-
-        QQuickItem* rootObject = quickWidget->rootObject();
-        QQuickItem* previewSlot = rootObject ? rootObject->findChild<QQuickItem*>(QStringLiteral("previewSlot")) : nullptr;
-        QQuickItem* advancedSlot = rootObject ? rootObject->findChild<QQuickItem*>(QStringLiteral("advancedSlot")) : nullptr;
-        if(!rootObject || !previewSlot || !advancedSlot)
-        {
-            QStringList errors;
-            if(!rootObject) errors << QStringLiteral("Main.qml did not create a root QQuickItem.");
-            if(!previewSlot) errors << QStringLiteral("Main.qml is missing objectName 'previewSlot'.");
-            if(!advancedSlot) errors << QStringLiteral("Main.qml is missing objectName 'advancedSlot'.");
-            const QString logPath = WriteQmlFrontendStartupLog(errors);
-            WriteCliOutput(QString("QML hybrid surface discovery FAILED:\n%1\nLog: %2\n")
-                           .arg(errors.join(QStringLiteral("\n")), logPath));
-            delete hybridRoot;
-            qmlFrontendBridge_->deleteLater();
-            qmlFrontendBridge_ = nullptr;
-            return false;
-        }
-
-        // Keep the native-backed preview and the existing editor in their proven
-        // legacy parents until *after* the new top-level window has been shown.
-        // Even hidden WA_NativeWindow children participate in Windows native
-        // hierarchy creation/reparenting. Moving the D3D widget under the
-        // QQuickWidget host during construction made window.show() the first
-        // native-composition boundary on the user's machine.  We defer that
-        // reparenting to the explicit D3D startup turn instead.
-        if(advancedEditorPage_) advancedEditorPage_->hide();
-        if(preview_) preview_->hide();
-
-        legacyCentralWidget_ = takeCentralWidget();
-        if(legacyCentralWidget_)
-        {
-            legacyCentralWidget_->setParent(this);
-            legacyCentralWidget_->hide();
-        }
-        for(QDockWidget* dock : findChildren<QDockWidget*>())
-            if(dock) dock->hide();
-        if(commandToolbar_) commandToolbar_->hide();
-        if(menuBar()) menuBar()->hide();
-        if(statusBar()) statusBar()->hide();
-        if(previewSettingsOverlayHost_) previewSettingsOverlayHost_->hide();
-
-        qmlQuickWidget_ = quickWidget;
-        qmlHybridRoot_ = hybridRoot;
-        qmlPreviewSlot_ = previewSlot;
-        qmlAdvancedSlot_ = advancedSlot;
-        setCentralWidget(hybridRoot);
-        qmlNativeWidgetsAttached_ = false;
-        qmlNativeSurfacesReady_ = false;
-        qmlFrontendActive_ = true;
-
-        auto queueGeometrySync = [this]
-        {
-            if(qmlGeometrySyncQueued_) return;
-            qmlGeometrySyncQueued_ = true;
-            QTimer::singleShot(0, this, [this]
+                AppendStudioStartupTrace(QStringLiteral("Applying deferred non-interactive APE lighting defaults (pure QML)"));
+                resetLightingControls(false);
+                AppendStudioStartupTrace(QStringLiteral("Deferred APE lighting defaults complete (pure QML)"));
+            }
+            else
             {
-                qmlGeometrySyncQueued_ = false;
-                syncQmlNativeSurfaces();
-            });
-        };
-        for(QQuickItem* item : {qmlPreviewSlot_, qmlAdvancedSlot_})
-        {
-            connect(item, &QQuickItem::xChanged, this, queueGeometrySync);
-            connect(item, &QQuickItem::yChanged, this, queueGeometrySync);
-            connect(item, &QQuickItem::widthChanged, this, queueGeometrySync);
-            connect(item, &QQuickItem::heightChanged, this, queueGeometrySync);
-            connect(item, &QQuickItem::visibleChanged, this, queueGeometrySync);
-        }
-
-        SetStudioStartupPhase(6);
-        AppendStudioStartupTrace(QStringLiteral("Hybrid QML host installed; native surfaces gated until Direct3D is ready"));
-        return true;
+                AppendStudioStartupTrace(QStringLiteral("Deferred APE startup skipped for non-material preview (pure QML)"));
+            }
+        });
     }
-
 
     void buildUi()
     {
@@ -18072,8 +18187,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* settingsHeader = new QHBoxLayout();
         previewSettingsTitle_ = new QLabel("Preview Settings");
         previewSettingsTitle_->setObjectName("InspectorTitle");
+        previewSettingsTitle_->setProperty("qmlPanelSkip", true); // UtilityPanel supplies its own header.
         auto* closePreviewSettings = new QToolButton();
         closePreviewSettings->setText("×");
+        closePreviewSettings->setProperty("qmlPanelSkip", true);
         closePreviewSettings->setToolTip("Hide Preview Settings");
         closePreviewSettings->setFixedWidth(28);
         settingsHeader->addWidget(previewSettingsTitle_);
@@ -18098,6 +18215,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         settingsOuter->addWidget(previewBasicsGroup);
 
         previewMaterialProfileGroup_ = new QGroupBox("Material Preview");
+        // APE Match is the normal Material preview path in the QML frontend, not
+        // a user-facing profile. Lighting lives beside Preview Object in the
+        // preview toolbar. Keep the legacy group for fallback/Advanced UI only.
+        previewMaterialProfileGroup_->setProperty("qmlPanelSkip", true);
         auto* materialProfileForm = new QFormLayout(previewMaterialProfileGroup_);
         materialProfileForm->setContentsMargins(8,10,8,8);
         materialProfileForm->setHorizontalSpacing(8);
@@ -18124,6 +18245,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(previewApeLightingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
             if (previewMaterialProfileCombo_ && previewMaterialProfileCombo_->currentIndex() == 0)
                 applyApeLightingPreset(index);
+            syncQmlFrontendPreviewState();
         });
 
         // Keep the Beginner-visible reset action above the Advanced-only container.
@@ -18600,6 +18722,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             }
             updateCameraUi();
             if(preview_) preview_->renderNow();
+            syncQmlFrontendPreviewState();
         });
         connect(previewMaxButton_, &QPushButton::toggled, this, [this](bool enabled){ setPreviewMaximized(enabled); });
         connect(resetCamera, &QPushButton::clicked, this, [this]{ resetPreviewView(); });
@@ -18718,6 +18841,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const int customIndex = static_cast<int>(PreviewMesh::Custom);
             if(index == customIndex && preview_ && !preview_->renderer().HasCustomModel()) { chooseCustomModel(); return; }
             preview_->renderer().SetPreviewMesh(static_cast<PreviewMesh>(std::clamp(index, 0, customIndex))); updateCameraUi();
+            syncQmlFrontendPreviewState();
         });
         connect(loadModelQuickButton_, &QPushButton::clicked, this, [this]{ chooseCustomModel(); });
         connect(gbufferViewCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){ preview_->renderer().SetGBufferView(static_cast<GBufferView>(std::clamp(index,0,12))); });
@@ -18939,12 +19063,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         layout->addWidget(intro);
 
         auto* grid = new QGridLayout();
-        grid->addWidget(new QLabel("Vector"), 0, 0);
+        auto* vectorHeader = new QLabel("Vector");
+        vectorHeader->setProperty("qmlPanelSkip", true);
+        grid->addWidget(vectorHeader, 0, 0);
         const char* comps[] = {"X", "Y", "Z", "W"};
-        for (int c = 0; c < 4; ++c) grid->addWidget(new QLabel(comps[c]), 0, c + 1);
+        for (int c = 0; c < 4; ++c)
+        {
+            auto* componentHeader = new QLabel(comps[c]);
+            componentHeader->setProperty("qmlPanelSkip", true);
+            grid->addWidget(componentHeader, 0, c + 1);
+        }
         for (int v = 0; v < 8; ++v)
         {
             vectorLabels_[v] = new QLabel(QString("scriptVector%1").arg(v));
+            vectorLabels_[v]->setProperty("qmlPanelSkip", true);
+            vectorLabels_[v]->setVisible(false);
             grid->addWidget(vectorLabels_[v], v + 1, 0);
             for (int c = 0; c < 4; ++c)
             {
@@ -18953,6 +19086,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 box->setRange(-10000.0, 10000.0);
                 box->setSingleStep(0.1);
                 box->setKeyboardTracking(false);
+                box->setAccessibleName(QString("scriptVector%1 · %2").arg(v).arg(comps[c]));
+                box->setVisible(false);
                 vectorBoxes_[v][c] = box;
                 grid->addWidget(box, v + 1, c + 1);
                 connect(box, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, v, c](double value){
@@ -19131,6 +19266,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         connect(apeLightingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
             if (materialPreviewProfileCombo_ && materialPreviewProfileCombo_->currentIndex() == 0)
                 applyApeLightingPreset(index);
+            syncQmlFrontendPreviewState();
         });
         connect(lightingModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index){
             if (preview_) preview_->renderer().SetFulbright(index == 1);
@@ -19580,13 +19716,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
 #ifdef _WIN32
         if(!isVisible()) return;
-        // Do not call QWidget::winId() while the top-level widget is still
-        // hidden. Qt documents that winId() forces a native window; in the
-        // QQuickWidget frontend that was happening from applyTheme() during
-        // MainWindow construction, before the first show(), and recreated the
-        // exact native-window composition boundary we were trying to avoid.
-        // If the window does not exist yet, showEvent() will style it after the
-        // platform has created the real top-level HWND normally.
+        // Do not call QWidget::winId() while the legacy-recovery top-level widget
+        // is hidden. winId() forces native-window creation, so showEvent() is the
+        // only place this QWidget path is allowed to style its platform HWND.
         QWindow* nativeWindow = windowHandle();
         if(!nativeWindow) return;
         HWND hwnd = reinterpret_cast<HWND>(nativeWindow->winId());
@@ -19630,11 +19762,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         if (name == "Liquid Glass")
         {
-            // Cool slate values tuned for the Qt Quick glass shell. The QML
-            // presentation adds translucency/highlights; keep the underlying
-            // QWidget palette opaque so legacy dialogs and the editor remain
-            // readable when they are surfaced from the new front end.
-            window="#0C131E"; panel="#142131"; base="#08111B"; button="#1B2C40"; hover="#27435E"; border="#466680"; textColor="#EDF6FF"; muted="#9FB3C7"; accent="#58A8FF"; editorBase="#081019";
+            // A restrained blue-grey base lets the QML shell read as frosted
+            // glass without becoming a flat graphite theme or a saturated cyan
+            // overlay. Accent Color still supplies the user's chromatic emphasis.
+            window="#0A1118"; panel="#162630"; base="#0B141B"; button="#22343F"; hover="#2C4653"; border="#6E929F"; textColor="#F5F9FB"; muted="#AEC0C8"; accent="#5BC9E8"; editorBase="#081118";
         }
         else if (name == "Graphite")
         {
@@ -19788,6 +19919,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             QLineEdit#BeginnerEffectSearch QToolButton:hover { background:%5; border-radius:3px; }
             QComboBox::drop-down { border:0; width:20px; }
             QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTableWidget { background:%8; color:%7; border-color:%6; selection-background-color:%9; selection-color:#FFFFFF; }
+            QPlainTextEdit#shaderEditor { border:1px solid %6; border-radius:9px; padding:2px; }
             QDockWidget { titlebar-close-icon:url(); titlebar-normal-icon:url(); }
             QDockWidget::title { background:%2; border-bottom:1px solid %6; padding:6px 8px; font-weight:600; }
             QDockWidget > QWidget { border:1px solid %6; }
@@ -19989,9 +20121,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // painting with the Direct3D child window.
         QPoint previewTopLeft;
         QPoint previewTopRight;
-        // In the QQuickWidget hybrid shell the Direct3D preview remains a real
-        // QWidget sibling, so its QWidget geometry is authoritative in both the
-        // redesigned and legacy front ends.
+        // The Direct3D preview remains a QWidget-owned native surface. In the
+        // pure-QML frontend WindowContainer controls its backing QWindow geometry;
+        // this helper is retained for the legacy preview-settings popup path.
         previewTopLeft = preview_->mapToGlobal(QPoint(0, 0));
         previewTopRight = preview_->mapToGlobal(QPoint(preview_->width(), 0));
         int x = previewTopRight.x() - popupSize.width() - 8;
@@ -20222,22 +20354,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         refreshPostFxRuntimeUi();
         if(beginner && !qmlFrontendActive_)
             QTimer::singleShot(0, this, [this]{ updateBeginnerResponsiveLayout(); });
-        if(qmlFrontendActive_ && advancedEditorPage_)
-        {
-            if(beginner)
-                advancedEditorPage_->hide();
-            else
-            {
-                const int revealDelay = effectiveAnimationsEnabled() ? 170 : 0;
-                QTimer::singleShot(revealDelay, this, [this]{
-                    if(qmlFrontendActive_ && !beginnerUiMode_ && advancedEditorPage_)
-                    {
-                        advancedEditorPage_->show();
-                        syncQmlNativeSurfaces();
-                    }
-                });
-            }
-        }
+        // In the pure-QML frontend, WindowContainer owns the embedded native
+        // window's geometry and visibility.  Changing the bridge mode is enough;
+        // Main.qml performs the animated Beginner/Advanced transition and then
+        // exposes the editor container at the correct point in that motion.
         syncQmlFrontendUiState();
         syncQmlFrontendProject();
         updateTitle();
@@ -22723,6 +22843,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             statusBar()->showMessage(QString("APE Match %1: GDT/SSI preset + native APE reference geometry active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
+        syncQmlFrontendPreviewState();
     }
 
     void applyLightingPreset(int index)
@@ -22849,11 +22970,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             const bool enabled = detected[static_cast<size_t>(v)];
             if (enabled) ++detectedCount;
             vectorLabels_[v]->setEnabled(enabled);
+            vectorLabels_[v]->setVisible(enabled);
             const auto values = preview_->renderer().GetEffectiveScriptVector(v);
             for (int c = 0; c < 4; ++c)
             {
                 QSignalBlocker blocker(vectorBoxes_[v][c]);
                 vectorBoxes_[v][c]->setEnabled(enabled);
+                vectorBoxes_[v][c]->setVisible(enabled);
                 vectorBoxes_[v][c]->setValue(values[static_cast<size_t>(c)]);
             }
         }
@@ -22916,16 +23039,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // Qt Quick/QML front-end shell. The legacy QWidget tree stays alive as the
     // proven backend/command surface during migration, while these members own
     // only the new presentation layer.
+    bool externalQmlFrontend_ = false;
     StudioFrontendBridge* qmlFrontendBridge_ = nullptr;
-    QQuickWidget* qmlQuickWidget_ = nullptr;
-    QWidget* qmlHybridRoot_ = nullptr;
-    QQuickItem* qmlPreviewSlot_ = nullptr;
-    QQuickItem* qmlAdvancedSlot_ = nullptr;
-    bool qmlNativeWidgetsAttached_ = false;
+    QQuickWindow* qmlPureHostWindow_ = nullptr;
+    bool frontendCloseApproved_ = false;
     bool qmlNativeSurfacesReady_ = false;
-    QWidget* legacyCentralWidget_ = nullptr;
     bool qmlFrontendActive_ = false;
-    bool qmlGeometrySyncQueued_ = false;
 
     CodeEditor* editor_ = new CodeEditor();
     QStackedWidget* authoringStack_ = nullptr;
@@ -23136,25 +23255,36 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     SetStudioStartupPhase(1);
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    // The preview becomes a native D3D11 child only after the QML shell is
-    // visible. Keep every other QWidget sibling non-native unless it explicitly
-    // opts in. Qt documents this application attribute specifically for mixed
-    // native/non-native widget hierarchies such as QQuickWidget + native child.
+    // The preview/editor become native child windows only after the pure QML
+    // shell has presented its first frame. Keep unrelated QWidget siblings
+    // non-native unless they explicitly opt in so native-handle creation stays
+    // isolated to the WindowContainer surfaces.
     QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings, true);
 
-    // Select Qt Quick's graphics API before QApplication/QQuickWidget startup so
-    // there is no ambiguity on the first visible frame. Qt 6.8's supported and
-    // normal Windows path is Direct3D 11. The earlier migration forced the
-    // software scene graph; the user's process consistently died exactly when
-    // that QQuickWidget attempted its first visible render. Keep software only
-    // as an explicit diagnostic recovery switch.
+    // Let Qt Quick choose its platform-default RHI for the real top-level QML
+    // window. On Windows/Qt 6.8 that normally resolves to Direct3D 11. Keep the
+    // software scene graph only as an explicit diagnostic override; forcing a
+    // backend here would make the startup path less representative of Qt's
+    // supported default configuration.
     if(qEnvironmentVariableIsSet("BO3_STUDIO_QML_SOFTWARE"))
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
-    else
-        QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
 
     QApplication app(argc, argv);
+    QQuickStyle::setStyle(QStringLiteral("Basic"));
     app.setApplicationName("BO3 Shader Studio");
+
+    // Make every launch self-contained diagnostically. Stale crash/QML/Qt logs
+    // from an earlier build caused unnecessary ambiguity during the failed hybrid
+    // migration, so a successful pure-QML run starts with a clean evidence set.
+    const QString diagnosticRoot = QCoreApplication::applicationDirPath();
+    QFile::remove(QDir(diagnosticRoot).filePath(QStringLiteral("qml_frontend_startup.log")));
+    QFile::remove(QDir(diagnosticRoot).filePath(QStringLiteral("studio_crash.log")));
+    QFile::remove(QDir(diagnosticRoot).filePath(QStringLiteral("studio_crash.dmp")));
+    {
+        QFile qtLog(QDir(diagnosticRoot).filePath(QStringLiteral("studio_qt.log")));
+        qtLog.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate);
+    }
+
     gPreviousStudioQtMessageHandler = qInstallMessageHandler(StudioQtMessageHandler);
     AppendStudioStartupTrace(QStringLiteral("Process started; crash handler + Qt message logger installed"), true);
     SetStudioStartupPhase(2);
@@ -23320,116 +23450,185 @@ int RunBo3ShaderStudio(int argc, char* argv[])
                                QColor(QStringLiteral("#9DA8B5")),
                                QColor(QStringLiteral("#4D8FCC")));
 
-        QQuickWidget view;
-        view.setResizeMode(QQuickWidget::SizeRootObjectToView);
-        view.setClearColor(Qt::transparent);
-        view.rootContext()->setContextProperty(QStringLiteral("frontend"), &bridge);
-        QString renderError;
-        QObject::connect(&view, &QQuickWidget::sceneGraphError, &view,
-                         [&renderError](QQuickWindow::SceneGraphError error, const QString& message)
-        {
-            renderError = QStringLiteral("scene graph error %1: %2").arg(static_cast<int>(error)).arg(message);
-        });
-        view.setSource(QUrl(QStringLiteral("qrc:/frontend/Main.qml")));
-
+        QQmlApplicationEngine engine;
         QStringList errors;
-        const bool ready = WaitForQuickFrontendLoad(&view, &errors);
-        if(ready)
+        QQuickWindow* rootWindow = LoadPureQmlFrontend(engine, bridge, &errors);
+        QString firstFrameError;
+        const bool frameReady = rootWindow && WaitForPureQmlFirstFrame(rootWindow, 8000, &firstFrameError);
+        if(!firstFrameError.isEmpty()) errors << firstFrameError;
+
+        if(!frameReady)
         {
-            // A component-only smoke test missed the previous startup failure: the
-            // scene graph is not created until the widget is actually shown.
-            // Render a few event-loop turns so CI validates the same integration
-            // class the real application uses.
-            view.resize(960, 540);
-            view.show();
-            QElapsedTimer renderTimer;
-            renderTimer.start();
-            while(renderTimer.elapsed() < 450 && renderError.isEmpty())
-            {
-                app.processEvents(QEventLoop::AllEvents, 30);
-                QThread::msleep(8);
-            }
-            view.hide();
-        }
-        if(!renderError.isEmpty()) errors << renderError;
-        if(!ready || !renderError.isEmpty())
-        {
-            WriteCliOutput(QStringLiteral("QML startup smoke test: FAIL\n"));
+            WriteQmlFrontendStartupLog(errors);
+            WriteCliOutput(QStringLiteral("Pure QML startup smoke test: FAIL\n"));
             if(errors.isEmpty())
-                WriteCliOutput(QStringLiteral("No QQmlError details were reported.\n"));
+                WriteCliOutput(QStringLiteral("No QML diagnostics were reported.\n"));
             else
                 WriteCliOutput(errors.join(QStringLiteral("\n")) + QStringLiteral("\n"));
             if(SUCCEEDED(com)) CoUninitialize();
             return 1;
         }
 
-        WriteCliOutput(QStringLiteral("QML startup smoke test: PASS\n"));
+        if(rootWindow) rootWindow->hide();
+        WriteCliOutput(QStringLiteral("Pure QML startup smoke test: PASS\n"));
         if(SUCCEEDED(com)) CoUninitialize();
         return 0;
     }
 
     if(frontendSmokeTest)
     {
-        // This is intentionally stronger than --qml-smoke-test: it constructs
-        // the real MainWindow, starts the QML shell, initializes the native D3D
-        // preview, and survives long enough to exercise their coexistence. This
-        // is the integration class that failed on the user's machine.
+        // Regression runs must not modify the user's saved projects or UI preferences.
+        QTemporaryDir smokeSettingsDirectory;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, smokeSettingsDirectory.path());
         QSettings smokeSettings("OpenAI", "BO3HLSLPreviewer");
         smokeSettings.setValue("ui/gettingStartedComplete", true);
         smokeSettings.setValue("updates/automaticCheck", false);
-        AppendStudioStartupTrace(QStringLiteral("Frontend integration smoke test starting"), true);
-        SetStudioStartupPhase(3);
-        MainWindow smokeWindow;
-        smokeWindow.resize(1280, 720);
-        smokeWindow.show();
+        AppendStudioStartupTrace(QStringLiteral("Pure QML frontend integration smoke test starting"), true);
 
-        // Exercise the application through the real Qt event loop instead of a
-        // hand-pumped processEvents() loop. A blocking paint/native-window event
-        // then behaves exactly as it would in the shipped app, while the timeout
-        // remains owned by Qt itself.
+        // Destruction order is intentional: the QML engine/window must disappear
+        // before the hidden QWidget backend destroys the native surfaces it owns.
+        std::unique_ptr<MainWindow> smokeBackend;
+        StudioFrontendBridge bridge;
+        bridge.setUiState(true, false, QStringLiteral("0.3"));
+        bridge.setPaletteState(QStringLiteral("BO3 Dark"),
+                               QColor(QStringLiteral("#12151A")),
+                               QColor(QStringLiteral("#171B21")),
+                               QColor(QStringLiteral("#0D1014")),
+                               QColor(QStringLiteral("#242A32")),
+                               QColor(QStringLiteral("#E3E8EF")),
+                               QColor(QStringLiteral("#9DA8B5")),
+                               QColor(QStringLiteral("#4D8FCC")));
+        auto smokeEngine = std::make_unique<QQmlApplicationEngine>();
+        QQmlApplicationEngine& engine = *smokeEngine;
+
+        QStringList errors;
+        QQuickWindow* rootWindow = LoadPureQmlFrontend(engine, bridge, &errors);
+        QString firstFrameError;
+        if(!rootWindow || !WaitForPureQmlFirstFrame(rootWindow, 8000, &firstFrameError))
+        {
+            if(!firstFrameError.isEmpty()) errors << firstFrameError;
+            WriteQmlFrontendStartupLog(errors);
+            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (pure QML first frame)\n"));
+            if(!errors.isEmpty()) WriteCliOutput(errors.join(QStringLiteral("\n")) + QStringLiteral("\n"));
+            if(SUCCEEDED(com)) CoUninitialize();
+            return 1;
+        }
+
+        AppendStudioStartupTrace(QStringLiteral("Pure QML first frame presented; constructing hidden backend"));
+        smokeBackend = std::make_unique<MainWindow>(false, true);
+        if(!smokeBackend->attachPureQmlFrontend(&bridge, rootWindow))
+        {
+            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (backend bridge attach)\n"));
+            rootWindow->hide();
+            if(SUCCEEDED(com)) CoUninitialize();
+            return 1;
+        }
+
+        QObject::connect(&engine, &QQmlEngine::warnings, &app, [&](const QList<QQmlError>& warnings){
+            for (const auto& warning : warnings) errors << warning.toString();
+        });
         int smokeResult = 1;
-
-        // Readiness is deliberately condition-driven instead of sampled at one
-        // fixed timestamp. On GitHub's Windows runner the APE preset can take a
-        // couple of seconds to apply after D3D initializes, so the previous
-        // 3.2-second snapshot could fail only ~100 ms before the native surfaces
-        // became ready. Poll until the real integration condition is satisfied,
-        // with a hard timeout for genuine hangs.
+        QStringList failures;
+        QVector<std::function<void()>> steps;
+        auto require = [&](bool ok, const QString& label) {
+            if (!ok) failures << label;
+        };
+        for (bool animations : {false, true}) {
+            steps << [&, animations] {
+                for (auto* action : smokeBackend->findChildren<QAction*>())
+                    if (action->text() == QStringLiteral("Animations")) action->setChecked(animations);
+            };
+            for (int cycle = 0; cycle < 2; ++cycle) {
+                steps << [&]{ bridge.requestMode(false); };
+                steps << [&]{ require(!bridge.beginnerMode(), "Advanced mode"); bridge.requestMode(true); };
+                for (int target : {0, 1, 2}) {
+                    steps << [&, target]{ bridge.requestTarget(target); };
+                    steps << [&, target]{ require(bridge.target() == target, "Target synchronization"); };
+                }
+            }
+        }
+        steps << [&]{ bridge.requestTarget(1); };
+        for (int mesh = 0; mesh < 6; ++mesh) {
+            steps << [&, mesh]{ bridge.requestMesh(mesh); };
+            steps << [&, mesh]{ require(bridge.previewMeshIndex() == mesh, "Preview mesh synchronization"); };
+        }
+        for (const QString& name : {QStringLiteral("BO3 Dark"), QStringLiteral("Liquid Glass"), QStringLiteral("Light")})
+            steps << [&, name]{
+                for (auto* action : smokeBackend->findChildren<QAction*>())
+                    if (action->text() == name) action->trigger();
+                require(bridge.themeName() == name, "Theme synchronization");
+            };
+        for (const QString& name : {QStringLiteral("Output / Console"), QStringLiteral("Inputs"), QStringLiteral("Parameters"),
+            QStringLiteral("Material Textures"), QStringLiteral("Performance"), QStringLiteral("Scene / Lighting"),
+            QStringLiteral("Script Vectors"), QStringLiteral("Preview Settings")}) {
+            steps << [&, name]{ bridge.requestPanel(name); };
+            steps << [&, name]{
+                require(bridge.panelTitle() == name && bridge.panelModel()->rowCount() > 0, "Functional panel model: " + name);
+                require(rootWindow->property("utilityPanelVisible").toBool(), "Visible utility panel: " + name);
+            };
+        }
+        steps << [&]{ require(smokeBackend->frontendSmokeReloadProject(smokeSettingsDirectory.path()), "Saved project reload"); };
+        steps << [&]{ rootWindow->showMaximized(); };
+        for (int i = 0; i < 24; ++i)
+            steps << [&, i]{ rootWindow->setProperty("beginnerSplitRatio", 0.2 + (i % 12) * 0.025); };
+        steps << [&]{ rootWindow->resize(960, 600); };
+        steps << [&]{ bridge.requestFullPreview(); };
+        steps << [&]{ require(rootWindow->property("fullPreview").toBool(), "Full Preview"); bridge.requestFullPreview(); };
+        steps << [&]{ require(!rootWindow->property("fullPreview").toBool(), "Restore Preview"); bridge.showEffectBrowser(); };
+        int stepIndex = 0;
+        bool interactionSequenceStarted = false;
         QTimer readinessPoll;
         readinessPoll.setInterval(100);
         QObject::connect(&readinessPoll, &QTimer::timeout, &app, [&]
         {
-            if(!smokeWindow.isVisible())
+            if(!rootWindow->isVisible())
             {
-                WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (window not visible)\n"));
+                WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (pure QML window not visible)\n"));
                 readinessPoll.stop();
-                smokeWindow.hide();
-                app.quit();
+                rootWindow->setProperty("closeApprovedByBackend", true);
+                app.exit(smokeResult);
                 return;
             }
 
-            if(smokeWindow.frontendSmokeReady())
+            if(smokeBackend->frontendSmokeReady() && !interactionSequenceStarted)
             {
-                AppendStudioStartupTrace(QStringLiteral("Frontend integration smoke test reached ready state"));
-                WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
-                smokeResult = 0;
+                interactionSequenceStarted = true;
+                AppendStudioStartupTrace(QStringLiteral("Pure QML native surfaces ready; running frontend regression sequence"));
+                return;
+            }
+            if (interactionSequenceStarted) {
+                if (stepIndex < steps.size()) { steps[stepIndex++](); return; }
+                require(errors.isEmpty(), "QML runtime diagnostics: " + errors.join("\n"));
+                smokeResult = failures.isEmpty() ? 0 : 1;
+                WriteCliOutput(QString("Frontend integration smoke test: %1 (%2 steps)\n")
+                    .arg(smokeResult == 0 ? "PASS" : "FAIL").arg(steps.size()));
+                for (const auto& failure : failures) WriteCliOutput(failure + "\n");
                 readinessPoll.stop();
-                smokeWindow.hide();
-                app.quit();
+                rootWindow->hide();
+                rootWindow->setProperty("closeApprovedByBackend", true);
+                app.exit(smokeResult);
             }
         });
         readinessPoll.start();
 
-        QTimer::singleShot(12000, &app, [&]
+        QTimer::singleShot(90000, &app, [&]
         {
             if(smokeResult == 0) return;
-            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (QML/native surfaces not ready before timeout)\n"));
+            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (pure QML/native surfaces not ready before timeout)\n"));
             readinessPoll.stop();
-            smokeWindow.hide();
-            app.quit();
+            rootWindow->hide();
+            rootWindow->setProperty("closeApprovedByBackend", true);
+            app.exit(smokeResult);
         });
 
         app.exec();
+        AppendStudioStartupTrace(QStringLiteral("Frontend smoke event loop exited"));
+        if(smokeBackend) smokeBackend->detachPureQmlFrontend();
+        smokeEngine.reset();
+        AppendStudioStartupTrace(QStringLiteral("Frontend smoke QML engine destroyed"));
+        smokeBackend.reset();
+        AppendStudioStartupTrace(QStringLiteral("Frontend smoke backend destroyed"));
         if(SUCCEEDED(com)) CoUninitialize();
         return smokeResult;
     }
@@ -23490,6 +23689,21 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         return result;
     }
 
+    // Explicit recovery switch.  Keep this outside the pure-QML path so a user
+    // can always start the proven QWidget shell even if the Qt Quick frontend or
+    // a platform graphics driver is broken.  Normal launches never enter this
+    // branch.
+    if(qEnvironmentVariableIsSet("BO3_STUDIO_LEGACY_UI"))
+    {
+        AppendStudioStartupTrace(QStringLiteral("BO3_STUDIO_LEGACY_UI requested; starting legacy recovery shell"));
+        MainWindow legacyWindow;
+        legacyWindow.setWindowTitle(legacyWindow.windowTitle() + QStringLiteral("  [LEGACY RECOVERY]"));
+        legacyWindow.show();
+        const int legacyResult = app.exec();
+        if(SUCCEEDED(com)) CoUninitialize();
+        return legacyResult;
+    }
+
     // Fast 0.3 startup intro. It reflects the saved theme/accent and visible
     // version while MainWindow performs its real initialization work; there is no
     // fake progress bar or artificial delay.
@@ -23537,50 +23751,144 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     splash.show();
     app.processEvents();
 
-    SetStudioStartupPhase(3);
-    AppendStudioStartupTrace(QStringLiteral("Constructing MainWindow"));
-    MainWindow window;
-    AppendStudioStartupTrace(QStringLiteral("MainWindow constructed"));
-    splash.showMessage("Initializing preview…", Qt::AlignLeft | Qt::AlignBottom, splashAccent);
+    // The pure-QML frontend is intentionally motion-rich. Its explicit Studio
+    // Animations toggle controls that motion. Windows' legacy client-area animation
+    // flag is not used as a hard global kill-switch because it can be disabled by
+    // desktop/remote-session policy and was making every QML transition disappear.
+    const bool startupAnimations = startupSettings.value("ui/animationsEnabled", true).toBool();
 
-    // Do not pump the Qt event queue between constructing the hybrid QML host
-    // and showing the real top-level window.  With QQuickWidget this can run
-    // deferred scene-graph/native-child events while the parent QMainWindow is
-    // still hidden.  The frontend integration smoke test never used this extra
-    // processEvents() call, which is why CI could pass while the normal splash
-    // startup path disappeared immediately after construction on the user's PC.
-    // Let the normal event loop own the first QML frame instead.
-    AppendStudioStartupTrace(QStringLiteral("About to show main window (no pre-show processEvents)"));
-    window.show();
-    SetStudioStartupPhase(7);
-    AppendStudioStartupTrace(QStringLiteral("Main window shown"));
-    QTimer::singleShot(1500, &window, []
+    // 0.3 pure-Qt-Quick startup architecture.
+    //
+    // The previous migration embedded QML in QMainWindow through QQuickWidget.
+    // On the user's Windows machine that path consistently died on the first
+    // QWidget::show(), even after the QML component itself had reached Ready.
+    // The real frontend is now an independent top-level QQuickWindow.  We require
+    // that window to present a real frame *before* constructing the hidden
+    // QWidget/D3D backend.  Native preview/editor QWindows are published later
+    // through Qt 6.8 WindowContainer; they cannot participate in the first frame.
+    StudioFrontendBridge frontendBridge;
+    frontendBridge.setUiState(true, startupAnimations, startupVersion);
+    if(lightSplash)
     {
-        SetStudioStartupPhase(11);
-        AppendStudioStartupTrace(QStringLiteral("Startup survived 1.5 seconds; event loop stable"));
-    });
-
-    bool startupAnimations = startupSettings.value("ui/animationsEnabled", true).toBool();
-#ifdef _WIN32
-    BOOL clientAnimations = TRUE;
-    if(SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0) && !clientAnimations)
-        startupAnimations = false;
-#endif
-    if(startupAnimations)
-    {
-        auto* fade = new QPropertyAnimation(&splash, "windowOpacity", &splash);
-        fade->setDuration(140);
-        fade->setStartValue(1.0);
-        fade->setEndValue(0.0);
-        QObject::connect(fade, &QPropertyAnimation::finished, &splash, &QSplashScreen::close);
-        fade->start(QAbstractAnimation::DeleteWhenStopped);
+        frontendBridge.setPaletteState(startupTheme,
+                                       QColor(QStringLiteral("#F7F9FB")),
+                                       QColor(QStringLiteral("#FFFFFF")),
+                                       QColor(QStringLiteral("#EEF2F6")),
+                                       QColor(QStringLiteral("#E4E9EF")),
+                                       QColor(QStringLiteral("#1C252E")),
+                                       QColor(QStringLiteral("#66717D")),
+                                       splashAccent);
     }
     else
     {
-        splash.close();
+        frontendBridge.setPaletteState(startupTheme,
+                                       QColor(QStringLiteral("#12151A")),
+                                       QColor(QStringLiteral("#171B21")),
+                                       QColor(QStringLiteral("#0D1014")),
+                                       QColor(QStringLiteral("#242A32")),
+                                       QColor(QStringLiteral("#E3E8EF")),
+                                       QColor(QStringLiteral("#9DA8B5")),
+                                       splashAccent);
     }
 
+    std::unique_ptr<MainWindow> backend;
+    auto qmlEngine = std::make_unique<QQmlApplicationEngine>();
+    QStringList qmlErrors;
+
+    SetStudioStartupPhase(3);
+    AppendStudioStartupTrace(QStringLiteral("Loading pure QML top-level frontend"));
+    QQuickWindow* rootWindow = LoadPureQmlFrontend(*qmlEngine, frontendBridge, &qmlErrors);
+    QString firstFrameError;
+    const bool firstFrameReady = rootWindow && WaitForPureQmlFirstFrame(rootWindow, 8000, &firstFrameError);
+    if(!firstFrameError.isEmpty()) qmlErrors << firstFrameError;
+
+    auto runLegacyRecovery = [&](const QString& reason) -> int
+    {
+        AppendStudioStartupTrace(QStringLiteral("Pure QML startup failed; entering explicit legacy recovery: %1").arg(reason));
+        if(rootWindow) rootWindow->hide();
+        qmlEngine.reset();
+        backend.reset();
+
+        splash.close();
+        QMessageBox::critical(nullptr,
+                              QStringLiteral("BO3 Shader Studio - QML Frontend Failed"),
+                              QStringLiteral("The new Qt Quick frontend could not start.\n\n%1\n\n"
+                                             "Shader Studio will open the stable legacy interface for recovery.\n"
+                                             "This fallback is intentional and will be labeled in the window title.\n\n"
+                                             "Diagnostic log: %2")
+                                  .arg(reason,
+                                       QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("qml_frontend_startup.log"))));
+
+        qputenv("BO3_STUDIO_LEGACY_UI", QByteArrayLiteral("1"));
+        MainWindow legacyWindow;
+        legacyWindow.setWindowTitle(legacyWindow.windowTitle() + QStringLiteral("  [LEGACY RECOVERY]"));
+        legacyWindow.show();
+        const int legacyResult = app.exec();
+        qunsetenv("BO3_STUDIO_LEGACY_UI");
+        return legacyResult;
+    };
+
+    if(!firstFrameReady)
+    {
+        const QString logPath = WriteQmlFrontendStartupLog(qmlErrors);
+        const QString reason = qmlErrors.isEmpty()
+            ? QStringLiteral("The pure QML top-level window did not present its first frame.")
+            : qmlErrors.join(QStringLiteral("\n"));
+        AppendStudioStartupTrace(QStringLiteral("Pure QML first-frame startup FAILED; diagnostics: %1").arg(logPath));
+        const int result = runLegacyRecovery(reason);
+        if (SUCCEEDED(com)) CoUninitialize();
+        return result;
+    }
+
+    SetStudioStartupPhase(4);
+    AppendStudioStartupTrace(QStringLiteral("Pure QML top-level first frame presented"));
+    // The real QML shell is already visible. Do not leave QSplashScreen covering it
+    // while the hidden QWidget backend is constructed; if backend setup takes a
+    // moment Windows otherwise presents a stale splash and may label the whole app
+    // as unresponsive even though the new frontend has already rendered.
+    splash.close();
+    frontendBridge.setStatusText(QStringLiteral("Starting shader backend…"));
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 12);
+
+    // Construct the old QWidget application only as a hidden backend after the
+    // top-level QML window is already independently alive.  This constructor is
+    // told explicitly not to create or show any embedded/hybrid QML frontend.
+    SetStudioStartupPhase(5);
+    AppendStudioStartupTrace(QStringLiteral("Constructing hidden shader backend after QML first frame"));
+    backend = std::make_unique<MainWindow>(false, true);
+    AppendStudioStartupTrace(QStringLiteral("Hidden shader backend constructed"));
+
+    SetStudioStartupPhase(6);
+    if(!backend->attachPureQmlFrontend(&frontendBridge, rootWindow))
+    {
+        qmlErrors << QStringLiteral("The hidden C++ backend could not attach to the pure QML frontend bridge.");
+        const QString logPath = WriteQmlFrontendStartupLog(qmlErrors);
+        AppendStudioStartupTrace(QStringLiteral("Pure QML backend bridge attach FAILED; diagnostics: %1").arg(logPath));
+        const int result = runLegacyRecovery(qmlErrors.join(QStringLiteral("\n")));
+        if (SUCCEEDED(com)) CoUninitialize();
+        return result;
+    }
+
+    SetStudioStartupPhase(7);
+    AppendStudioStartupTrace(QStringLiteral("Pure QML frontend visible; hidden backend attached"));
+
+    frontendBridge.setStatusText(QStringLiteral("Preparing preview…"));
+
+    QTimer::singleShot(1500, &app, []
+    {
+        SetStudioStartupPhase(11);
+        AppendStudioStartupTrace(QStringLiteral("Pure QML startup survived 1.5 seconds; event loop stable"));
+    });
+
     const int result = app.exec();
+
+    // Detach WindowContainer-owned QWindows before the QML engine destroys the
+    // top-level scene.  Then destroy QML before the hidden QWidget backend so
+    // native-window ownership is unambiguous during shutdown.
+    if(backend) backend->detachPureQmlFrontend();
+    qmlEngine.reset();
+    backend.reset();
+
     if (SUCCEEDED(com)) CoUninitialize();
     return result;
 }

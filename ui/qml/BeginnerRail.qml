@@ -31,6 +31,19 @@ GlassSurface {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickDeceleration: 1900
+        interactive: false
+
+        // Desktop behavior: wheel/trackpad scrolls the rail, but holding the
+        // left mouse button on empty content no longer drags the whole page.
+        WheelHandler {
+            target: null
+            onWheel: function(event) {
+                var delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 2
+                var maxY = Math.max(0, flick.contentHeight - flick.height)
+                flick.contentY = Math.max(0, Math.min(maxY, flick.contentY - delta))
+                event.accepted = true
+            }
+        }
 
         Column {
             id: content
@@ -75,13 +88,28 @@ GlassSurface {
                                    : targetMouse.containsMouse
                                      ? Qt.rgba(frontend.buttonColor.r, frontend.buttonColor.g, frontend.buttonColor.b, 0.68)
                                      : Qt.rgba(frontend.baseColor.r, frontend.baseColor.g, frontend.baseColor.b, 0.55)
-                            border.width: frontend.target === index ? 1.3 : 1
+                            border.width: frontend.target === index ? 1.3 : targetMouse.containsMouse ? 1.15 : 1
                             border.color: frontend.target === index
                                           ? frontend.accentColor
-                                          : Qt.rgba(frontend.textColor.r, frontend.textColor.g, frontend.textColor.b, 0.08)
-                            scale: targetMouse.pressed ? 0.97 : targetMouse.containsMouse ? 1.015 : 1
-                            Behavior on scale { NumberAnimation { duration: frontend.animationsEnabled ? 110 : 0; easing.type: Easing.OutCubic } }
-                            Behavior on color { ColorAnimation { duration: frontend.animationsEnabled ? 135 : 0 } }
+                                          : targetMouse.containsMouse
+                                            ? Qt.rgba(frontend.accentColor.r, frontend.accentColor.g, frontend.accentColor.b, 0.48)
+                                            : Qt.rgba(frontend.textColor.r, frontend.textColor.g, frontend.textColor.b, 0.08)
+                            // Press inward only. Growing a tile outside its Row/Flickable cell
+                            // caused the clipped corners visible in the hover screenshots.
+                            scale: targetMouse.pressed ? 0.975 : 1
+                            Behavior on scale { NumberAnimation { duration: frontend.animationsEnabled ? 105 : 0; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: frontend.animationsEnabled ? 165 : 0; easing.type: Easing.OutCubic } }
+                            Behavior on border.color { ColorAnimation { duration: frontend.animationsEnabled ? 165 : 0; easing.type: Easing.OutCubic } }
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                radius: 11
+                                color: "transparent"
+                                border.width: 1
+                                border.color: Qt.rgba(1, 1, 1, targetMouse.containsMouse ? 0.10 : 0.0)
+                                opacity: targetMouse.containsMouse ? 1 : 0
+                                Behavior on opacity { NumberAnimation { duration: frontend.animationsEnabled ? 160 : 0 } }
+                            }
                             Column {
                                 anchors.centerIn: parent
                                 spacing: 2
@@ -204,7 +232,7 @@ GlassSurface {
                     font.pixelSize: 10
                     wrapMode: Text.WordWrap
                 }
-                ColorField { visible: frontend.target === 1; width: parent.width; label: "Base Color"; settingKey: "baseColor"; value: rail.baseColor("baseColor", "#2F78D0") }
+                ColorField { visible: frontend.target === 1; width: parent.width; label: "Base Color"; settingKey: "baseColor"; value: rail.baseColor("baseColor", "#FFFFFF") }
                 Column {
                     visible: frontend.target === 2
                     width: parent.width
@@ -250,10 +278,10 @@ GlassSurface {
                     width: parent.width
                     spacing: 7
                     Repeater {
-                        model: frontend.activeEffects
+                        model: frontend.activeEffects.length
                         delegate: Rectangle {
-                            required property var modelData
                             required property int index
+                            readonly property var modelData: frontend.activeEffects[index]
                             width: parent.width
                             height: 54
                             radius: 12
@@ -298,7 +326,7 @@ GlassSurface {
                 Text { text: "4  SELECTED EFFECT"; color: frontend.mutedColor; font.pixelSize: 10; font.bold: true; font.letterSpacing: 0.9 }
 
                 Column {
-                    visible: !frontend.selectedEffect.valid
+                    visible: frontend.selectedEffect.valid !== true
                     width: parent.width
                     spacing: 5
                     Text { text: "Nothing selected"; color: frontend.textColor; font.pixelSize: 12; font.bold: true }
@@ -306,7 +334,7 @@ GlassSurface {
                 }
 
                 Column {
-                    visible: frontend.selectedEffect.valid
+                    visible: frontend.selectedEffect.valid === true
                     width: parent.width
                     spacing: 9
                     Row {
@@ -324,9 +352,10 @@ GlassSurface {
                     }
                     Text { width: parent.width; text: frontend.selectedEffect.description || ""; color: frontend.mutedColor; font.pixelSize: 10; wrapMode: Text.WordWrap }
                     Repeater {
-                        model: frontend.selectedEffect.parameters || []
+                        model: (frontend.selectedEffect.parameters || []).length
                         delegate: ParameterControl {
-                            required property var modelData
+                            required property int index
+                            readonly property var modelData: (frontend.selectedEffect.parameters || [])[index]
                             width: parent.width
                             parameterData: modelData
                             effectInstanceId: frontend.selectedEffect.instanceId || ""

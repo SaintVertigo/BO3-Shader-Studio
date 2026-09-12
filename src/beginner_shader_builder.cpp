@@ -3186,7 +3186,7 @@ float4 ps_main(PS_INPUT input) : SV_Target
 
 QString generateMaterial(const Project& project)
 {
-    const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
+    const QColor base = settingColor(project, "baseColor", QColor("#FFFFFF"));
     const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
@@ -3250,7 +3250,7 @@ float4 ps_main(const BeginnerMaterialInput input) : SV_TARGET0
 
 QString generateMaterialPreview(const Project& project)
 {
-    const QColor base = settingColor(project, "baseColor", QColor("#2F78D0"));
+    const QColor base = settingColor(project, "baseColor", QColor("#FFFFFF"));
     const QString helpers = runtimeParameterDeclarations(project) + optionalHelpers(project);
     const QString effects = commonEffectCode(project, true, true);
     return QStringLiteral(R"HLSL(// BO3 Shader Studio - Beginner Shader Builder
@@ -4165,7 +4165,7 @@ Project makeDefaultProject(Target target)
     project.name = target == Target::Material ? "New Material" :
                    target == Target::Sky ? "New Sky" : "New Screen Effect";
     if(target == Target::Material)
-        project.settings["baseColor"] = "#2F78D0";
+        project.settings["baseColor"] = "#FFFFFF";
     else if(target == Target::Sky)
     {
         project.settings["zenithColor"] = "#102E68";

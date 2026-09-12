@@ -6,10 +6,13 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QWindow>
+#include "studio_panel_model.h"
 
 class StudioFrontendBridge final : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(StudioPanelModel* panelModel READ panelModel CONSTANT)
+    Q_PROPERTY(QString panelTitle READ panelTitle NOTIFY panelChanged)
     Q_PROPERTY(QWindow* hostWindow READ hostWindow NOTIFY windowsChanged)
     Q_PROPERTY(QWindow* previewWindow READ previewWindow NOTIFY windowsChanged)
     Q_PROPERTY(QWindow* advancedEditorWindow READ advancedEditorWindow NOTIFY windowsChanged)
@@ -35,9 +38,18 @@ class StudioFrontendBridge final : public QObject
     Q_PROPERTY(int selectedEffectIndex READ selectedEffectIndex NOTIFY projectChanged)
     Q_PROPERTY(QVariantMap selectedEffect READ selectedEffect NOTIFY projectChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
+    Q_PROPERTY(bool previewCamera3D READ previewCamera3D NOTIFY previewStateChanged)
+    Q_PROPERTY(int previewMeshIndex READ previewMeshIndex NOTIFY previewStateChanged)
+    Q_PROPERTY(QString previewMeshName READ previewMeshName NOTIFY previewStateChanged)
+    Q_PROPERTY(int apeLightingIndex READ apeLightingIndex NOTIFY previewStateChanged)
+    Q_PROPERTY(QString apeLightingName READ apeLightingName NOTIFY previewStateChanged)
 
 public:
     explicit StudioFrontendBridge(QObject* parent = nullptr);
+    StudioPanelModel* panelModel() { return &panelModel_; }
+    QString panelTitle() const { return panelTitle_; }
+    void showPanel(const QString& title, QWidget* panel);
+    Q_INVOKABLE void requestPanel(const QString& title) { emit panelRequested(title); }
 
     QWindow* hostWindow() const { return hostWindow_; }
     QWindow* previewWindow() const { return previewWindow_; }
@@ -64,6 +76,11 @@ public:
     int selectedEffectIndex() const { return selectedEffectIndex_; }
     const QVariantMap& selectedEffect() const { return selectedEffect_; }
     const QString& statusText() const { return statusText_; }
+    bool previewCamera3D() const { return previewCamera3D_; }
+    int previewMeshIndex() const { return previewMeshIndex_; }
+    const QString& previewMeshName() const { return previewMeshName_; }
+    int apeLightingIndex() const { return apeLightingIndex_; }
+    const QString& apeLightingName() const { return apeLightingName_; }
 
     void setNativeWindows(QWindow* hostWindow, QWindow* previewWindow, QWindow* advancedEditorWindow);
     void setUiState(bool beginnerMode, bool animationsEnabled, const QString& displayVersion);
@@ -77,8 +94,14 @@ public:
                          const QVariantList& activeEffects, int selectedEffectIndex,
                          const QVariantMap& selectedEffect);
     void setStatusText(const QString& text);
+    void setPreviewState(bool camera3D, int meshIndex, const QString& meshName,
+                         int apeLightingIndex, const QString& apeLightingName);
 
     Q_INVOKABLE void requestMenu(const QString& menuName);
+    Q_INVOKABLE void requestAnimationsEnabled(bool enabled);
+    Q_INVOKABLE void requestAccentColor();
+    Q_INVOKABLE void requestResetAccent();
+    Q_INVOKABLE void requestKeybinds();
     Q_INVOKABLE void requestOpen();
     Q_INVOKABLE void requestSave();
     Q_INVOKABLE void requestPreview();
@@ -100,20 +123,32 @@ public:
     Q_INVOKABLE void requestFullPreview();
     Q_INVOKABLE void requestCamera3D(bool enabled);
     Q_INVOKABLE void requestMesh(int index);
+    Q_INVOKABLE void requestApeLighting(int index);
     Q_INVOKABLE void requestBrowseEffects();
     Q_INVOKABLE void requestTutorialComplete();
+    Q_INVOKABLE void requestClose();
 
     void showGettingStarted();
     void showEffectBrowser();
+    void showPreviewSettings();
 
 signals:
+    void panelChanged();
+    void panelOpenRequested();
+    void panelRequested(const QString& title);
+    void fullPreviewToggleRequested();
     void windowsChanged();
     void stateChanged();
     void paletteChanged();
     void projectChanged();
     void statusChanged();
+    void previewStateChanged();
 
     void menuRequested(const QString& menuName);
+    void animationsEnabledRequested(bool enabled);
+    void accentColorRequested();
+    void resetAccentRequested();
+    void keybindsRequested();
     void openRequested();
     void saveRequested();
     void previewRequested();
@@ -135,12 +170,18 @@ signals:
     void fullPreviewRequested();
     void camera3DRequested(bool enabled);
     void meshRequested(int index);
+    void apeLightingRequested(int index);
     void browseEffectsRequested();
     void tutorialCompleteRequested();
     void gettingStartedRequested();
     void effectBrowserOpenRequested();
+    void previewSettingsOpenRequested();
+    void closeRequested();
+    void closeApproved();
 
 private:
+    StudioPanelModel panelModel_{this};
+    QString panelTitle_;
     QWindow* hostWindow_ = nullptr;
     QWindow* previewWindow_ = nullptr;
     QWindow* advancedEditorWindow_ = nullptr;
@@ -166,4 +207,9 @@ private:
     int selectedEffectIndex_ = -1;
     QVariantMap selectedEffect_;
     QString statusText_;
+    bool previewCamera3D_ = true;
+    int previewMeshIndex_ = 0;
+    QString previewMeshName_ = QStringLiteral("Sphere");
+    int apeLightingIndex_ = 1;
+    QString apeLightingName_ = QStringLiteral("Day");
 };

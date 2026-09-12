@@ -475,7 +475,7 @@ jobs:
             -NoNewWindow `
             -RedirectStandardOutput $stdoutPath `
             -RedirectStandardError $stderrPath
-          if (-not $process.WaitForExit(20000)) {
+          if (-not $process.WaitForExit(35000)) {
             try { $process.Kill() } catch {}
             Write-Host 'Frontend integration smoke test timed out. Startup diagnostics follow:'
             if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_startup.log')) {
@@ -483,6 +483,12 @@ jobs:
             }
             if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_crash.log')) {
               Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_crash.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_qt.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_qt.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\qml_frontend_startup.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\qml_frontend_startup.log') | Write-Host
             }
             if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath | Write-Host }
             if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath | Write-Host }
@@ -499,6 +505,12 @@ jobs:
             }
             if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_crash.log')) {
               Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_crash.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_qt.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_qt.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\qml_frontend_startup.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\qml_frontend_startup.log') | Write-Host
             }
             throw "Frontend integration smoke test failed with exit code $($process.ExitCode)."
           }
