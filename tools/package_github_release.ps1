@@ -79,6 +79,10 @@ $updatePath = Join-Path $out $updateName
 $fullPath = Join-Path $out $fullName
 $staging = Join-Path $env:TEMP ("BO3ShaderStudio_Package_" + [Guid]::NewGuid().ToString('N'))
 
+# Required launch/runtime set for the Qt 6.8.3 CI kit. opengl32sw.dll is
+# deliberately not required: it is a legacy optional software-OpenGL fallback
+# present in the user's older local portable folder but absent from the official
+# Qt 6.8.3 MSVC archive and not selected by windeployqt for this executable.
 $portableRequired = @(
     'BO3HLSLPreviewer.exe',
     'Qt6Core.dll',
@@ -89,7 +93,6 @@ $portableRequired = @(
     'd3dcompiler_47.dll',
     'dxcompiler.dll',
     'dxil.dll',
-    'opengl32sw.dll',
     'generic\qtuiotouchplugin.dll',
     'iconengines\qsvgicon.dll',
     'imageformats\qgif.dll',

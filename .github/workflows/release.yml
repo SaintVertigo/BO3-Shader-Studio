@@ -342,6 +342,7 @@ jobs:
         run: tools\ci_build_release.cmd
 
       - name: Stage portable distribution
+        id: stage_portable
         if: steps.build_runtime.outcome == 'success'
         shell: pwsh
         run: |
@@ -526,6 +527,7 @@ jobs:
         shell: pwsh
         env:
           BUILD_RESULT: ${{ steps.build_runtime.outcome }}
+          STAGE_RESULT: ${{ steps.stage_portable.outcome }}
           RUN_GLSL: ${{ env.BO3_RUN_GLSL }}
           RUN_SHADERTOY: ${{ env.BO3_RUN_SHADERTOY }}
           RUN_POSTFX: ${{ env.BO3_RUN_POSTFX }}
@@ -538,6 +540,12 @@ jobs:
           Write-Host ("Windows runtime build: {0}" -f $env:BUILD_RESULT)
           if ($env:BUILD_RESULT -ne 'success') {
             throw "Windows runtime build failed before regression testing. Expand the 'Build Windows runtime' step for the compiler/build error; skipped suites are not test failures."
+          }
+
+          Write-Host ("Portable distribution staging: {0}" -f $env:STAGE_RESULT)
+          if ($env:STAGE_RESULT -ne 'success') {
+            Write-Host "Regression gate is not adding a second failure because portable staging already failed. Expand 'Stage portable distribution' for the real error."
+            exit 0
           }
 
           $checks = @(

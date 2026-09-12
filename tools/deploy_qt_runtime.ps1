@@ -64,11 +64,30 @@ $qtDlls = @(
     'Qt6Gui.dll',
     'Qt6Network.dll',
     'Qt6Svg.dll',
-    'Qt6Widgets.dll',
-    'opengl32sw.dll'
+    'Qt6Widgets.dll'
 )
 foreach ($dll in $qtDlls) {
     Copy-RequiredFile (Join-Path $qtBins $dll) (Join-Path $dist $dll) $dll
+}
+
+# The user's older known-good portable folder contains opengl32sw.dll, but the
+# official Qt 6.8.3 MSVC archive installed by aqt does not ship that legacy
+# software-OpenGL fallback. windeployqt also does not select it for this EXE.
+# Preserve it when a Qt kit provides it, but do not fail a current Qt 6.8.3
+# release merely because an optional legacy fallback is absent.
+$optionalQtDlls = @('opengl32sw.dll')
+foreach ($dll in $optionalQtDlls) {
+    $source = Join-Path $qtBins $dll
+    $destination = Join-Path $dist $dll
+    if (Test-Path -LiteralPath $source) {
+        Copy-RequiredFile $source $destination $dll
+    }
+    elseif (Test-Path -LiteralPath $destination) {
+        Write-Host "Keeping optional portable runtime file already in dist: $dll"
+    }
+    else {
+        Write-Host "Optional Qt runtime file is not part of this Qt kit; skipping: $dll"
+    }
 }
 
 $pluginFiles = @(
@@ -210,7 +229,6 @@ $required = @(
     'd3dcompiler_47.dll',
     'dxcompiler.dll',
     'dxil.dll',
-    'opengl32sw.dll',
     'generic\qtuiotouchplugin.dll',
     'iconengines\qsvgicon.dll',
     'imageformats\qgif.dll',
@@ -229,5 +247,9 @@ if ($missing.Count -gt 0) {
     throw ('Portable runtime deployment is incomplete: ' + ($missing -join ', '))
 }
 
-Write-Host 'Portable runtime deployment matches the known-good local distribution:'
+Write-Host 'Portable runtime deployment contains every required runtime component for the current Qt kit:'
 $required | ForEach-Object { Write-Host "  $_" }
+$optionalQtDlls | ForEach-Object {
+    $path = Join-Path $dist $_
+    if (Test-Path -LiteralPath $path) { Write-Host "  $_ (optional parity extra present)" }
+}
