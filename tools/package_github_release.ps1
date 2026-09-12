@@ -79,6 +79,55 @@ $updatePath = Join-Path $out $updateName
 $fullPath = Join-Path $out $fullName
 $staging = Join-Path $env:TEMP ("BO3ShaderStudio_Package_" + [Guid]::NewGuid().ToString('N'))
 
+function Assert-PortableRuntime([string]$Directory, [string]$Context) {
+    $required = @(
+        'BO3HLSLPreviewer.exe',
+        'Qt6Core.dll',
+        'Qt6Gui.dll',
+        'Qt6Widgets.dll',
+        'Qt6Network.dll',
+        'platforms\qwindows.dll'
+    )
+    $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Directory $_)) })
+    if ($missing.Count -gt 0) {
+        throw "$Context is missing portable runtime files: $($missing -join ', '). The release will NOT be published."
+    }
+}
+
+function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $entries = @{}
+        foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName.Replace('/','\').TrimStart('\')
+            $entries[$name.ToLowerInvariant()] = $true
+        }
+        $required = @(
+            'BO3HLSLPreviewer.exe',
+            'Qt6Core.dll',
+            'Qt6Gui.dll',
+            'Qt6Widgets.dll',
+            'Qt6Network.dll',
+            'platforms\qwindows.dll'
+        )
+        $missing = @($required | Where-Object { -not $entries.ContainsKey($_.ToLowerInvariant()) })
+        if ($missing.Count -gt 0) {
+            throw "$Context ZIP is missing portable runtime files: $($missing -join ', ')."
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+# A full-runtime package must be self-contained. The GitHub runner has Qt on
+# PATH, so regression tests alone cannot prove that a user's extracted ZIP will
+# launch. Refuse to package a full release unless the deployed runtime exists.
+if (-not $LeanPayload) {
+    Assert-PortableRuntime $dist 'dist'
+}
+
 try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
     $payload = Join-Path $staging 'payload'
@@ -134,6 +183,13 @@ try {
 
     if (-not $UpdateOnly) {
         Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $fullPath -CompressionLevel Optimal
+        Assert-ZipContainsPortableRuntime $fullPath 'Fresh-install release'
+    }
+
+    if (-not $LeanPayload) {
+        # Manual/full updater payloads also need the complete runtime because an
+        # updater may be applied to an old installation with different Qt files.
+        Assert-ZipContainsPortableRuntime $updatePath 'Full-runtime updater'
     }
 }
 finally {

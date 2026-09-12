@@ -86,12 +86,10 @@ if /I "%BO3_CI_FAST%"=="1" if /I "%BO3_LEAN_UPDATE%"=="1" (
     rem copying a full deployment tree that package_github_release.ps1 discards.
     echo Lean tester build: skipping windeployqt ^(Qt runtime is already on runner PATH and is not part of the lean payload^).
 ) else (
-    where windeployqt.exe >nul 2>nul
-    if errorlevel 1 (
-        echo ERROR: windeployqt.exe is not on PATH.
-        exit /b 1
-    )
-    windeployqt.exe --release --no-translations --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"
+    rem Deploy and then verify the portable Qt runtime. CI has Qt on PATH, which
+    rem can otherwise mask a broken ZIP: the EXE will run on the runner even when
+    rem Qt6Gui.dll / qwindows.dll were never placed beside it.
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\tools\deploy_qt_runtime.ps1" -Executable "%CD%\dist\BO3HLSLPreviewer.exe" -DistDir "%CD%\dist"
     if errorlevel 1 exit /b 1
 )
 
