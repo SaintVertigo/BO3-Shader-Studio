@@ -6,6 +6,7 @@ param(
     [string]$DistDir = 'dist',
     [string]$OutputDir = 'release_artifacts',
     [string]$NotesFile = '',
+    [string]$LauncherPath = 'build_qt\BO3ShaderStudioLauncher.exe',
     [switch]$UpdateOnly,
     [switch]$LeanPayload
 )
@@ -14,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $dist = (Resolve-Path (Join-Path $root $DistDir)).Path
 $out = Join-Path $root $OutputDir
+$launcher = if ([IO.Path]::IsPathRooted($LauncherPath)) { $LauncherPath } else { Join-Path $root $LauncherPath }
 
 # Always start clean so old bridge/legacy assets can never leak into a new
 # release when this script is also used locally.
@@ -166,6 +168,41 @@ function Assert-ZipContainsPortableRuntime([string]$ZipPath, [string]$Context, [
     }
 }
 
+function Remove-TransientReleaseFiles([string]$Directory) {
+    if (-not (Test-Path -LiteralPath $Directory)) { return }
+
+    # Smoke tests intentionally write diagnostics beside the real executable.
+    # Those files belong to the build/test machine, never to an end-user release.
+    Get-ChildItem -LiteralPath $Directory -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Extension -in @('.log', '.dmp', '.tmp') -or
+            $_.Name -like 'frontend_smoke_*' -or
+            $_.Name -like 'qml_smoke_*'
+        } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+function Assert-FreshLauncher([string]$ZipPath) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $expected = 'BO3 Shader Studio/BO3 Shader Studio.exe'
+        $found = $false
+        foreach ($entry in $archive.Entries) {
+            if ($entry.FullName.Replace('\','/').TrimStart('/') -eq $expected) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) {
+            throw "Fresh-install release ZIP is missing the root launcher: $expected"
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
 # A full-runtime package must be self-contained. The GitHub runner has Qt on
 # PATH, so regression tests alone cannot prove that a user's extracted ZIP will
 # launch. Refuse to package a full release unless the deployed runtime exists.
@@ -207,6 +244,7 @@ try {
     }
     else {
         Copy-Item -Path (Join-Path $dist '*') -Destination $payload -Recurse -Force
+        Remove-TransientReleaseFiles $payload
     }
 
     $manifest = [ordered]@{
@@ -227,15 +265,33 @@ try {
     Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $updatePath -CompressionLevel $updateCompression
 
     if (-not $UpdateOnly) {
-        # Fresh-install ZIPs should unpack into one clean application directory,
-        # matching the user's known-good portable archive instead of spilling DLLs
-        # and folders into the directory where the ZIP happens to be extracted.
+        # Keep the public ZIP clean. The tiny non-Qt launcher is the only executable
+        # at the application root; the proven portable distribution remains intact
+        # under runtime\, so Qt/DXC/plugin lookup still behaves exactly as it did
+        # when BO3HLSLPreviewer.exe lived beside those files.
+        if (-not (Test-Path -LiteralPath $launcher)) {
+            $launcherBuilder = Join-Path $root 'tools\build_release_launcher.cmd'
+            if (-not (Test-Path -LiteralPath $launcherBuilder)) {
+                throw "Clean-release launcher is missing and its builder was not found: $launcherBuilder"
+            }
+            Write-Host 'Building the clean-release launcher...'
+            & $launcherBuilder
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher)) {
+                throw "Clean-release launcher build failed: $launcher"
+            }
+        }
+
         $freshRoot = Join-Path $staging 'fresh_install'
         $freshApp = Join-Path $freshRoot 'BO3 Shader Studio'
-        New-Item -ItemType Directory -Path $freshApp -Force | Out-Null
-        Copy-Item -Path (Join-Path $dist '*') -Destination $freshApp -Recurse -Force
+        $freshRuntime = Join-Path $freshApp 'runtime'
+        New-Item -ItemType Directory -Path $freshRuntime -Force | Out-Null
+        Copy-Item -Path (Join-Path $dist '*') -Destination $freshRuntime -Recurse -Force
+        Remove-TransientReleaseFiles $freshRuntime
+        Copy-Item -LiteralPath $launcher -Destination (Join-Path $freshApp 'BO3 Shader Studio.exe') -Force
+
         Compress-Archive -Path $freshApp -DestinationPath $fullPath -CompressionLevel Optimal
-        Assert-ZipContainsPortableRuntime $fullPath 'Fresh-install release' 'BO3 Shader Studio'
+        Assert-FreshLauncher $fullPath
+        Assert-ZipContainsPortableRuntime $fullPath 'Fresh-install release' 'BO3 Shader Studio\runtime'
     }
 
     if (-not $LeanPayload) {

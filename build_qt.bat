@@ -203,6 +203,16 @@ if not exist "dist\BO3HLSLPreviewer.exe" (
 )
 
 echo.
+echo Building clean-release launcher...
+call "%CD%\tools\build_release_launcher.cmd"
+if errorlevel 1 (
+    echo.
+    echo Failed to build the clean-release launcher.
+    pause
+    exit /b 1
+)
+
+echo.
 echo Deploying Qt runtime files...
 if exist "%QT_BIN%windeployqt.exe" (
     "%QT_BIN%windeployqt.exe" --release --no-translations --qmldir "%CD%\ui\qml" --dir "%CD%\dist" "%CD%\dist\BO3HLSLPreviewer.exe"

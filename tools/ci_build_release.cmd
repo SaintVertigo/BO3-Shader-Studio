@@ -79,6 +79,13 @@ if not exist "dist\BO3HLSLPreviewer.exe" (
     exit /b 1
 )
 
+echo Building clean-release launcher...
+call "%CD%\tools\build_release_launcher.cmd"
+if errorlevel 1 (
+    echo ERROR: clean-release launcher build failed.
+    exit /b 1
+)
+
 if /I "%BO3_CI_FAST%"=="1" if /I "%BO3_LEAN_UPDATE%"=="1" (
     rem Lean automatic tester packages never resend Qt runtime DLLs. Qt's bin
     rem directory is already on PATH from install-qt-action, so the regression
