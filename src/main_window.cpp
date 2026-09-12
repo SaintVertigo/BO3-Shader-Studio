@@ -1580,7 +1580,7 @@ public:
         if(!qmlFrontendActive_)
             resetLightingControls();
         else
-            AppendStudioStartupTrace(QStringLiteral("APE lighting defaults deferred until Direct3D is ready"));
+            AppendStudioStartupTrace(QStringLiteral("APE lighting defaults deferred until after Direct3D/native-surface readiness"));
         updateBackgroundButtonText();
         installShortcuts();
 
@@ -1632,24 +1632,39 @@ public:
             AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized"));
             if(qmlFrontendActive_)
             {
-                // Now that the explicit D3D gate has succeeded, it is safe to
-                // apply the default APE preset. This used to happen earlier via
-                // resetLightingControls() and was the hidden initialization path
-                // that blocked the QML startup constructor.
-                AppendStudioStartupTrace(QStringLiteral("Applying deferred APE lighting defaults"));
-                resetLightingControls();
-
-                // QML slot geometry may have changed repeatedly during startup.
-                // Only now is it safe to expose the native HWND-backed surfaces.
-                // This ordering avoids putting an uninitialized native child over
-                // QQuickWidget's first composition pass.
+                // D3D is the only hard dependency for exposing the native preview.
+                // Do NOT hold the entire front end hostage while APE loads HDR
+                // assets or probes the user's BO3 installation. On CI that work
+                // took ~11 seconds, and on a fresh machine it could also open a
+                // hidden native folder picker during startup.
                 qmlNativeSurfacesReady_ = true;
                 syncQmlFrontendUiState();
                 syncQmlFrontendPalette();
                 syncQmlFrontendProject();
                 syncQmlNativeSurfaces();
                 SetStudioStartupPhase(10);
-                AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached after Direct3D initialization"));
+                AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached immediately after Direct3D initialization"));
+
+                // Apply APE's authored lighting after the shell is already live.
+                // This startup pass is deliberately non-interactive: if no BO3
+                // root is configured, keep the calibrated fallback environment
+                // instead of blocking behind QFileDialog. Explicit APE actions
+                // later still use the normal interactive asset prompt.
+                QTimer::singleShot(150, this, [this]{
+                    const PreviewMode startupMode = preview_->renderer().GetPreviewMode();
+                    const bool materialMode = startupMode == PreviewMode::ForwardMaterial ||
+                                              startupMode == PreviewMode::DeferredGBuffer;
+                    if(materialMode && preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+                    {
+                        AppendStudioStartupTrace(QStringLiteral("Applying deferred non-interactive APE lighting defaults"));
+                        resetLightingControls(false);
+                        AppendStudioStartupTrace(QStringLiteral("Deferred APE lighting defaults complete"));
+                    }
+                    else
+                    {
+                        AppendStudioStartupTrace(QStringLiteral("Deferred APE lighting startup skipped for non-material preview"));
+                    }
+                });
             }
             if(beginnerUiMode_)
                 startBeginnerProject(beginner::Target::PostFx, false);
@@ -15940,6 +15955,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(camera3D_) camera3D_->setChecked(false);
         }
         updateGBufferUi();
+        if(beginnerProject_.target == beginner::Target::Material && preview_ &&
+           preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
+        {
+            const int apeIndex = previewApeLightingPresetCombo_
+                ? previewApeLightingPresetCombo_->currentIndex()
+                : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
+            // Entering Material authoring may load the configured local HDR assets,
+            // but it must never surprise the user with a startup folder dialog.
+            applyApeLightingPreset(apeIndex, false, false);
+        }
         updateCameraUi();
         updateBeginnerBuilderSummary();
         updateTitle();
@@ -21755,14 +21780,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (contactShadowValue_ && contactShadowSlider_) contactShadowValue_->setText(QString::number(contactShadowSlider_->value() / 100.0f, 'f', 2));
     }
 
-    void resetLightingControls()
+    void resetLightingControls(bool allowApeAssetPrompt = true)
     {
         if (preview_ && preview_->renderer().GetMaterialPreviewProfile() == MaterialPreviewProfile::ApeMatch)
         {
             const int apeIndex = previewApeLightingPresetCombo_
                 ? previewApeLightingPresetCombo_->currentIndex()
                 : (apeLightingPresetCombo_ ? apeLightingPresetCombo_->currentIndex() : 1);
-            applyApeLightingPreset(apeIndex, false);
+            applyApeLightingPreset(apeIndex, false, allowApeAssetPrompt);
             statusBar()->showMessage("APE lighting preset restored", 2500);
             return;
         }
@@ -22128,10 +22153,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return looksLikeBo3 ? dir.absolutePath() : QString();
     }
 
-    QString ensureConfiguredBo3RootForApe()
+    QString ensureConfiguredBo3RootForApe(bool allowInteractivePrompt = true)
     {
         const QString configured = configuredBo3RootForApe();
         if (!configured.isEmpty()) return configured;
+
+        // Automatic startup must never block behind a native folder picker.
+        // Exact APE HDR assets are optional until the user explicitly requests
+        // them; the renderer can become usable immediately with its current
+        // environment and the authored SSI/calibration values.
+        if (!allowInteractivePrompt) return QString();
 
         QSettings settings("OpenAI", "BO3HLSLPreviewer");
         QString startDir = QDir::cleanPath(settings.value("bo3/exportRoot").toString());
@@ -22204,19 +22235,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
     }
 
-    bool loadApeEnvironmentForPreset(int index, QString& sourceDescription, QString& failureDescription)
+    bool loadApeEnvironmentForPreset(int index, QString& sourceDescription, QString& failureDescription, bool allowInteractivePrompt = true)
     {
         sourceDescription.clear();
         failureDescription.clear();
         if (!preview_) return false;
 
-        const QString root = ensureConfiguredBo3RootForApe();
+        const QString root = ensureConfiguredBo3RootForApe(allowInteractivePrompt);
         if (!root.isEmpty()) loadApeReferencePreviewMeshes(root);
         if (root.isEmpty())
         {
-            failureDescription =
-                "APE Match needs the local Black Ops III Mod Tools HDR sky assets. "
-                "Select the BO3 installation root when prompted (or configure it from Export).";
+            failureDescription = allowInteractivePrompt
+                ? QStringLiteral("APE Match needs the local Black Ops III Mod Tools HDR sky assets. Select the BO3 installation root when prompted (or configure it from Export).")
+                : QStringLiteral("APE Match is using its calibrated fallback environment until a Black Ops III root is configured.");
             return false;
         }
 
@@ -22352,7 +22383,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         updateCameraUi();
     }
 
-    void applyApeLightingPreset(int index, bool resetView = false)
+    void applyApeLightingPreset(int index, bool resetView = false, bool allowInteractiveAssetPrompt = true)
     {
         if (!preview_) return;
         if (apeLightingPresetCombo_ && apeLightingPresetCombo_->currentIndex() != index)
@@ -22516,7 +22547,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         QString environmentSource;
         QString environmentFailure;
-        const bool environmentLoaded = loadApeEnvironmentForPreset(index, environmentSource, environmentFailure);
+        const bool environmentLoaded = loadApeEnvironmentForPreset(index, environmentSource, environmentFailure, allowInteractiveAssetPrompt);
         if (apePresetInfoLabel_)
         {
             const PreviewMesh activeMesh = r.GetPreviewMesh();
