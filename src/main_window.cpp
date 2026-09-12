@@ -1151,14 +1151,13 @@ class D3DPreviewWidget final : public QWidget
 public:
     explicit D3DPreviewWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
-        setAttribute(Qt::WA_NativeWindow, true);
-        // This D3D child needs its own HWND, but forcing every ancestor native can
-        // destabilize QQuickWidget composition. Keep the native boundary local to
-        // the preview widget when it is hosted above the QML shell.
+        // Do not create the Direct3D child HWND in the constructor.  The QML
+        // frontend must be able to show its first top-level frame with no native
+        // D3D child participating in Windows composition.  ensureInitialized()
+        // creates the native boundary later, after the top-level window is shown
+        // and the preview has been moved to its final host.  Keep this guard set
+        // from the beginning so native creation can never propagate to ancestors.
         setAttribute(Qt::WA_DontCreateNativeAncestors, true);
-        setAttribute(Qt::WA_PaintOnScreen, true);
-        setAttribute(Qt::WA_NoSystemBackground, true);
-        setAttribute(Qt::WA_OpaquePaintEvent, true);
         // Keep the Direct3D pane genuinely collapsible. The old 320x240 hard
         // minimum was what prevented the lower compiler pane from being enlarged.
         // Let the Qt dock separator follow the cursor essentially all the way,
@@ -1189,11 +1188,30 @@ public:
         frameTimer_.start();
     }
 
-    QPaintEngine* paintEngine() const override { return nullptr; }
+    QPaintEngine* paintEngine() const override
+    {
+        // Before the deferred native/D3D transition, remain an ordinary QWidget
+        // so the first QML top-level show uses Qt's normal backing-store path.
+        // Once WA_PaintOnScreen is enabled the widget is owned by Direct3D and
+        // must not expose a Qt paint engine.
+        if(testAttribute(Qt::WA_PaintOnScreen)) return nullptr;
+        return QWidget::paintEngine();
+    }
 
     bool ensureInitialized(QString& error)
     {
         if (initialized_) return true;
+
+        // Create the child HWND only at the explicit Direct3D startup gate. Qt's
+        // documentation notes that WA_NativeWindow / WA_PaintOnScreen otherwise
+        // force native windows (and, without WA_DontCreateNativeAncestors, their
+        // ancestors too). The guard is deliberately set first.
+        setAttribute(Qt::WA_DontCreateNativeAncestors, true);
+        setAttribute(Qt::WA_NativeWindow, true);
+        setAttribute(Qt::WA_PaintOnScreen, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+
         HWND hwnd = reinterpret_cast<HWND>(winId());
         std::wstring nativeError;
         initialized_ = renderer_.Initialize(hwnd, nativeError);
@@ -3900,6 +3918,21 @@ protected:
             if (handleDrop(drop->mimeData())) { drop->acceptProposedAction(); return true; }
         }
         return QMainWindow::eventFilter(watched, event);
+    }
+
+    void showEvent(QShowEvent* event) override
+    {
+        // Let Qt create/show the top-level window first, then apply the optional
+        // Windows title-bar colors. This keeps theme initialization from forcing
+        // an HWND during construction and is especially important when a
+        // QQuickWidget owns the visible frontend.
+        QMainWindow::showEvent(event);
+        AppendStudioStartupTrace(QStringLiteral("MainWindow showEvent entered"));
+        QTimer::singleShot(0, this, [this]
+        {
+            styleNativeTitleBar();
+            AppendStudioStartupTrace(QStringLiteral("Native title-bar styling applied after show"));
+        });
     }
 
     void moveEvent(QMoveEvent* event) override
@@ -19538,7 +19571,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void styleNativeTitleBar()
     {
 #ifdef _WIN32
-        HWND hwnd = reinterpret_cast<HWND>(winId());
+        if(!isVisible()) return;
+        // Do not call QWidget::winId() while the top-level widget is still
+        // hidden. Qt documents that winId() forces a native window; in the
+        // QQuickWidget frontend that was happening from applyTheme() during
+        // MainWindow construction, before the first show(), and recreated the
+        // exact native-window composition boundary we were trying to avoid.
+        // If the window does not exist yet, showEvent() will style it after the
+        // platform has created the real top-level HWND normally.
+        QWindow* nativeWindow = windowHandle();
+        if(!nativeWindow) return;
+        HWND hwnd = reinterpret_cast<HWND>(nativeWindow->winId());
+        if(!hwnd) return;
         HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
         if (!dwm) return;
         using DwmSetWindowAttributeFn = HRESULT (WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
