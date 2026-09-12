@@ -1570,7 +1570,17 @@ public:
         loadPreviewDefaults();
         updateGBufferUi();
         refreshMaterialTextureUi();
-        resetLightingControls();
+        // APE Match is the default profile, and resetLightingControls() applies
+        // its preset through applyApeLightingPreset(), which calls
+        // preview_->ensureInitialized(). In the Qt Quick frontend that would
+        // silently initialize Direct3D *inside the constructor* before the
+        // deliberately delayed D3D startup gate below had a chance to run.
+        // Keep the legacy QWidget startup behavior unchanged, but defer the
+        // QML frontend's lighting reset until after explicit D3D initialization.
+        if(!qmlFrontendActive_)
+            resetLightingControls();
+        else
+            AppendStudioStartupTrace(QStringLiteral("APE lighting defaults deferred until Direct3D is ready"));
         updateBackgroundButtonText();
         installShortcuts();
 
@@ -1622,6 +1632,13 @@ public:
             AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized"));
             if(qmlFrontendActive_)
             {
+                // Now that the explicit D3D gate has succeeded, it is safe to
+                // apply the default APE preset. This used to happen earlier via
+                // resetLightingControls() and was the hidden initialization path
+                // that blocked the QML startup constructor.
+                AppendStudioStartupTrace(QStringLiteral("Applying deferred APE lighting defaults"));
+                resetLightingControls();
+
                 // QML slot geometry may have changed repeatedly during startup.
                 // Only now is it safe to expose the native HWND-backed surfaces.
                 // This ordering avoids putting an uninitialized native child over
