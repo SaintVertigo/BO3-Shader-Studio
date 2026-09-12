@@ -17325,7 +17325,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* quickWidget = new QQuickWidget(hybridRoot);
         quickWidget->setObjectName(QStringLiteral("QmlFrontendWidget"));
         quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
-        quickWidget->setClearColor(Qt::transparent);
+        // The glass design is composited inside QML; the QWidget host itself does
+        // not need an alpha surface. Keeping the offscreen Quick target opaque
+        // removes an unnecessary Windows composition path during first show.
+        quickWidget->setClearColor(QColor(QStringLiteral("#0D1117")));
         quickWidget->setFocusPolicy(Qt::StrongFocus);
         rootLayout->addWidget(quickWidget);
         quickWidget->rootContext()->setContextProperty(QStringLiteral("frontend"), bridge);
@@ -17385,6 +17388,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         SetStudioStartupPhase(5);
         AppendStudioStartupTrace(QStringLiteral("Main.qml component reached Ready"));
+        if(quickWidget->quickWindow() && quickWidget->quickWindow()->rendererInterface())
+        {
+            const int api = static_cast<int>(quickWidget->quickWindow()->rendererInterface()->graphicsApi());
+            AppendStudioStartupTrace(QStringLiteral("Qt Quick graphics API selected: %1").arg(api));
+        }
 
         // Wire the QML shell to the existing, already-proven backend commands.
         connect(bridge, &StudioFrontendBridge::menuRequested, this, [this](const QString& name){ popupQmlMenu(name); });
@@ -23127,21 +23135,30 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     SetUnhandledExceptionFilter(StudioUnhandledExceptionFilter);
     SetStudioStartupPhase(1);
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // The preview becomes a native D3D11 child only after the QML shell is
+    // visible. Keep every other QWidget sibling non-native unless it explicitly
+    // opts in. Qt documents this application attribute specifically for mixed
+    // native/non-native widget hierarchies such as QQuickWidget + native child.
+    QCoreApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings, true);
+
+    // Select Qt Quick's graphics API before QApplication/QQuickWidget startup so
+    // there is no ambiguity on the first visible frame. Qt 6.8's supported and
+    // normal Windows path is Direct3D 11. The earlier migration forced the
+    // software scene graph; the user's process consistently died exactly when
+    // that QQuickWidget attempted its first visible render. Keep software only
+    // as an explicit diagnostic recovery switch.
+    if(qEnvironmentVariableIsSet("BO3_STUDIO_QML_SOFTWARE"))
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    else
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
+
     QApplication app(argc, argv);
     app.setApplicationName("BO3 Shader Studio");
     gPreviousStudioQtMessageHandler = qInstallMessageHandler(StudioQtMessageHandler);
     AppendStudioStartupTrace(QStringLiteral("Process started; crash handler + Qt message logger installed"), true);
     SetStudioStartupPhase(2);
     AppendStudioStartupTrace(QStringLiteral("QApplication ready"));
-
-    // The shader preview owns an independent native D3D11 swap chain. During the
-    // frontend migration, default Qt Quick to its software scene graph so the UI
-    // compositor cannot contend with or invalidate the preview's D3D device. The
-    // visual shell uses rectangles/text/animations only, so this preserves its
-    // design while removing an entire GPU-interoperability variable. Developers
-    // can opt back into Qt Quick's GPU backend with BO3_STUDIO_QML_GPU=1.
-    if(!qEnvironmentVariableIsSet("BO3_STUDIO_QML_GPU"))
-        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
 
     app.setOrganizationName("BO3 Shader Studio");
     ComboBoxWheelGuard comboBoxWheelGuard(&app);
