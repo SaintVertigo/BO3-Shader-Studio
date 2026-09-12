@@ -77,7 +77,12 @@
 #include <QProcess>
 #include <QProgressDialog>
 #include <QPropertyAnimation>
+#include <QParallelAnimationGroup>
+#include <QVariantAnimation>
+#include <QEasingCurve>
 #include <QGraphicsOpacityEffect>
+#include <QGraphicsDropShadowEffect>
+#include <QPointer>
 #include <QSplashScreen>
 #include <QPixmap>
 #include <QPaintEngine>
@@ -200,10 +205,95 @@ namespace
 class BeginnerEffectBrowserDialog final : public QDialog
 {
 public:
-    using QDialog::QDialog;
+    explicit BeginnerEffectBrowserDialog(QWidget* parent = nullptr) : QDialog(parent) {}
     std::function<void()> resized;
+    bool motionEnabled = true;
+
+    void animatedDone(int result)
+    {
+        if(!motionEnabled || !isVisible())
+        {
+            done(result);
+            return;
+        }
+
+        auto* group = new QParallelAnimationGroup(this);
+        auto* fade = new QPropertyAnimation(this, "windowOpacity", group);
+        fade->setDuration(145);
+        fade->setStartValue(windowOpacity());
+        fade->setEndValue(0.0);
+        fade->setEasingCurve(QEasingCurve::InCubic);
+
+        const QRect endRect = geometry();
+        QRect small = endRect.adjusted(18, 12, -18, -12);
+        auto* shrink = new QPropertyAnimation(this, "geometry", group);
+        shrink->setDuration(165);
+        shrink->setStartValue(endRect);
+        shrink->setEndValue(small);
+        shrink->setEasingCurve(QEasingCurve::InOutCubic);
+        connect(group, &QParallelAnimationGroup::finished, this, [this, result]
+        {
+            setWindowOpacity(1.0);
+            done(result);
+        });
+        group->start(QAbstractAnimation::DeleteWhenStopped);
+    }
 
 protected:
+    void showEvent(QShowEvent* event) override
+    {
+        QDialog::showEvent(event);
+        if(!motionEnabled) return;
+        const QRect finalRect = geometry();
+        const QRect startRect = finalRect.adjusted(28, 20, -28, -20);
+        setWindowOpacity(0.0);
+        setGeometry(startRect);
+        QTimer::singleShot(0, this, [this, finalRect]
+        {
+            auto* group = new QParallelAnimationGroup(this);
+            auto* fade = new QPropertyAnimation(this, "windowOpacity", group);
+            fade->setDuration(230);
+            fade->setStartValue(0.0);
+            fade->setEndValue(1.0);
+            fade->setEasingCurve(QEasingCurve::OutCubic);
+            auto* grow = new QPropertyAnimation(this, "geometry", group);
+            grow->setDuration(265);
+            grow->setStartValue(geometry());
+            grow->setEndValue(finalRect);
+            grow->setEasingCurve(QEasingCurve::OutBack);
+            group->start(QAbstractAnimation::DeleteWhenStopped);
+        });
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if(event && event->button() == Qt::LeftButton && event->position().y() <= 74.0)
+        {
+            dragging_ = true;
+            dragOffset_ = event->globalPosition().toPoint() - frameGeometry().topLeft();
+            event->accept();
+            return;
+        }
+        QDialog::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if(dragging_ && event && (event->buttons() & Qt::LeftButton))
+        {
+            move(event->globalPosition().toPoint() - dragOffset_);
+            event->accept();
+            return;
+        }
+        QDialog::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        dragging_ = false;
+        QDialog::mouseReleaseEvent(event);
+    }
+
     void resizeEvent(QResizeEvent* event) override
     {
         QDialog::resizeEvent(event);
@@ -213,6 +303,10 @@ protected:
                 if(resized) resized();
             });
     }
+
+private:
+    bool dragging_ = false;
+    QPoint dragOffset_;
 };
 
 class BeginnerEffectCard final : public QFrame
@@ -232,6 +326,116 @@ protected:
         }
         QFrame::mouseDoubleClickEvent(event);
     }
+};
+
+class ExperienceModeSwitch final : public QWidget
+{
+public:
+    explicit ExperienceModeSwitch(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setObjectName("ExperienceModeSwitch");
+        setFixedSize(194, 38);
+        setAttribute(Qt::WA_StyledBackground, true);
+
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(3, 3, 3, 3);
+        layout->setSpacing(0);
+
+        beginner_ = new QToolButton(this);
+        beginner_->setText("Beginner");
+        beginner_->setCheckable(true);
+        beginner_->setAutoExclusive(true);
+        beginner_->setObjectName("ExperienceModeSegment");
+        beginner_->setCursor(Qt::PointingHandCursor);
+        advanced_ = new QToolButton(this);
+        advanced_->setText("Advanced");
+        advanced_->setCheckable(true);
+        advanced_->setAutoExclusive(true);
+        advanced_->setObjectName("ExperienceModeSegment");
+        advanced_->setCursor(Qt::PointingHandCursor);
+        layout->addWidget(beginner_, 1);
+        layout->addWidget(advanced_, 1);
+        beginner_->raise();
+        advanced_->raise();
+    }
+
+    QToolButton* beginnerButton() const { return beginner_; }
+    QToolButton* advancedButton() const { return advanced_; }
+
+    void setBeginner(bool beginner, bool animate)
+    {
+        const qreal target = beginner ? 0.0 : 1.0;
+        if(animation_)
+        {
+            animation_->stop();
+            animation_->deleteLater();
+            animation_ = nullptr;
+        }
+        if(!animate)
+        {
+            progress_ = target;
+            update();
+            return;
+        }
+        animation_ = new QVariantAnimation(this);
+        animation_->setDuration(300);
+        animation_->setStartValue(progress_);
+        animation_->setEndValue(target);
+        animation_->setEasingCurve(QEasingCurve::OutCubic);
+        connect(animation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value)
+        {
+            progress_ = value.toReal();
+            update();
+        });
+        connect(animation_, &QVariantAnimation::finished, this, [this]
+        {
+            animation_ = nullptr;
+        });
+        animation_->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        QColor shell = palette().color(QPalette::Button);
+        shell.setAlpha(165);
+        QColor edge = palette().color(QPalette::Mid);
+        edge.setAlpha(135);
+        painter.setPen(QPen(edge, 1.0));
+        painter.setBrush(shell);
+        const QRectF outer = rect().adjusted(0.5, 0.5, -0.5, -0.5);
+        painter.drawRoundedRect(outer, 12.0, 12.0);
+
+        const qreal pad = 3.0;
+        const qreal segmentWidth = (width() - pad * 2.0) / 2.0;
+        QRectF indicator(pad + progress_ * segmentWidth, pad, segmentWidth, height() - pad * 2.0);
+        QColor accent = palette().color(QPalette::Highlight);
+        QColor glow = accent;
+        glow.setAlpha(45);
+        QRectF glowRect = indicator.adjusted(-3.0, -2.0, 3.0, 2.0);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(glow);
+        painter.drawRoundedRect(glowRect, 11.0, 11.0);
+
+        accent.setAlpha(205);
+        painter.setBrush(accent);
+        painter.drawRoundedRect(indicator, 9.5, 9.5);
+
+        QColor highlight = Qt::white;
+        highlight.setAlpha(62);
+        painter.setPen(QPen(highlight, 1.0));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(indicator.adjusted(0.75, 0.75, -0.75, -0.75), 8.75, 8.75);
+    }
+
+private:
+    QToolButton* beginner_ = nullptr;
+    QToolButton* advanced_ = nullptr;
+    QVariantAnimation* animation_ = nullptr;
+    qreal progress_ = 0.0;
 };
 
 inline const char* MaterialTextureSlotName(int index)
@@ -3829,17 +4033,17 @@ private:
         previewModeCombo_->setVisible(!beginnerUiMode_);
 
         const PreviewMode selected = selectedPreviewMode();
+        const bool materialPreview =
+            (beginnerUiMode_ && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::Material) ||
+            selected == PreviewMode::ForwardMaterial ||
+            selected == PreviewMode::DeferredGBuffer ||
+            (detectedPreviewModeValid_ &&
+                (detectedPreviewMode_ == PreviewMode::ForwardMaterial ||
+                 detectedPreviewMode_ == PreviewMode::DeferredGBuffer));
         if(previewMaterialProfileGroup_)
-        {
-            const bool materialPreview =
-                (beginnerUiMode_ && beginnerProjectActive_ && beginnerProject_.target == beginner::Target::Material) ||
-                selected == PreviewMode::ForwardMaterial ||
-                selected == PreviewMode::DeferredGBuffer ||
-                (detectedPreviewModeValid_ &&
-                    (detectedPreviewMode_ == PreviewMode::ForwardMaterial ||
-                     detectedPreviewMode_ == PreviewMode::DeferredGBuffer));
             previewMaterialProfileGroup_->setVisible(materialPreview);
-        }
+        if(previewApeMatchButton_)
+            previewApeMatchButton_->setVisible(materialPreview);
         const QString detectedName = detectedPreviewModeValid_
             ? previewModeName(detectedPreviewMode_) : "Unknown";
         if(previewDetectedModeLabel_)
@@ -14994,7 +15198,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         if(beginnerCompatibilityLabel_)
         {
-            beginnerCompatibilityLabel_->setText(QString::fromUtf8("✓  Works in Black Ops III"));
+            beginnerCompatibilityLabel_->setText(QString::fromUtf8("✓  BO3 Ready"));
             beginnerCompatibilityLabel_->setToolTip(
                 beginner::compatibilitySummary(beginnerProject_) + "\n\n"
                 "Every effect offered by Beginner mode has a known BO3 target contract. "
@@ -15172,6 +15376,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             rebuildBeginnerEffectParameters();
         updateBeginnerEffectActionState();
         updateBeginnerBuilderSummary();
+        if(beginnerEffectList_->count() > 0) animateWidgetReveal(beginnerEffectList_, 0, 170);
     }
 
     void rebuildBeginnerEffectParameters()
@@ -15199,7 +15404,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             auto* title = new QLabel("Nothing to adjust yet");
             title->setObjectName("InspectorTitle");
-            auto* help = new QLabel("Add an effect first. You will get friendly sliders and color controls here — no shader code required.");
+            auto* help = new QLabel("Add an effect first. Its focused controls will appear here while the preview stays visible.");
             help->setWordWrap(true);
             help->setObjectName("CompactHelp");
             auto* browse = new QPushButton("Browse Effects");
@@ -15211,6 +15416,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             beginnerEffectParamsLayout_->addWidget(browse);
             beginnerEffectParamsLayout_->addStretch(1);
             connect(browse, &QPushButton::clicked, this, [this]{ showBeginnerEffectBrowser(); });
+            animateWidgetReveal(beginnerParamsContent_, 0, 180);
             return;
         }
 
@@ -15429,6 +15635,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         }
         beginnerEffectParamsLayout_->addWidget(formHost);
         beginnerEffectParamsLayout_->addStretch(1);
+        animateWidgetReveal(beginnerParamsContent_, 0, 200);
     }
 
     void refreshBeginnerTargetButtons()
@@ -15799,8 +16006,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     {
         BeginnerEffectBrowserDialog dlg(this);
         dlg.setWindowTitle("Add an Effect");
-        dlg.resize(920, 640);
-        dlg.setMinimumSize(700, 500);
+        dlg.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        dlg.setAttribute(Qt::WA_TranslucentBackground, true);
+        dlg.setModal(true);
+        dlg.motionEnabled = effectiveAnimationsEnabled();
+        dlg.resize(900, 650);
+        dlg.setMinimumSize(720, 520);
 
         const int browserStateIndex = qBound(0, static_cast<int>(beginnerProject_.target), 2);
         const QString savedCategory = beginnerEffectBrowserCategory_[browserStateIndex].isEmpty()
@@ -15809,47 +16020,100 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         const QString savedSearch = beginnerEffectBrowserSearch_[browserStateIndex];
         const int savedScrollY = qMax(0, beginnerEffectBrowserScrollY_[browserStateIndex]);
 
-        auto* root = new QVBoxLayout(&dlg);
-        root->setContentsMargins(12, 10, 12, 10);
-        root->setSpacing(6);
+        auto* windowLayout = new QVBoxLayout(&dlg);
+        windowLayout->setContentsMargins(16, 16, 16, 16);
+        windowLayout->setSpacing(0);
 
-        auto* title = new QLabel("Add an effect");
-        title->setObjectName("InspectorTitle");
+        auto* glass = new QFrame(&dlg);
+        glass->setObjectName("EffectBrowserGlass");
+        auto* shadow = new QGraphicsDropShadowEffect(glass);
+        shadow->setBlurRadius(42.0);
+        shadow->setOffset(0.0, 12.0);
+        QColor shadowColor(0, 0, 0, 150);
+        shadow->setColor(shadowColor);
+        glass->setGraphicsEffect(shadow);
+        windowLayout->addWidget(glass);
+
+        auto* root = new QVBoxLayout(glass);
+        root->setContentsMargins(18, 16, 18, 18);
+        root->setSpacing(12);
+
+        auto* header = new QHBoxLayout();
+        header->setSpacing(10);
+        auto* glyph = new QLabel(QString::fromUtf8("✦"));
+        glyph->setObjectName("EffectLibraryGlyph");
+        glyph->setFixedSize(34, 34);
+        glyph->setAlignment(Qt::AlignCenter);
+        auto* headerText = new QWidget();
+        auto* headerTextLayout = new QVBoxLayout(headerText);
+        headerTextLayout->setContentsMargins(0, 0, 0, 0);
+        headerTextLayout->setSpacing(1);
+        auto* title = new QLabel("Add an Effect");
+        title->setObjectName("EffectLibraryTitle");
         auto* help = new QLabel(
-            QString("Pick a visual effect for your %1 shader. Only effects that actually work on this shader type are shown.")
+            QString("Effects compatible with %1. Pick one to add it directly to the visual stack.")
                 .arg(beginnerTargetShortName(beginnerProject_.target).toLower()));
         help->setWordWrap(true);
         help->setObjectName("CompactHelp");
-        root->addWidget(title);
-        root->addWidget(help);
+        headerTextLayout->addWidget(title);
+        headerTextLayout->addWidget(help);
+        auto* closeButton = new QToolButton();
+        closeButton->setText(QString::fromUtf8("×"));
+        closeButton->setObjectName("GlassCloseButton");
+        closeButton->setFixedSize(34, 34);
+        closeButton->setCursor(Qt::PointingHandCursor);
+        header->addWidget(glyph, 0, Qt::AlignTop);
+        header->addWidget(headerText, 1);
+        header->addWidget(closeButton, 0, Qt::AlignTop);
+        root->addLayout(header);
 
         auto* search = new QLineEdit();
-        search->setObjectName("BeginnerEffectSearch");
-        search->setPlaceholderText("Search effects... e.g. glow, grain, ripple, color");
+        search->setObjectName("EffectLibrarySearch");
+        search->setPlaceholderText("Search effects — glow, grain, ripple, color...");
         search->setClearButtonEnabled(true);
         search->setText(savedSearch);
+        search->setMinimumHeight(40);
         root->addWidget(search);
+        auto* searchShortcut = new QShortcut(QKeySequence("Ctrl+K"), &dlg);
+        connect(searchShortcut, &QShortcut::activated, search, [search]{ search->setFocus(); search->selectAll(); });
 
         auto* body = new QHBoxLayout();
-        body->setSpacing(12);
+        body->setSpacing(14);
 
         auto* categoryList = new QListWidget();
-        categoryList->setMaximumWidth(158);
-        categoryList->setMinimumWidth(132);
+        categoryList->setObjectName("EffectCategoryRail");
+        categoryList->setMaximumWidth(188);
+        categoryList->setMinimumWidth(172);
         categoryList->setSpacing(2);
-        categoryList->addItem("All Effects");
+        categoryList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+        QMap<QString, int> categoryCounts;
+        int allEffectsCount = 0;
         QStringList categories;
         for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
         {
             if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
             if(definition.id == QStringLiteral("depth_heatmap") || definition.id == QStringLiteral("depth_isolation")) continue;
+            ++allEffectsCount;
+            categoryCounts[definition.category] = categoryCounts.value(definition.category) + 1;
             if(!categories.contains(definition.category)) categories << definition.category;
         }
-        for(const QString& category : categories) categoryList->addItem(category);
+
+        auto addCategoryItem = [categoryList](const QString& key, const QString& label, int count)
+        {
+            auto* item = new QListWidgetItem(QString("%1    %2").arg(label).arg(count), categoryList);
+            item->setData(Qt::UserRole, key);
+            item->setSizeHint(QSize(0, 34));
+            return item;
+        };
+        addCategoryItem(QStringLiteral("All Effects"), QStringLiteral("All Effects"), allEffectsCount);
+        for(const QString& category : categories)
+            addCategoryItem(category, category, categoryCounts.value(category));
+
         int savedCategoryRow = 0;
         for(int row = 0; row < categoryList->count(); ++row)
         {
-            if(categoryList->item(row)->text() == savedCategory)
+            if(categoryList->item(row)->data(Qt::UserRole).toString() == savedCategory)
             {
                 savedCategoryRow = row;
                 break;
@@ -15859,18 +16123,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         body->addWidget(categoryList);
 
         auto* scroll = new QScrollArea();
+        scroll->setObjectName("EffectLibraryScroll");
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* cardHost = new QWidget();
+        cardHost->setObjectName("EffectLibraryCardHost");
         auto* cardGrid = new QGridLayout(cardHost);
-        cardGrid->setContentsMargins(0, 0, 0, 0);
-        cardGrid->setHorizontalSpacing(8);
-        cardGrid->setVerticalSpacing(7);
+        cardGrid->setContentsMargins(0, 0, 4, 0);
+        cardGrid->setHorizontalSpacing(0);
+        cardGrid->setVerticalSpacing(8);
+        cardGrid->setColumnStretch(0, 1);
         scroll->setWidget(cardHost);
         body->addWidget(scroll, 1);
         root->addLayout(body, 1);
 
-        int currentColumns = 2;
         std::function<void(bool)> rebuildCards;
         rebuildCards = [&](bool preserveScroll)
         {
@@ -15881,17 +16148,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 delete item;
             }
 
-            currentColumns = dlg.width() < 820 ? 1 : 2;
             const QString selectedCategory = categoryList->currentItem()
-                ? categoryList->currentItem()->text() : QStringLiteral("All Effects");
+                ? categoryList->currentItem()->data(Qt::UserRole).toString()
+                : QStringLiteral("All Effects");
             const QString query = search->text().trimmed();
 
             QVector<const beginner::EffectDefinition*> visible;
             for(const beginner::EffectDefinition& definition : beginner::effectDefinitions())
             {
-                // Do not show incompatible shader-type effects at all. A Material
-                // browser should contain Material effects, not a wall of disabled
-                // Screen/Sky cards that can never be selected.
                 if(!beginner::supportsTarget(definition, beginnerProject_.target)) continue;
                 if(definition.id == QStringLiteral("depth_heatmap") || definition.id == QStringLiteral("depth_isolation")) continue;
                 if(selectedCategory != "All Effects" && definition.category != selectedCategory) continue;
@@ -15915,78 +16179,89 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 auto* card = new BeginnerEffectCard();
                 card->setObjectName("BeginnerEffectCard");
                 card->setProperty("supported", true);
-                card->setMinimumHeight(currentColumns == 1 ? 94 : 104);
+                card->setMinimumHeight(108);
                 card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
                 card->setCursor(Qt::PointingHandCursor);
-                card->setToolTip("Double-click anywhere on this card to add the effect.");
+                card->setToolTip("Double-click this effect to add it.");
                 card->activated = [this, &dlg, id = definition.id]
                 {
                     addBeginnerEffect(id);
-                    dlg.accept();
+                    dlg.animatedDone(QDialog::Accepted);
                 };
 
-                auto* layout = new QVBoxLayout(card);
-                layout->setContentsMargins(10, 7, 10, 7);
-                layout->setSpacing(3);
+                auto* layout = new QHBoxLayout(card);
+                layout->setContentsMargins(12, 10, 12, 10);
+                layout->setSpacing(12);
 
-                // The old effect-browser artwork was decorative/generated and
-                // frequently misleading. Keep cards compact and descriptive so
-                // the browser behaves like a shader editor rather than a gallery.
+                auto* effectGlyph = new QFrame(card);
+                effectGlyph->setObjectName("EffectCardGlyph");
+                effectGlyph->setFixedSize(54, 54);
+                auto* glyphLayout = new QVBoxLayout(effectGlyph);
+                glyphLayout->setContentsMargins(0, 0, 0, 0);
+                auto* glyphText = new QLabel("FX", effectGlyph);
+                glyphText->setObjectName("EffectCardGlyphText");
+                glyphText->setAlignment(Qt::AlignCenter);
+                glyphLayout->addWidget(glyphText);
+                layout->addWidget(effectGlyph, 0, Qt::AlignTop);
+
+                auto* content = new QWidget(card);
+                content->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+                auto* contentLayout = new QVBoxLayout(content);
+                contentLayout->setContentsMargins(0, 0, 0, 0);
+                contentLayout->setSpacing(4);
+
                 auto* headingRow = new QHBoxLayout();
                 auto* name = new QLabel(definition.name);
                 name->setObjectName("EffectCardTitle");
-                name->setAttribute(Qt::WA_TransparentForMouseEvents);
                 auto* category = new QLabel(definition.category.toUpper());
                 category->setObjectName("EffectCardCategory");
-                category->setAttribute(Qt::WA_TransparentForMouseEvents);
                 headingRow->addWidget(name, 1);
                 headingRow->addWidget(category, 0, Qt::AlignRight);
-                layout->addLayout(headingRow);
+                contentLayout->addLayout(headingRow);
 
                 auto* description = new QLabel(definition.description);
                 description->setWordWrap(true);
                 description->setObjectName("CompactHelp");
-                description->setAttribute(Qt::WA_TransparentForMouseEvents);
-                layout->addWidget(description);
-                layout->addStretch(1);
+                contentLayout->addWidget(description);
+                contentLayout->addStretch(1);
 
-                auto* footer = new QHBoxLayout();
-                footer->setSpacing(6);
                 auto* availability = new QLabel();
-                availability->setWordWrap(false);
                 const bool usesSceneDepth = beginnerEffectUsesSceneDepth(definition.id);
                 availability->setText(usesSceneDepth
                     ? QString::fromUtf8("✓ BO3   •   Float-Z")
                     : QString::fromUtf8("✓ BO3"));
                 availability->setObjectName("EffectAvailabilityGood");
-                availability->setAttribute(Qt::WA_TransparentForMouseEvents);
-                footer->addWidget(availability, 1);
+                contentLayout->addWidget(availability);
+                layout->addWidget(content, 1);
 
                 auto* add = new QPushButton("+ Add");
-                add->setObjectName("PrimaryAction");
-                add->setMaximumWidth(82);
-                footer->addWidget(add);
-                layout->addLayout(footer);
+                add->setObjectName("EffectAddButton");
+                add->setMinimumWidth(78);
+                add->setMaximumWidth(92);
+                add->setCursor(Qt::PointingHandCursor);
+                layout->addWidget(add, 0, Qt::AlignVCenter);
                 connect(add, &QPushButton::clicked, &dlg, [this, &dlg, id = definition.id]
                 {
                     addBeginnerEffect(id);
-                    dlg.accept();
+                    dlg.animatedDone(QDialog::Accepted);
                 });
 
-                cardGrid->addWidget(card, visibleIndex / currentColumns, visibleIndex % currentColumns);
+                cardGrid->addWidget(card, visibleIndex, 0);
+                if(effectiveAnimationsEnabled())
+                    animateWidgetReveal(card, qMin(visibleIndex, 8) * 26, 190);
                 ++visibleIndex;
             }
 
             if(visibleIndex == 0)
             {
-                auto* none = new QLabel("No effects match that search.");
+                auto* none = new QLabel("No effects match this search.");
                 none->setAlignment(Qt::AlignCenter);
-                none->setObjectName("CompactHelp");
-                cardGrid->addWidget(none, 0, 0, 1, currentColumns);
+                none->setObjectName("EffectLibraryEmpty");
+                none->setMinimumHeight(160);
+                cardGrid->addWidget(none, 0, 0);
+                animateWidgetReveal(none, 0, 180);
             }
-
-            for(int column = 0; column < 2; ++column)
-                cardGrid->setColumnStretch(column, column < currentColumns ? 1 : 0);
+            cardGrid->setRowStretch(visibleIndex + 1, 1);
             cardHost->adjustSize();
 
             if(preserveScroll)
@@ -15997,16 +16272,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                     if(bar) bar->setValue(qBound(0, previousScrollY, bar->maximum()));
                 });
             }
+            else if(scroll->verticalScrollBar())
+            {
+                scroll->verticalScrollBar()->setValue(0);
+            }
         };
 
         connect(search, &QLineEdit::textChanged, &dlg, [&](const QString&){ rebuildCards(false); });
         connect(categoryList, &QListWidget::currentRowChanged, &dlg, [&](int){ rebuildCards(false); });
-        dlg.resized = [&]()
-        {
-            const int wantedColumns = dlg.width() < 820 ? 1 : 2;
-            if(wantedColumns != currentColumns)
-                rebuildCards(true);
-        };
+        connect(closeButton, &QToolButton::clicked, &dlg, [&dlg]{ dlg.animatedDone(QDialog::Rejected); });
 
         rebuildCards(false);
         QTimer::singleShot(0, &dlg, [scroll, savedScrollY]
@@ -16015,14 +16289,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(bar) bar->setValue(qBound(0, savedScrollY, bar->maximum()));
         });
 
-        auto* close = new QDialogButtonBox(QDialogButtonBox::Close);
-        connect(close, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-        connect(close, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-        root->addWidget(close);
         dlg.exec();
 
         beginnerEffectBrowserCategory_[browserStateIndex] = categoryList->currentItem()
-            ? categoryList->currentItem()->text()
+            ? categoryList->currentItem()->data(Qt::UserRole).toString()
             : QStringLiteral("All Effects");
         beginnerEffectBrowserSearch_[browserStateIndex] = search->text();
         beginnerEffectBrowserScrollY_[browserStateIndex] = qMax(0, scroll->verticalScrollBar()->value());
@@ -16302,24 +16572,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* heroText = new QWidget();
         auto* heroLayout = new QVBoxLayout(heroText);
         heroLayout->setContentsMargins(0, 0, 0, 0);
-        auto* title = new QLabel("BEGINNER SHADER BUILDER");
+        auto* title = new QLabel("Beginner");
         title->setObjectName("SectionHeader");
-        auto* subtitle = new QLabel("Build a real BO3-compatible shader with effects and sliders — no coding required.");
+        auto* subtitle = new QLabel("Build BO3-compatible shaders visually with effects, sliders, and live preview.");
         subtitle->setObjectName("CompactHelp");
         subtitle->setWordWrap(true);
         heroLayout->addWidget(title);
         heroLayout->addWidget(subtitle);
         heroRow->addWidget(heroText, 1);
-        beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  Works in Black Ops III"));
+        beginnerCompatibilityLabel_ = new QLabel(QString::fromUtf8("✓  BO3 Ready"));
         beginnerCompatibilityLabel_->setObjectName("BeginnerCompatibilityLabel");
         heroRow->addWidget(beginnerCompatibilityLabel_, 0, Qt::AlignTop);
         root->addLayout(heroRow);
 
         auto* targetGroup = new QGroupBox("1. Shader Type");
+        targetGroup->setObjectName("BeginnerSection");
         beginnerTargetGroup_ = targetGroup;
         auto* targetLayout = new QVBoxLayout(targetGroup);
         auto* targetCards = new QHBoxLayout();
-        const QStringList targetShort = {"Changes the game screen", "Changes a model / surface", "Creates the environment"};
+        const QStringList targetShort = {"Game Screen", "Model / Surface", "Environment"};
         for(int i = 0; i < 3; ++i)
         {
             const beginner::Target target = static_cast<beginner::Target>(i);
@@ -16327,7 +16598,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             button->setCheckable(true);
             button->setText(beginner::targetName(target) + "\n" + targetShort[i]);
             button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-            button->setMinimumHeight(52);
+            button->setMinimumHeight(62);
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             button->setObjectName("BeginnerTargetCard");
             beginnerTargetButtons_[i] = button;
@@ -16342,6 +16613,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         root->addWidget(targetGroup);
 
         auto* body = new QScrollArea();
+        body->setObjectName("BeginnerRailScroll");
         beginnerBodySplitter_ = nullptr;
         body->setWidgetResizable(true);
         body->setFrameShape(QFrame::NoFrame);
@@ -16353,6 +16625,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         body->setWidget(rail);
 
         auto* projectGroup = new QGroupBox("2. Project");
+        projectGroup->setObjectName("BeginnerSection");
         auto* projectLayout = new QVBoxLayout(projectGroup);
         projectLayout->setContentsMargins(9, 9, 9, 9);
         projectLayout->setSpacing(7);
@@ -16384,12 +16657,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         projectLayout->addWidget(beginnerPresetDescriptionLabel_);
         leftLayout->addWidget(projectGroup);
 
-        beginnerBaseAppearanceGroup_ = new QGroupBox("Base Appearance");
+        beginnerBaseAppearanceGroup_ = new QGroupBox("Base Surface");
+        beginnerBaseAppearanceGroup_->setObjectName("BeginnerSection");
         beginnerBaseAppearanceLayout_ = new QVBoxLayout(beginnerBaseAppearanceGroup_);
         beginnerBaseAppearanceLayout_->setContentsMargins(8, 8, 8, 8);
         leftLayout->addWidget(beginnerBaseAppearanceGroup_);
 
         beginnerEffectsGroup_ = new QGroupBox("3. Effects");
+        beginnerEffectsGroup_->setObjectName("BeginnerSection");
         auto* effectsLayout = new QVBoxLayout(beginnerEffectsGroup_);
         beginnerEffectsContentStack_ = new QStackedWidget();
 
@@ -16400,7 +16675,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* emptyTitle = new QLabel("Your shader has no effects yet");
         emptyTitle->setAlignment(Qt::AlignCenter);
         emptyTitle->setObjectName("InspectorTitle");
-        auto* emptyHelp = new QLabel("Add your first effect, then adjust it with simple sliders. You never need to write HLSL.");
+        auto* emptyHelp = new QLabel("Add an effect to start shaping the shader. Select it to reveal focused controls below.");
         emptyHelp->setAlignment(Qt::AlignCenter);
         emptyHelp->setWordWrap(true);
         emptyHelp->setObjectName("CompactHelp");
@@ -16415,9 +16690,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         emptyLayout->addStretch(1);
 
         beginnerEffectList_ = new QListWidget();
+        beginnerEffectList_->setObjectName("BeginnerEffectStack");
+        beginnerEffectList_->setSpacing(3);
         beginnerEffectList_->setSelectionMode(QAbstractItemView::SingleSelection);
         beginnerEffectList_->setMinimumHeight(170);
-        beginnerEffectList_->setAlternatingRowColors(true);
+        beginnerEffectList_->setAlternatingRowColors(false);
         beginnerEffectsContentStack_->addWidget(emptyEffects);
         beginnerEffectsContentStack_->addWidget(beginnerEffectList_);
         effectsLayout->addWidget(beginnerEffectsContentStack_, 1);
@@ -16443,19 +16720,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         leftLayout->addWidget(beginnerEffectsGroup_, 1);
 
         beginnerParamsGroup_ = new QGroupBox("4. Selected Effect");
+        beginnerParamsGroup_->setObjectName("BeginnerSection");
         auto* paramsOuterLayout = new QVBoxLayout(beginnerParamsGroup_);
         paramsOuterLayout->setContentsMargins(4, 7, 4, 4);
-        auto* paramsContent = new QWidget();
-        beginnerEffectParamsLayout_ = new QVBoxLayout(paramsContent);
+        beginnerParamsContent_ = new QWidget();
+        beginnerParamsContent_->setObjectName("BeginnerSelectedEffectContent");
+        beginnerEffectParamsLayout_ = new QVBoxLayout(beginnerParamsContent_);
         beginnerEffectParamsLayout_->setContentsMargins(7, 4, 7, 7);
         beginnerEffectParamsLayout_->setSpacing(8);
-        paramsOuterLayout->addWidget(paramsContent);
+        paramsOuterLayout->addWidget(beginnerParamsContent_);
         leftLayout->addWidget(beginnerParamsGroup_);
 
         auto* actions = new QVBoxLayout();
-        auto* viewCode = new QPushButton("Learn How It Works");
+        auto* viewCode = new QPushButton("How Visual Shaders Work");
         viewCode->setToolTip("See the visual recipe behind this shader. Generated HLSL is optional.");
-        auto* exportButton = new QPushButton("5. Export to Black Ops III");
+        auto* exportButton = new QPushButton("Export to BO3");
         beginnerExportButton_ = exportButton;
         exportButton->setObjectName("PrimaryAction");
         exportButton->setMinimumHeight(40);
@@ -16657,7 +16936,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         toolbar->setMovable(false);
         toolbar->setFloatable(false);
         toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        toolbar->setIconSize(QSize(16, 16));
+        toolbar->setIconSize(QSize(18, 18));
+        toolbar->setMinimumHeight(54);
+
+        auto* brand = new QWidget(toolbar);
+        brand->setObjectName("StudioBrand");
+        auto* brandLayout = new QHBoxLayout(brand);
+        brandLayout->setContentsMargins(2, 0, 12, 0);
+        brandLayout->setSpacing(8);
+        auto* brandMark = new QLabel("III", brand);
+        brandMark->setObjectName("StudioBrandMark");
+        auto* brandText = new QWidget(brand);
+        auto* brandTextLayout = new QVBoxLayout(brandText);
+        brandTextLayout->setContentsMargins(0, 0, 0, 0);
+        brandTextLayout->setSpacing(0);
+        auto* brandTitle = new QLabel("BO3 Shader Studio", brandText);
+        brandTitle->setObjectName("StudioBrandTitle");
+        auto* brandVersion = new QLabel(displayVersion_, brandText);
+        brandVersion->setObjectName("StudioBrandVersion");
+        brandTextLayout->addWidget(brandTitle);
+        brandTextLayout->addWidget(brandVersion);
+        brandLayout->addWidget(brandMark);
+        brandLayout->addWidget(brandText);
+        toolbar->addWidget(brand);
 
         openAction->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
         saveAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
@@ -16666,6 +16967,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         toolbar->addAction(openAction);
         toolbar->addAction(saveAction);
+        if(auto* openButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(openAction))) openButton->setObjectName("ToolbarQuietAction");
+        if(auto* saveButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(saveAction))) saveButton->setObjectName("ToolbarQuietAction");
 
         auto* sourceButton = new QToolButton();
         beginnerPreviewImageToolbarButton_ = sourceButton;
@@ -16717,18 +17020,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         toolbarSpacerA->setFixedWidth(24);
         toolbar->addWidget(toolbarSpacerA);
 
-        beginnerModeButton_ = new QToolButton();
-        beginnerModeButton_->setText("Beginner");
-        beginnerModeButton_->setCheckable(true);
-        beginnerModeButton_->setObjectName("ExperienceModeButton");
-        beginnerModeButton_->setToolTip("Show the streamlined shader authoring interface.");
-        advancedModeButton_ = new QToolButton();
-        advancedModeButton_->setText("Advanced");
-        advancedModeButton_->setCheckable(true);
-        advancedModeButton_->setObjectName("ExperienceModeButton");
-        advancedModeButton_->setToolTip("Show BO3 runtime, compiler and compatibility controls.");
-        toolbar->addWidget(beginnerModeButton_);
-        toolbar->addWidget(advancedModeButton_);
+        experienceModeSwitch_ = new ExperienceModeSwitch(toolbar);
+        beginnerModeButton_ = experienceModeSwitch_->beginnerButton();
+        advancedModeButton_ = experienceModeSwitch_->advancedButton();
+        beginnerModeButton_->setToolTip("Show the streamlined visual shader authoring interface.");
+        advancedModeButton_->setToolTip("Show direct HLSL editing and advanced BO3 runtime controls.");
+        toolbar->addWidget(experienceModeSwitch_);
 
         auto* toolbarSpacerB = new QWidget();
         toolbarSpacerB->setFixedWidth(24);
@@ -16744,8 +17041,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* compileAction = toolbar->addAction("Compile");
         compileAction->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
 
+        auto* commandSpring = new QWidget(toolbar);
+        commandSpring->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        commandSpring->setMinimumWidth(12);
+        toolbar->addWidget(commandSpring);
+
         auto* exportToolbarAction = toolbar->addAction(exportBo3Action->icon(), "Export to BO3");
         exportToolbarAction->setToolTip(exportBo3Action->toolTip());
+        if(auto* exportButton = qobject_cast<QToolButton*>(toolbar->widgetForAction(exportToolbarAction)))
+            exportButton->setObjectName("PrimaryAction");
         connect(exportToolbarAction, &QAction::triggered, exportBo3Action, &QAction::trigger);
 
         auto* glslToolbarButton = new QToolButton();
@@ -16966,8 +17270,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         // Compact preview controls stay close to the image. Technical BO3
         // controls are intentionally absent here and live in the inspector.
-        auto* cameraBar = new QHBoxLayout();
-        cameraBar->setSpacing(4);
+        previewHud_ = new QFrame(previewContainer);
+        previewHud_->setObjectName("PreviewHud");
+        auto* cameraBar = new QHBoxLayout(previewHud_);
+        cameraBar->setContentsMargins(8, 6, 8, 6);
+        cameraBar->setSpacing(5);
         camera3D_ = new QToolButton();
         camera3D_->setText("Perspective");
         camera3D_->setCheckable(true);
@@ -16976,6 +17283,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         camera3D_->setToolTip("Toggle interactive 3D camera navigation. Off uses the shader's normal 2D/fullscreen preview.");
         meshCombo_ = new QComboBox(); meshCombo_->addItems(QStringList{"Sphere", "Cube", "Plane", "Cylinder", "Monkey", "Card", "Custom Model"});
         meshCombo_->setToolTip("Preview mesh used by Material / geometry shaders. APE Match uses Treyarch's actual local APE sphere/cube/plane/cylinder/monkey XMODEL_BIN assets when available. Custom Model supports OBJ, ASCII FBX, XMODEL_EXPORT, and BO3 XMODEL_BIN.");
+        previewApeMatchButton_ = new QToolButton();
+        previewApeMatchButton_->setText("APE Match");
+        previewApeMatchButton_->setObjectName("PreviewProfileChip");
+        previewApeMatchButton_->setCursor(Qt::PointingHandCursor);
+        previewApeMatchButton_->setToolTip("Restore the material preview to the recovered Black Ops III APE environment and lighting path.");
         loadModelQuickButton_ = new QPushButton("Load Model...");
         loadModelQuickButton_->setToolTip("Import a custom OBJ, ASCII FBX, XMODEL_EXPORT, or BO3 XMODEL_BIN preview mesh.");
         gbufferViewCombo_ = new QComboBox(); gbufferViewCombo_->addItems(QStringList{"Final Lit", "RT0", "RT1", "RT2", "RT3", "Depth", "Albedo", "Normal", "Specular", "Gloss", "AO", "Emissive", "Input Albedo (t0)"});
@@ -17023,6 +17335,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         gpuQuickLabel_ = new QLabel("GPU --"); gpuQuickLabel_->setMinimumWidth(72); gpuQuickLabel_->setAlignment(Qt::AlignRight|Qt::AlignVCenter);
         cameraBar->addWidget(camera3D_);
         cameraBar->addWidget(meshCombo_);
+        cameraBar->addWidget(previewApeMatchButton_);
         cameraBar->addWidget(loadModelQuickButton_);
         cameraBar->addWidget(gbufferViewCombo_);
         cameraBar->addWidget(lightingQuickMode_);
@@ -17036,9 +17349,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         cameraBar->addWidget(fpsLabel_);
         cameraBar->addWidget(gpuQuickLabel_);
         cameraBar->addWidget(previewSettingsToggleButton_);
-        previewLayout->addLayout(cameraBar);
+        previewLayout->addWidget(previewHud_);
 
         advancedPreviewQuickWidgets_.append(cameraInfo_);
+        advancedPreviewQuickWidgets_.append(captureDiagnosticsLabel_);
+        advancedPreviewQuickWidgets_.append(fpsLabel_);
+        advancedPreviewQuickWidgets_.append(gpuQuickLabel_);
 
         auto* previewBody = new QVBoxLayout();
         previewBody->setContentsMargins(0,0,0,0);
@@ -17047,6 +17363,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
         previewSettingsPanel_ = new QFrame();
         previewSettingsPanel_->setObjectName("PreviewSettingsPanel");
+        auto* previewSettingsShadow = new QGraphicsDropShadowEffect(previewSettingsPanel_);
+        previewSettingsShadow->setBlurRadius(34.0);
+        previewSettingsShadow->setOffset(0.0, 10.0);
+        previewSettingsShadow->setColor(QColor(0, 0, 0, 135));
+        previewSettingsPanel_->setGraphicsEffect(previewSettingsShadow);
         previewSettingsPanel_->setMinimumWidth(285);
         previewSettingsPanel_->setMaximumWidth(350);
         auto* settingsOuter = new QVBoxLayout(previewSettingsPanel_);
@@ -17086,9 +17407,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         materialProfileForm->setContentsMargins(8,10,8,8);
         materialProfileForm->setHorizontalSpacing(8);
         previewMaterialProfileCombo_ = new QComboBox();
-        previewMaterialProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
+        previewMaterialProfileCombo_->addItems(QStringList{"APE Match", "Neutral / No Lighting"});
         previewMaterialProfileCombo_->setCurrentIndex(0);
-        previewMaterialProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral mirrors APE's No Lighting view.");
+        previewMaterialProfileCombo_->setToolTip("APE Match is the material preview. Neutral / No Lighting remains available as an APE diagnostic view.");
         materialProfileForm->addRow("Profile", previewMaterialProfileCombo_);
         previewApeLightingPresetCombo_ = new QComboBox();
         previewApeLightingPresetCombo_->addItems(QStringList{"Morning", "Day", "Sunset", "Night"});
@@ -17220,29 +17541,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         preview_->installEventFilter(this);
 
         connect(closePreviewSettings, &QToolButton::clicked, this, [this]{
-            if(previewSettingsScroll_) previewSettingsScroll_->hide();
-            if(previewSettingsOverlayHost_) previewSettingsOverlayHost_->hide();
             if(previewSettingsToggleButton_) previewSettingsToggleButton_->setChecked(false);
+            else setPreviewSettingsVisibleAnimated(false);
         });
         connect(previewSettingsToggleButton_, &QToolButton::toggled, this, [this](bool visible){
-            if(!previewSettingsScroll_) return;
-            if(previewMaxButton_ && previewMaxButton_->isChecked())
-            {
-                previewSettingsScroll_->hide();
-                if(previewSettingsOverlayHost_) previewSettingsOverlayHost_->hide();
-                return;
-            }
-            previewSettingsScroll_->setVisible(visible);
-            if(previewSettingsOverlayHost_)
-            {
-                previewSettingsOverlayHost_->setVisible(visible);
-                if(visible)
-                {
-                    previewSettingsOverlayHost_->adjustSize();
-                    positionPreviewSettingsPopup();
-                    previewSettingsOverlayHost_->raise();
-                }
-            }
+            setPreviewSettingsVisibleAnimated(visible);
         });
         connect(resetInspectorButton, &QPushButton::clicked, this, [this]{
             if(preview_) preview_->renderer().ResetCamera();
@@ -17492,7 +17795,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
 
         const QStringList darkThemes{
-            "BO3 Dark", "Graphite", "Midnight Blue", "AMOLED", "Deep Purple",
+            "Liquid Glass", "BO3 Dark", "Graphite", "Midnight Blue", "AMOLED", "Deep Purple",
             "Forest", "Warm Ember", "Nord", "Tokyo Night", "Dracula",
             "Catppuccin Mocha", "Rose Pine", "Solarized Dark", "Crimson", "Oceanic",
             "Strawberry Night", "Mint Night", "Cyberpunk"
@@ -17586,6 +17889,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         });
         connect(previewMaxButton_, &QPushButton::toggled, this, [this](bool enabled){ setPreviewMaximized(enabled); });
         connect(resetCamera, &QPushButton::clicked, this, [this]{ resetPreviewView(); });
+        connect(previewApeMatchButton_, &QToolButton::clicked, this, [this]{ applyMaterialPreviewProfile(0); });
 
         editor_->setAcceptDrops(true); editor_->viewport()->setAcceptDrops(true); preview_->setAcceptDrops(true);
         editor_->installEventFilter(this); editor_->viewport()->installEventFilter(this); preview_->installEventFilter(this);
@@ -17968,7 +18272,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         outer->setContentsMargins(8, 8, 8, 8);
         outer->setSpacing(10);
 
-        auto* intro = new QLabel("Material preview now has three explicit intents: APE Match reproduces the recovered BO3 Asset Property Editor lighting presets, Look Dev keeps the Studio's artist-friendly controls, and Neutral mirrors APE's Rendering -> No Lighting diagnostic view. Shift + left-drag still rotates the sun for manual look-dev work.");
+        auto* intro = new QLabel("Material preview is centered on APE Match, reproducing the recovered BO3 Asset Property Editor lighting presets and reference geometry. Neutral / No Lighting remains available as a diagnostic view. Shift + left-drag rotates the APE sun.");
         intro->setWordWrap(true);
         intro->setStyleSheet("QLabel { color:#B9C0CA; }");
         outer->addWidget(intro);
@@ -17992,9 +18296,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         auto* profileRow = new QHBoxLayout();
         profileRow->addWidget(new QLabel("Preview profile:"));
         materialPreviewProfileCombo_ = new QComboBox();
-        materialPreviewProfileCombo_->addItems(QStringList{"APE Match", "Look Dev", "Neutral / No Lighting"});
+        materialPreviewProfileCombo_->addItems(QStringList{"APE Match", "Neutral / No Lighting"});
         materialPreviewProfileCombo_->setCurrentIndex(0); // APE Match is the 0.3 default material preview path
-        materialPreviewProfileCombo_->setToolTip("APE Match uses recovered TOOLSGFX/SSI lighting data. Look Dev is the Studio renderer. Neutral bypasses environment/direct lighting like APE's No Lighting mode.");
+        materialPreviewProfileCombo_->setToolTip("APE Match is the material preview. Neutral / No Lighting bypasses environment/direct lighting like APE's diagnostic view.");
         profileRow->addWidget(materialPreviewProfileCombo_);
         profileRow->addSpacing(8);
         profileRow->addWidget(new QLabel("APE lighting:"));
@@ -18012,13 +18316,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         apePresetInfoLabel_->setWordWrap(true);
         outer->addWidget(apePresetInfoLabel_);
 
-        auto* presetRow = new QHBoxLayout();
-        presetRow->addWidget(new QLabel("Lookdev preset:"));
-        lightingPresetCombo_ = new QComboBox();
+        // Legacy Studio/LookDev presets remain instantiated only for old internal
+        // code paths. 0.3 Phase 2 removes LookDev from the user-facing preview.
+        lightingPresetCombo_ = new QComboBox(panel);
         lightingPresetCombo_->addItems(QStringList{"Studio", "Daylight", "Overcast", "Dark Interior", "Fullbright"});
-        presetRow->addWidget(lightingPresetCombo_);
-        presetRow->addStretch(1);
-        outer->addLayout(presetRow);
+        lightingPresetCombo_->hide();
 
         auto* modeRow = new QHBoxLayout();
         modeRow->addWidget(new QLabel("Lighting mode:"));
@@ -18600,7 +18902,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         QString accent = "#4D8FCC";
         QString editorBase = "#0C0F13";
 
-        if (name == "Graphite")
+        if (name == "Liquid Glass")
+        {
+            window="#09111C"; panel="#111D2B"; base="#07101A"; button="#1A2A3B"; hover="#263B52"; border="#38536F"; textColor="#F0F6FF"; muted="#9DAFC3"; accent="#4DA3FF"; editorBase="#07101A";
+        }
+        else if (name == "Graphite")
         {
             window="#17191C"; panel="#1F2226"; base="#111315"; button="#272B30"; hover="#333940"; border="#414952"; textColor="#E8ECF0"; muted="#A3ADB7"; accent="#6C92B6"; editorBase="#0F1113";
         }
@@ -18713,6 +19019,37 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             if(customAccent.isValid()) accent = customAccent.name(QColor::HexRgb);
         }
 
+        const bool liquidGlassTheme = name == "Liquid Glass";
+        auto rgba = [](const QString& value, int alpha)
+        {
+            const QColor c(value);
+            return QString("rgba(%1,%2,%3,%4)").arg(c.red()).arg(c.green()).arg(c.blue()).arg(qBound(0, alpha, 255));
+        };
+        const QString glassToolbar = rgba(panel, lightTheme ? 242 : (liquidGlassTheme ? 198 : 232));
+        const QString glassMenu = rgba(panel, lightTheme ? 250 : (liquidGlassTheme ? 236 : 248));
+        const QString glassPanel = rgba(panel, lightTheme ? 244 : (liquidGlassTheme ? 218 : 244));
+        const QString glassPanelStrong = rgba(panel, lightTheme ? 250 : (liquidGlassTheme ? 232 : 250));
+        const QString controlBg = rgba(button, lightTheme ? 220 : (liquidGlassTheme ? 142 : 214));
+        const QString disabledBg = rgba(base, lightTheme ? 150 : 150);
+        const QString fieldBg = rgba(base, lightTheme ? 224 : (liquidGlassTheme ? 180 : 224));
+        const QString fieldFocus = rgba(button, lightTheme ? 210 : (liquidGlassTheme ? 170 : 218));
+        const QString glassHover = rgba(hover, lightTheme ? 196 : (liquidGlassTheme ? 182 : 220));
+        const QString sectionBg = rgba(panel, lightTheme ? 132 : (liquidGlassTheme ? 96 : 126));
+        const QString beginnerSection = rgba(panel, lightTheme ? 164 : (liquidGlassTheme ? 112 : 152));
+        const QString previewHud = rgba(panel, lightTheme ? 224 : (liquidGlassTheme ? 186 : 226));
+        const QString cardBg = rgba(button, lightTheme ? 150 : (liquidGlassTheme ? 118 : 165));
+        const QString cardHover = rgba(hover, lightTheme ? 180 : (liquidGlassTheme ? 156 : 196));
+        const QString softEdge = rgba(border, lightTheme ? 118 : (liquidGlassTheme ? 118 : 132));
+        const QString glassEdge = rgba(textColor, lightTheme ? 54 : (liquidGlassTheme ? 46 : 38));
+        const QString accentSoft = rgba(accent, lightTheme ? 54 : 66);
+        const QString accentFaint = rgba(accent, lightTheme ? 28 : 30);
+        const QString accentEdge = rgba(accent, lightTheme ? 170 : 190);
+        const QString accentHover = QColor(accent).lighter(lightTheme ? 105 : 112).name(QColor::HexRgb);
+        const QString scrollHandle = rgba(border, lightTheme ? 138 : 150);
+        const QString scrollHover = rgba(accent, lightTheme ? 150 : 170);
+        const QString goodBgSoft = rgba(successBg, lightTheme ? 205 : 185);
+        const QString warnBgSoft = rgba(warnBg, lightTheme ? 205 : 185);
+
         QPalette palette;
         palette.setColor(QPalette::Window, QColor(window));
         palette.setColor(QPalette::WindowText, QColor(textColor));
@@ -18734,84 +19071,169 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         qApp->setPalette(palette);
 
         QString qss = QString(R"QSS(
-            QMainWindow, QWidget { background:%1; color:%7; }
-            QMenuBar { background:%2; border-bottom:1px solid %6; padding:2px; }
-            QMenuBar::item { padding:5px 9px; border-radius:4px; }
-            QMenuBar::item:selected { background:%5; }
-            QMenu { background:%2; border:1px solid %6; padding:4px; }
-            QMenu::item { padding:6px 24px 6px 10px; border-radius:3px; }
-            QMenu::item:selected { background:%9; color:#FFFFFF; }
-            QToolBar { background:%2; border:0; border-bottom:1px solid %6; spacing:8px; padding:6px 8px; }
-            QToolButton, QPushButton { background:%4; color:%7; border:1px solid %6; border-radius:5px; padding:6px 11px; min-height:24px; }
-            QToolButton:hover, QPushButton:hover { background:%5; }
-            QToolButton:pressed, QPushButton:pressed { background:%9; color:#FFFFFF; }
-            QToolButton:disabled, QPushButton:disabled { background:%3; color:%10; border-color:%6; }
-            QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QKeySequenceEdit { background:%3; color:%7; border:1px solid %6; border-radius:4px; padding:4px 6px; min-height:20px; }
-            QLineEdit#BeginnerEffectSearch { padding-right:24px; }
-            QLineEdit#BeginnerEffectSearch QToolButton { background:transparent; border:0; padding:0; margin:0; min-width:16px; max-width:16px; min-height:16px; max-height:16px; }
-            QLineEdit#BeginnerEffectSearch QToolButton:hover { background:%5; border-radius:3px; }
-            QComboBox::drop-down { border:0; width:20px; }
-            QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTableWidget { background:%8; color:%7; border-color:%6; selection-background-color:%9; selection-color:#FFFFFF; }
+            QMainWindow { background:%1; color:%7; }
+            QWidget { color:%7; }
+            QMenuBar { background:@GLASS_TOOLBAR@; border:0; padding:4px 6px; }
+            QMenuBar::item { padding:6px 10px; border-radius:8px; background:transparent; }
+            QMenuBar::item:selected { background:@GLASS_HOVER@; }
+            QMenu { background:@GLASS_MENU@; border:1px solid @SOFT_EDGE@; border-radius:10px; padding:6px; }
+            QMenu::item { padding:7px 26px 7px 11px; border-radius:7px; }
+            QMenu::item:selected { background:@ACCENT_SOFT@; color:%7; }
+            QMenu::separator { height:1px; background:@SOFT_EDGE@; margin:5px 9px; }
+
+            QToolBar#MainToolbar { background:@GLASS_TOOLBAR@; border:0; spacing:7px; padding:8px 10px; }
+            QToolBar#MainToolbar QToolButton { border:0; border-radius:10px; padding:7px 11px; background:transparent; min-height:26px; }
+            QToolBar#MainToolbar QToolButton:hover { background:@GLASS_HOVER@; }
+            QToolBar#MainToolbar QToolButton:pressed { background:@ACCENT_SOFT@; }
+            QToolButton#ToolbarQuietAction { color:%10; }
+            QToolButton#ToolbarQuietAction:hover { color:%7; }
+            QWidget#StudioBrand { background:transparent; }
+            QWidget#StudioBrand QWidget { background:transparent; }
+            QLabel#StudioBrandMark { color:#F47B20; font-size:18px; font-weight:900; letter-spacing:-1px; }
+            QLabel#StudioBrandTitle { color:%7; font-size:12px; font-weight:700; }
+            QLabel#StudioBrandVersion { color:%10; font-size:9px; }
+
+            QPushButton, QToolButton { background:@CONTROL_BG@; color:%7; border:1px solid @SOFT_EDGE@; border-radius:8px; padding:6px 11px; min-height:24px; }
+            QPushButton:hover, QToolButton:hover { background:@GLASS_HOVER@; border-color:@ACCENT_EDGE@; }
+            QPushButton:pressed, QToolButton:pressed { background:@ACCENT_SOFT@; }
+            QPushButton:disabled, QToolButton:disabled { background:@DISABLED_BG@; color:%10; border-color:@SOFT_EDGE@; }
+            QToolButton#PrimaryAction, QPushButton#PrimaryAction { background:%9; color:#FFFFFF; border:1px solid @ACCENT_EDGE@; border-radius:9px; font-weight:700; }
+            QToolButton#PrimaryAction:hover, QPushButton#PrimaryAction:hover { background:@ACCENT_HOVER@; color:#FFFFFF; }
+
+            QWidget#ExperienceModeSwitch { background:transparent; }
+            QToolButton#ExperienceModeSegment { background:transparent; border:0; color:%10; padding:5px 9px; min-height:24px; font-weight:600; }
+            QToolButton#ExperienceModeSegment:checked { background:transparent; border:0; color:#FFFFFF; font-weight:700; }
+            QToolButton#ExperienceModeSegment:hover { background:transparent; color:%7; }
+
+            QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox, QKeySequenceEdit { background:@FIELD_BG@; color:%7; border:1px solid @SOFT_EDGE@; border-radius:8px; padding:5px 8px; min-height:22px; selection-background-color:%9; }
+            QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus, QKeySequenceEdit:focus { border-color:@ACCENT_EDGE@; background:@FIELD_FOCUS@; }
+            QComboBox::drop-down { border:0; width:22px; }
+            QLineEdit#BeginnerEffectSearch, QLineEdit#EffectLibrarySearch { padding-right:26px; }
+            QLineEdit#BeginnerEffectSearch QToolButton, QLineEdit#EffectLibrarySearch QToolButton { background:transparent; border:0; padding:0; margin:0; min-width:16px; max-width:16px; min-height:16px; max-height:16px; }
+
+            QPlainTextEdit, QTextEdit, QListWidget, QTreeWidget, QTableWidget { background:%8; color:%7; border:0; selection-background-color:@ACCENT_SOFT@; selection-color:%7; }
             QDockWidget { titlebar-close-icon:url(); titlebar-normal-icon:url(); }
-            QDockWidget::title { background:%2; border-bottom:1px solid %6; padding:6px 8px; font-weight:600; }
-            QDockWidget > QWidget { border:1px solid %6; }
-            QTabWidget::pane { border:1px solid %6; }
-            QTabBar::tab { background:%2; color:%7; border:1px solid %6; padding:6px 12px; }
-            QTabBar::tab:selected { background:%4; border-bottom-color:%4; }
-            QSplitter::handle { background:%6; }
-            QLabel#SectionHeader { color:%7; font-weight:700; letter-spacing:0.8px; padding:3px 2px 2px 2px; border-bottom:1px solid %6; }
-            QToolButton#PrimaryAction, QPushButton#PrimaryAction { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
-            QToolButton#PrimaryAction:hover, QPushButton#PrimaryAction:hover { background:%5; border-color:%9; color:%7; }
-            QToolButton#ExperienceModeButton { min-width:72px; padding:5px 10px; }
-            QToolButton#ExperienceModeButton:checked { background:%9; color:#FFFFFF; border-color:%9; font-weight:700; }
-            QWidget[tutorialHighlight="true"], QGroupBox[tutorialHighlight="true"], QToolBar[tutorialHighlight="true"] { border:2px solid %9; }
-            QToolButton#PreviewModeToggle { min-width:78px; padding:5px 10px; }
-            QToolButton#PreviewModeToggle:checked { background:%4; border-color:%9; font-weight:600; }
-            QToolButton#PreviewSettingsToggle:checked { background:%4; border-color:%9; font-weight:600; }
-            QLabel#CompileStatusBadge { background:%3; border:1px solid %6; border-radius:11px; padding:4px 10px; font-weight:600; }
-            QFrame#PreviewSettingsPanel { background:%2; border:1px solid %6; border-radius:7px; }
-            QWidget#PreviewSettingsOverlayHost { background:transparent; }
-            QScrollArea, QScrollArea#PreviewSettingsScroll { background:transparent; border:0; }
-            QScrollArea > QWidget > QWidget { background:transparent; }
-            QPushButton#CompactConsoleButton { min-height:18px; padding:3px 8px; }
+            QDockWidget::title { background:@GLASS_TOOLBAR@; border:0; padding:6px 8px; font-weight:600; }
+            QDockWidget > QWidget { border:0; }
+            QTabWidget::pane { border:0; }
+            QTabBar::tab { background:transparent; color:%10; border:0; border-radius:7px; padding:7px 12px; margin:2px; }
+            QTabBar::tab:selected { background:@GLASS_HOVER@; color:%7; }
+            QTabBar::tab:hover { color:%7; }
+            QSplitter::handle { background:@SOFT_EDGE@; }
+
+            QLabel#SectionHeader { color:%7; font-weight:700; letter-spacing:0.6px; padding:4px 2px; border:0; }
             QLabel#InspectorTitle { font-weight:700; font-size:13px; }
             QLabel#DetectedPreviewType { color:%7; font-weight:700; }
             QLabel#InspectorHelp, QLabel#CompactHelp { color:%10; }
             QLabel#CompactHelp { padding:1px 0; }
-            QLabel#BeginnerCategoryLabel { color:%9; font-size:10px; font-weight:700; }
-            QLabel#BeginnerCompatibilityLabel { color:@GOOD_TEXT@; background:@GOOD_BG@; border:1px solid @GOOD_BORDER@; border-radius:6px; padding:7px 10px; font-weight:600; }
-            QLabel#DepthStatusGood { color:@GOOD_TEXT@; background:@GOOD_BG@; border:1px solid @GOOD_BORDER@; border-radius:5px; padding:7px; }
-            QLabel#DepthStatusWarn { color:@WARN_TEXT@; background:@WARN_BG@; border:1px solid @WARN_BORDER@; border-radius:5px; padding:7px; }
-            QGroupBox { border:1px solid %6; border-radius:6px; margin-top:10px; padding-top:8px; font-weight:600; }
-            QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 5px; color:%7; }
-            QToolButton#BeginnerTargetCard { text-align:left; padding:8px 12px; background:%4; color:%7; border:1px solid %6; border-radius:6px; }
-            QToolButton#BeginnerTargetCard:hover { background:%5; border-color:%9; }
-            QToolButton#BeginnerTargetCard:checked { background:%9; color:#FFFFFF; border:2px solid %9; font-weight:600; }
-            QToolButton#BeginnerPresetCard { text-align:left; padding:7px 10px; background:%3; color:%7; border:1px solid %6; border-radius:6px; }
-            QToolButton#BeginnerPresetCard:hover { background:%4; border-color:%9; }
-            QFrame#BeginnerEmptyEffects { border:1px dashed %6; border-radius:8px; background:%3; }
-            QFrame#BeginnerInfoFrame { background:%3; border:1px solid %6; border-radius:7px; }
-            QFrame#BeginnerEffectCard { background:%3; border:1px solid %6; border-radius:8px; }
-            QFrame#BeginnerEffectCard[supported="true"]:hover { background:%4; border-color:%9; }
-            QFrame#BeginnerEffectCard[supported="false"] { background:%1; border-color:%6; }
+            QLabel#BeginnerCategoryLabel { color:%9; font-size:10px; font-weight:700; letter-spacing:0.5px; }
+            QLabel#BeginnerCompatibilityLabel { color:@GOOD_TEXT@; background:@GOOD_BG_SOFT@; border:0; border-radius:10px; padding:6px 9px; font-weight:600; }
+            QLabel#DepthStatusGood { color:@GOOD_TEXT@; background:@GOOD_BG_SOFT@; border:0; border-radius:9px; padding:8px; }
+            QLabel#DepthStatusWarn { color:@WARN_TEXT@; background:@WARN_BG_SOFT@; border:0; border-radius:9px; padding:8px; }
+
+            QWidget#BeginnerBuilderPanel { background:%1; }
+            QScrollArea#BeginnerRailScroll { background:transparent; border:0; }
+            QScrollArea#BeginnerRailScroll > QWidget > QWidget { background:transparent; }
+            QGroupBox { border:0; border-radius:10px; margin-top:13px; padding-top:10px; background:@SECTION_BG@; font-weight:600; }
+            QGroupBox::title { subcontrol-origin:margin; left:9px; padding:0 4px; color:%10; font-weight:700; }
+            QGroupBox#BeginnerSection { background:@BEGINNER_SECTION@; border:0; border-radius:12px; margin-top:14px; padding-top:10px; }
+            QGroupBox#BeginnerSection::title { color:%7; left:8px; font-weight:700; }
+            QToolButton#BeginnerTargetCard { text-align:left; padding:9px 11px; background:@CONTROL_BG@; color:%7; border:1px solid transparent; border-radius:10px; }
+            QToolButton#BeginnerTargetCard:hover { background:@GLASS_HOVER@; border-color:@ACCENT_EDGE@; }
+            QToolButton#BeginnerTargetCard:checked { background:@ACCENT_SOFT@; color:%7; border:1px solid @ACCENT_EDGE@; font-weight:700; }
+            QToolButton#BeginnerPresetCard { text-align:left; padding:8px 10px; background:@FIELD_BG@; color:%7; border:0; border-radius:9px; }
+            QToolButton#BeginnerPresetCard:hover { background:@GLASS_HOVER@; }
+            QFrame#BeginnerEmptyEffects { border:0; border-radius:11px; background:@FIELD_BG@; }
+            QFrame#BeginnerInfoFrame { background:@FIELD_BG@; border:0; border-radius:10px; }
+            QListWidget#BeginnerEffectStack { background:transparent; border:0; outline:0; }
+            QListWidget#BeginnerEffectStack::item { background:@FIELD_BG@; border:0; border-radius:8px; padding:7px 8px; margin:1px 0; }
+            QListWidget#BeginnerEffectStack::item:hover { background:@GLASS_HOVER@; }
+            QListWidget#BeginnerEffectStack::item:selected { background:@ACCENT_SOFT@; color:%7; }
+
+            QFrame#PreviewHud { background:@PREVIEW_HUD@; border:1px solid @SOFT_EDGE@; border-radius:13px; }
+            QFrame#PreviewHud QPushButton, QFrame#PreviewHud QToolButton, QFrame#PreviewHud QComboBox { background:transparent; border:1px solid transparent; border-radius:8px; }
+            QFrame#PreviewHud QPushButton:hover, QFrame#PreviewHud QToolButton:hover, QFrame#PreviewHud QComboBox:hover { background:@GLASS_HOVER@; border-color:@SOFT_EDGE@; }
+            QToolButton#PreviewModeToggle { min-width:78px; padding:5px 10px; }
+            QToolButton#PreviewModeToggle:checked { background:@ACCENT_SOFT@; border-color:@ACCENT_EDGE@; font-weight:600; }
+            QToolButton#PreviewProfileChip { background:@ACCENT_SOFT@; color:%7; border:1px solid @ACCENT_EDGE@; font-weight:700; }
+            QToolButton#PreviewProfileChip:hover { background:%9; color:#FFFFFF; }
+            QToolButton#PreviewSettingsToggle:checked { background:@ACCENT_SOFT@; border-color:@ACCENT_EDGE@; font-weight:600; }
+            QLabel#CompileStatusBadge { background:@FIELD_BG@; border:0; border-radius:11px; padding:4px 10px; font-weight:600; }
+
+            QFrame#PreviewSettingsPanel { background:@GLASS_PANEL@; border:1px solid @SOFT_EDGE@; border-radius:14px; }
+            QWidget#PreviewSettingsOverlayHost { background:transparent; }
+            QScrollArea, QScrollArea#PreviewSettingsScroll { background:transparent; border:0; }
+            QScrollArea > QWidget > QWidget { background:transparent; }
+            QPushButton#CompactConsoleButton { min-height:18px; padding:3px 8px; }
+
+            QFrame#EffectBrowserGlass { background:@GLASS_PANEL_STRONG@; border:1px solid @GLASS_EDGE@; border-radius:18px; }
+            QLabel#EffectLibraryGlyph { color:#FFFFFF; background:%9; border:0; border-radius:10px; font-size:18px; font-weight:800; }
+            QLabel#EffectLibraryTitle { color:%7; font-size:18px; font-weight:800; }
+            QToolButton#GlassCloseButton { background:@CONTROL_BG@; border:0; border-radius:9px; font-size:18px; padding:0; }
+            QToolButton#GlassCloseButton:hover { background:@GLASS_HOVER@; }
+            QLineEdit#EffectLibrarySearch { background:@FIELD_BG@; border:1px solid @SOFT_EDGE@; border-radius:10px; padding:7px 12px; }
+            QListWidget#EffectCategoryRail { background:transparent; border:0; outline:0; padding:2px; }
+            QListWidget#EffectCategoryRail::item { color:%10; background:transparent; border:0; border-radius:8px; padding:8px 9px; margin:1px 0; }
+            QListWidget#EffectCategoryRail::item:hover { background:@GLASS_HOVER@; color:%7; }
+            QListWidget#EffectCategoryRail::item:selected { background:@ACCENT_SOFT@; color:%7; font-weight:700; }
+            QScrollArea#EffectLibraryScroll { background:transparent; border:0; }
+            QWidget#EffectLibraryCardHost { background:transparent; }
+            QFrame#BeginnerEffectCard { background:@CARD_BG@; border:1px solid @SOFT_EDGE@; border-radius:12px; }
+            QFrame#BeginnerEffectCard[supported="true"]:hover { background:@CARD_HOVER@; border-color:@ACCENT_EDGE@; }
+            QFrame#BeginnerEffectCard[supported="false"] { background:@DISABLED_BG@; }
+            QFrame#BeginnerEffectCard QWidget { background:transparent; }
+            QFrame#EffectCardGlyph { background:@ACCENT_SOFT@; border:1px solid @ACCENT_EDGE@; border-radius:10px; }
+            QLabel#EffectCardGlyphText { color:%9; font-weight:800; letter-spacing:0.8px; }
             QLabel#EffectCardTitle { color:%7; font-size:14px; font-weight:700; }
             QLabel#EffectCardTitleDisabled { color:%10; font-size:14px; font-weight:700; }
-            QLabel#EffectCardCategory { color:%9; font-size:9px; font-weight:700; }
+            QLabel#EffectCardCategory { color:%9; background:@ACCENT_FAINT@; border:0; border-radius:7px; padding:3px 6px; font-size:9px; font-weight:700; }
             QLabel#EffectCardCategoryDisabled { color:%10; font-size:9px; font-weight:700; }
             QLabel#EffectAvailabilityGood { color:@GOOD_TEXT@; font-size:10px; }
             QLabel#EffectAvailabilityWarn { color:@WARN_TEXT@; font-size:10px; }
-            QStatusBar { background:%2; border-top:1px solid %6; }
-            QScrollBar:vertical { background:%1; width:12px; }
-            QScrollBar::handle:vertical { background:%6; min-height:28px; border-radius:5px; margin:2px; }
-            QScrollBar:horizontal { background:%1; height:12px; }
-            QScrollBar::handle:horizontal { background:%6; min-width:28px; border-radius:5px; margin:2px; }
+            QPushButton#EffectAddButton { background:@ACCENT_SOFT@; color:%7; border:1px solid @ACCENT_EDGE@; border-radius:9px; font-weight:700; }
+            QPushButton#EffectAddButton:hover { background:%9; color:#FFFFFF; }
+            QLabel#EffectLibraryEmpty { color:%10; font-size:12px; }
+
+            QWidget[tutorialHighlight="true"], QGroupBox[tutorialHighlight="true"], QToolBar[tutorialHighlight="true"] { border:2px solid %9; }
+            QStatusBar { background:@GLASS_TOOLBAR@; border:0; }
+            QScrollBar:vertical { background:transparent; width:8px; margin:1px; }
+            QScrollBar::handle:vertical { background:@SCROLL_HANDLE@; min-height:30px; border-radius:4px; }
+            QScrollBar::handle:vertical:hover { background:@SCROLL_HOVER@; }
+            QScrollBar:horizontal { background:transparent; height:8px; margin:1px; }
+            QScrollBar::handle:horizontal { background:@SCROLL_HANDLE@; min-width:30px; border-radius:4px; }
+            QScrollBar::handle:horizontal:hover { background:@SCROLL_HOVER@; }
             QScrollBar::add-line, QScrollBar::sub-line { width:0; height:0; }
-            QSlider::groove:horizontal { height:4px; background:%6; border-radius:2px; }
+            QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }
+            QSlider::groove:horizontal { height:4px; background:@SOFT_EDGE@; border-radius:2px; }
             QSlider::sub-page:horizontal { background:%9; border-radius:2px; }
-            QSlider::add-page:horizontal { background:%6; border-radius:2px; }
-            QSlider::handle:horizontal { background:%4; border:1px solid %6; width:12px; margin:-5px 0; border-radius:6px; }
-            QSlider::handle:horizontal:hover { border-color:%9; background:%5; }
+            QSlider::add-page:horizontal { background:@SOFT_EDGE@; border-radius:2px; }
+            QSlider::handle:horizontal { background:%7; border:2px solid %9; width:14px; margin:-6px 0; border-radius:7px; }
+            QSlider::handle:horizontal:hover { background:#FFFFFF; }
         )QSS").arg(window, panel, base, button, hover, border, textColor, editorBase, accent, muted);
+        qss.replace("@GLASS_TOOLBAR@", glassToolbar);
+        qss.replace("@GLASS_MENU@", glassMenu);
+        qss.replace("@GLASS_PANEL@", glassPanel);
+        qss.replace("@GLASS_PANEL_STRONG@", glassPanelStrong);
+        qss.replace("@CONTROL_BG@", controlBg);
+        qss.replace("@DISABLED_BG@", disabledBg);
+        qss.replace("@FIELD_BG@", fieldBg);
+        qss.replace("@FIELD_FOCUS@", fieldFocus);
+        qss.replace("@GLASS_HOVER@", glassHover);
+        qss.replace("@SECTION_BG@", sectionBg);
+        qss.replace("@BEGINNER_SECTION@", beginnerSection);
+        qss.replace("@PREVIEW_HUD@", previewHud);
+        qss.replace("@CARD_BG@", cardBg);
+        qss.replace("@CARD_HOVER@", cardHover);
+        qss.replace("@SOFT_EDGE@", softEdge);
+        qss.replace("@GLASS_EDGE@", glassEdge);
+        qss.replace("@ACCENT_SOFT@", accentSoft);
+        qss.replace("@ACCENT_FAINT@", accentFaint);
+        qss.replace("@ACCENT_EDGE@", accentEdge);
+        qss.replace("@ACCENT_HOVER@", accentHover);
+        qss.replace("@SCROLL_HANDLE@", scrollHandle);
+        qss.replace("@SCROLL_HOVER@", scrollHover);
+        qss.replace("@GOOD_BG_SOFT@", goodBgSoft);
+        qss.replace("@WARN_BG_SOFT@", warnBgSoft);
         qss.replace("@GOOD_TEXT@", successText);
         qss.replace("@GOOD_BG@", successBg);
         qss.replace("@GOOD_BORDER@", successBorder);
@@ -18848,17 +19270,189 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         return animationsEnabled_;
     }
 
+    void animateWidgetReveal(QWidget* widget, int delayMs = 0, int durationMs = 210)
+    {
+        if(!widget || !effectiveAnimationsEnabled()) return;
+        QPointer<QWidget> guarded(widget);
+        QTimer::singleShot(qMax(0, delayMs), this, [this, guarded, durationMs]
+        {
+            if(!guarded || !effectiveAnimationsEnabled()) return;
+            guarded->setGraphicsEffect(nullptr);
+            auto* effect = new QGraphicsOpacityEffect(guarded);
+            effect->setOpacity(0.0);
+            guarded->setGraphicsEffect(effect);
+            auto* animation = new QPropertyAnimation(effect, "opacity", guarded);
+            animation->setDuration(qMax(80, durationMs));
+            animation->setStartValue(0.0);
+            animation->setEndValue(1.0);
+            animation->setEasingCurve(QEasingCurve::OutCubic);
+            connect(animation, &QPropertyAnimation::finished, guarded, [guarded]
+            {
+                if(guarded) guarded->setGraphicsEffect(nullptr);
+            });
+            animation->start(QAbstractAnimation::DeleteWhenStopped);
+        });
+    }
+
     void animateAuthoringPage(QWidget* page)
     {
-        if(!page || !effectiveAnimationsEnabled()) return;
-        auto* effect = new QGraphicsOpacityEffect(page);
-        page->setGraphicsEffect(effect);
-        auto* animation = new QPropertyAnimation(effect, "opacity", page);
-        animation->setDuration(120);
-        animation->setStartValue(0.30);
-        animation->setEndValue(1.0);
-        connect(animation, &QPropertyAnimation::finished, page, [page]{ page->setGraphicsEffect(nullptr); });
-        animation->start(QAbstractAnimation::DeleteWhenStopped);
+        animateWidgetReveal(page, 0, 220);
+    }
+
+    void switchAuthoringPageWithMotion(QWidget* page, bool enteringBeginner, bool allowMotion)
+    {
+        if(!authoringStack_ || !page) return;
+        QWidget* previous = authoringStack_->currentWidget();
+        if(previous == page) return;
+
+        const bool animate = allowMotion && effectiveAnimationsEnabled() && isVisible() &&
+                             authoringStack_->width() > 80 && authoringStack_->height() > 80;
+        if(!animate || !previous)
+        {
+            authoringStack_->setCurrentWidget(page);
+            return;
+        }
+
+        const QRect viewportRect = authoringStack_->rect();
+        QPixmap previousPixmap = previous->grab();
+        authoringStack_->setCurrentWidget(page);
+        page->show();
+        page->update();
+        QPixmap nextPixmap = page->grab();
+        if(previousPixmap.isNull() || nextPixmap.isNull())
+        {
+            animateAuthoringPage(page);
+            return;
+        }
+
+        auto* pageEffect = new QGraphicsOpacityEffect(page);
+        pageEffect->setOpacity(0.0);
+        page->setGraphicsEffect(pageEffect);
+
+        auto makeGhost = [this, viewportRect](const QPixmap& pixmap)
+        {
+            auto* label = new QLabel(authoringStack_);
+            label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            label->setScaledContents(true);
+            label->setPixmap(pixmap);
+            label->setGeometry(viewportRect);
+            label->show();
+            label->raise();
+            auto* opacity = new QGraphicsOpacityEffect(label);
+            label->setGraphicsEffect(opacity);
+            return qMakePair(label, opacity);
+        };
+
+        const auto previousGhost = makeGhost(previousPixmap);
+        const auto nextGhost = makeGhost(nextPixmap);
+        nextGhost.second->setOpacity(0.0);
+
+        const int incomingOffset = enteringBeginner ? -72 : 72;
+        const int outgoingOffset = enteringBeginner ? 42 : -42;
+        nextGhost.first->setGeometry(viewportRect.translated(incomingOffset, 0));
+
+        auto* group = new QParallelAnimationGroup(authoringStack_);
+        auto* oldMove = new QPropertyAnimation(previousGhost.first, "geometry", group);
+        oldMove->setDuration(300);
+        oldMove->setStartValue(viewportRect);
+        oldMove->setEndValue(viewportRect.translated(outgoingOffset, 0));
+        oldMove->setEasingCurve(QEasingCurve::InOutCubic);
+        auto* oldFade = new QPropertyAnimation(previousGhost.second, "opacity", group);
+        oldFade->setDuration(230);
+        oldFade->setStartValue(1.0);
+        oldFade->setEndValue(0.0);
+        oldFade->setEasingCurve(QEasingCurve::InCubic);
+
+        auto* newMove = new QPropertyAnimation(nextGhost.first, "geometry", group);
+        newMove->setDuration(340);
+        newMove->setStartValue(viewportRect.translated(incomingOffset, 0));
+        newMove->setEndValue(viewportRect);
+        newMove->setEasingCurve(QEasingCurve::OutCubic);
+        auto* newFade = new QPropertyAnimation(nextGhost.second, "opacity", group);
+        newFade->setDuration(285);
+        newFade->setStartValue(0.0);
+        newFade->setEndValue(1.0);
+        newFade->setEasingCurve(QEasingCurve::OutCubic);
+
+        connect(group, &QParallelAnimationGroup::finished, authoringStack_,
+                [page, pageEffect, previousLabel = previousGhost.first, nextLabel = nextGhost.first]
+        {
+            if(page && page->graphicsEffect() == pageEffect) page->setGraphicsEffect(nullptr);
+            if(previousLabel) previousLabel->deleteLater();
+            if(nextLabel) nextLabel->deleteLater();
+        });
+        group->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    void setPreviewSettingsVisibleAnimated(bool visible)
+    {
+        if(!previewSettingsScroll_ || !previewSettingsOverlayHost_) return;
+        if(previewMaxButton_ && previewMaxButton_->isChecked()) visible = false;
+
+        if(!effectiveAnimationsEnabled())
+        {
+            previewSettingsScroll_->setVisible(visible);
+            previewSettingsOverlayHost_->setVisible(visible);
+            previewSettingsOverlayHost_->setWindowOpacity(1.0);
+            if(visible)
+            {
+                previewSettingsOverlayHost_->adjustSize();
+                positionPreviewSettingsPopup();
+                previewSettingsOverlayHost_->raise();
+            }
+            return;
+        }
+
+        if(visible)
+        {
+            previewSettingsScroll_->show();
+            previewSettingsOverlayHost_->show();
+            previewSettingsOverlayHost_->adjustSize();
+            positionPreviewSettingsPopup();
+            const QRect finalRect = previewSettingsOverlayHost_->geometry();
+            const QRect startRect = finalRect.translated(34, 0);
+            previewSettingsOverlayHost_->setGeometry(startRect);
+            previewSettingsOverlayHost_->setWindowOpacity(0.0);
+            previewSettingsOverlayHost_->raise();
+
+            auto* group = new QParallelAnimationGroup(previewSettingsOverlayHost_);
+            auto* slide = new QPropertyAnimation(previewSettingsOverlayHost_, "geometry", group);
+            slide->setDuration(260);
+            slide->setStartValue(startRect);
+            slide->setEndValue(finalRect);
+            slide->setEasingCurve(QEasingCurve::OutCubic);
+            auto* fade = new QPropertyAnimation(previewSettingsOverlayHost_, "windowOpacity", group);
+            fade->setDuration(220);
+            fade->setStartValue(0.0);
+            fade->setEndValue(1.0);
+            fade->setEasingCurve(QEasingCurve::OutCubic);
+            group->start(QAbstractAnimation::DeleteWhenStopped);
+        }
+        else if(previewSettingsOverlayHost_->isVisible())
+        {
+            const QRect startRect = previewSettingsOverlayHost_->geometry();
+            const QRect endRect = startRect.translated(28, 0);
+            auto* group = new QParallelAnimationGroup(previewSettingsOverlayHost_);
+            auto* slide = new QPropertyAnimation(previewSettingsOverlayHost_, "geometry", group);
+            slide->setDuration(170);
+            slide->setStartValue(startRect);
+            slide->setEndValue(endRect);
+            slide->setEasingCurve(QEasingCurve::InCubic);
+            auto* fade = new QPropertyAnimation(previewSettingsOverlayHost_, "windowOpacity", group);
+            fade->setDuration(145);
+            fade->setStartValue(previewSettingsOverlayHost_->windowOpacity());
+            fade->setEndValue(0.0);
+            connect(group, &QParallelAnimationGroup::finished, previewSettingsOverlayHost_, [this]
+            {
+                if(previewSettingsScroll_) previewSettingsScroll_->hide();
+                if(previewSettingsOverlayHost_)
+                {
+                    previewSettingsOverlayHost_->hide();
+                    previewSettingsOverlayHost_->setWindowOpacity(1.0);
+                }
+            });
+            group->start(QAbstractAnimation::DeleteWhenStopped);
+        }
     }
 
     void setTutorialHighlight(QWidget* widget, bool enabled)
@@ -19049,15 +19643,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             uiAdvancedModeAction_->setChecked(!beginner);
         }
 
+        if(experienceModeSwitch_)
+            experienceModeSwitch_->setBeginner(beginner, persist && effectiveAnimationsEnabled());
+        if(editorPositionLabel_)
+            editorPositionLabel_->setVisible(!beginner);
+
         if(authoringStack_)
         {
             authoringStack_->setMinimumWidth(beginner ? 310 : 0);
             authoringStack_->setMaximumWidth(beginner ? 430 : QWIDGETSIZE_MAX);
-            if(beginner && beginnerBuilderPanel_)
-                authoringStack_->setCurrentWidget(beginnerBuilderPanel_);
-            else if(!beginner && advancedEditorPage_)
-                authoringStack_->setCurrentWidget(advancedEditorPage_);
-            animateAuthoringPage(authoringStack_->currentWidget());
+            QWidget* targetPage = beginner ? beginnerBuilderPanel_ : advancedEditorPage_;
+            switchAuthoringPageWithMotion(targetPage, beginner, persist);
         }
 
         // The inspector is an owned top-level tool window rather than a normal
@@ -20702,9 +21298,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     void syncSceneControlsFromRenderer()
     {
         if (!preview_) return;
-        const MaterialPreviewProfile profile = preview_->renderer().GetMaterialPreviewProfile();
-        const int profileIndex = profile == MaterialPreviewProfile::ApeMatch ? 0 :
-                                 profile == MaterialPreviewProfile::Neutral ? 2 : 1;
+        MaterialPreviewProfile profile = preview_->renderer().GetMaterialPreviewProfile();
+        // LookDev is retained only as an internal renderer fallback for compatibility;
+        // the user-facing 0.3 preview is APE Match + Neutral diagnostic.
+        if(profile == MaterialPreviewProfile::LookDev)
+        {
+            preview_->renderer().SetMaterialPreviewProfile(MaterialPreviewProfile::ApeMatch);
+            preview_->renderer().SetFulbright(false);
+            profile = MaterialPreviewProfile::ApeMatch;
+        }
+        const int profileIndex = profile == MaterialPreviewProfile::Neutral ? 1 : 0;
         if (materialPreviewProfileCombo_)
         {
             QSignalBlocker blocker(materialPreviewProfileCombo_);
@@ -21402,31 +22005,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             applyApeLightingPreset(apeIndex, true);
             statusBar()->showMessage("APE Match enabled - recovered TOOLSGFX/SSI lighting is active", 3500);
         }
-        else if (index == 2)
+        else
         {
             r.SetMaterialPreviewProfile(MaterialPreviewProfile::Neutral);
             r.SetFulbright(true);
             r.SetEnvironmentAffectsLighting(false);
-            r.SetBackgroundColor(76.0f / 255.0f, 102.0f / 255.0f, 127.0f / 255.0f); // exact flat RGB sampled from APE No Lighting viewport
+            r.SetBackgroundColor(76.0f / 255.0f, 102.0f / 255.0f, 127.0f / 255.0f);
             r.SetGroundEnabled(false);
             r.SetLookdevExposureEV(0.0f);
             r.SetToneMapMode(0);
             r.ResetLightColorToEnvironment();
             statusBar()->showMessage("Neutral / No Lighting enabled - raw material response with APE-style background", 3500);
-        }
-        else
-        {
-            r.SetMaterialPreviewProfile(MaterialPreviewProfile::LookDev);
-            r.SetFulbright(false);
-            r.SetEnvironmentAffectsLighting(true);
-            r.ResetLightColorToEnvironment();
-            r.SetEnvironmentRotationDegrees(0.0f);
-            r.SetBackgroundColor(0.0f, 0.0f, 0.0f);
-            r.SetGroundEnabled(true);
-            std::wstring ignored;
-            r.CreateDefaultStudioEnvironment(ignored);
-            applyLightingPreset(lightingPresetCombo_ ? lightingPresetCombo_->currentIndex() : 0);
-            statusBar()->showMessage("Look Dev preview enabled", 2500);
         }
         updateBackgroundButtonText();
         syncSceneControlsFromRenderer();
@@ -21860,6 +22449,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QGroupBox* beginnerTargetGroup_ = nullptr;
     QPushButton* beginnerExportButton_ = nullptr;
     QToolBar* commandToolbar_ = nullptr;
+    ExperienceModeSwitch* experienceModeSwitch_ = nullptr;
     QToolButton* beginnerTargetButtons_[3]{};
     QLineEdit* beginnerProjectNameEdit_ = nullptr;
     QComboBox* beginnerPresetCombo_ = nullptr;
@@ -21878,6 +22468,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QGroupBox* beginnerParamsGroup_ = nullptr;
     QVBoxLayout* beginnerBaseAppearanceLayout_ = nullptr;
     QVBoxLayout* beginnerEffectParamsLayout_ = nullptr;
+    QWidget* beginnerParamsContent_ = nullptr;
     QLabel* beginnerCompatibilityLabel_ = nullptr;
     QLabel* beginnerSummaryLabel_ = nullptr;
     QLabel* beginnerTargetDescription_ = nullptr;
@@ -21914,6 +22505,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QWidget* scriptPanel_ = nullptr;
     QWidget* performancePanel_ = nullptr;
     QFrame* previewSettingsPanel_ = nullptr;
+    QFrame* previewHud_ = nullptr;
     QWidget* previewAdvancedSettingsContainer_ = nullptr;
     QWidget* previewSettingsOverlayHost_ = nullptr;
     QScrollArea* previewSettingsScroll_ = nullptr;
@@ -21925,6 +22517,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     QComboBox* previewMaterialProfileCombo_ = nullptr;
     QComboBox* previewApeLightingPresetCombo_ = nullptr;
     QToolButton* previewSettingsToggleButton_ = nullptr;
+    QToolButton* previewApeMatchButton_ = nullptr;
     QToolButton* beginnerModeButton_ = nullptr;
     QToolButton* advancedModeButton_ = nullptr;
     QToolButton* beginnerPreviewImageToolbarButton_ = nullptr;
