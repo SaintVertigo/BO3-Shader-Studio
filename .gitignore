@@ -53,3 +53,10 @@ ui_*.h
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local development / handoff artifacts (do not commit to GitHub)
+/PATCH_NOTES*.md
+/PHASE*_README.txt
+/VERIFY_*.ps1
+/*_NOTES.txt
+/*.patch
