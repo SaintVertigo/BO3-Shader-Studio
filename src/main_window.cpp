@@ -700,8 +700,8 @@ private:
         const QTextCursor c = textCursor();
         int pos = c.position();
         int bracketPos = -1;
-        if(pos > 0 && QStringLiteral("()[]{}").contains(text.value(pos - 1))) bracketPos = pos - 1;
-        else if(pos < text.size() && QStringLiteral("()[]{}").contains(text.value(pos))) bracketPos = pos;
+        if(pos > 0 && QStringLiteral("()[]{}").contains(text.at(pos - 1))) bracketPos = pos - 1;
+        else if(pos < text.size() && QStringLiteral("()[]{}").contains(text.at(pos))) bracketPos = pos;
         if(bracketPos < 0) return;
         const QChar ch = text[bracketPos];
         const QString opens = QStringLiteral("([{");
