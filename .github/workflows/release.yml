@@ -461,6 +461,40 @@ jobs:
           }
           Write-Host 'QML startup smoke test passed.'
 
+      - name: Run frontend integration smoke test
+        id: frontend_integration_smoke
+        if: steps.stage_portable.outcome == 'success'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD 'dist\BO3HLSLPreviewer.exe'
+          $stdoutPath = Join-Path $env:RUNNER_TEMP 'bo3_frontend_smoke.stdout.txt'
+          $stderrPath = Join-Path $env:RUNNER_TEMP 'bo3_frontend_smoke.stderr.txt'
+          $process = Start-Process -FilePath $exe `
+            -ArgumentList @('--frontend-smoke-test') `
+            -PassThru `
+            -NoNewWindow `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(20000)) {
+            try { $process.Kill() } catch {}
+            throw 'Frontend integration smoke test timed out.'
+          }
+          if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath }
+          if (Test-Path -LiteralPath $stderrPath) {
+            $stderrText = Get-Content -LiteralPath $stderrPath
+            if ($stderrText) { $stderrText | Write-Host }
+          }
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_startup.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_startup.log') | Write-Host
+            }
+            if (Test-Path -LiteralPath (Join-Path $PWD 'dist\studio_crash.log')) {
+              Get-Content -LiteralPath (Join-Path $PWD 'dist\studio_crash.log') | Write-Host
+            }
+            throw "Frontend integration smoke test failed with exit code $($process.ExitCode)."
+          }
+          Write-Host 'Frontend integration smoke test passed.'
+
       - name: Show compiler-cache statistics
         if: always() && env.BO3_FAST_TESTER == '1' && steps.build_runtime.outcome == 'success'
         continue-on-error: true

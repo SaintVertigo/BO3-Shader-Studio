@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <dbghelp.h>
 #include <d3d11.h>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -79,6 +80,8 @@
 #include <QPropertyAnimation>
 #include <QQuickView>
 #include <QQuickWidget>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QQuickItem>
 #include <QQmlContext>
 #include <QQmlError>
@@ -204,6 +207,134 @@ namespace fs = std::filesystem;
 
 namespace
 {
+
+volatile LONG gStudioStartupPhase = 0;
+
+const wchar_t* StudioStartupPhaseName(LONG phase)
+{
+    switch(phase)
+    {
+        case 1: return L"process start";
+        case 2: return L"QApplication ready";
+        case 3: return L"MainWindow construction";
+        case 4: return L"QML frontend activation";
+        case 5: return L"QML component ready";
+        case 6: return L"hybrid frontend installed";
+        case 7: return L"main window shown";
+        case 8: return L"preview initialization";
+        case 9: return L"preview initialized";
+        case 10: return L"native preview attached";
+        case 11: return L"event loop stable";
+        default: return L"unknown";
+    }
+}
+
+void SetStudioStartupPhase(LONG phase)
+{
+    InterlockedExchange(&gStudioStartupPhase, phase);
+}
+
+std::wstring StudioExecutableDirectoryWin32()
+{
+    wchar_t modulePath[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, modulePath, 32768u);
+    if(length == 0 || length >= 32768u) return L".";
+    for(DWORD i = length; i > 0; --i)
+    {
+        if(modulePath[i - 1] == L'\\' || modulePath[i - 1] == L'/')
+        {
+            modulePath[i - 1] = L'\0';
+            break;
+        }
+    }
+    return modulePath;
+}
+
+void WriteStudioCrashText(EXCEPTION_POINTERS* info)
+{
+    const std::wstring dir = StudioExecutableDirectoryWin32();
+    const std::wstring path = dir + L"\\studio_crash.log";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if(file == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
+    const void* address = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionAddress : nullptr;
+    const LONG phase = InterlockedCompareExchange(&gStudioStartupPhase, 0, 0);
+    char text[2048]{};
+    const int length = sprintf_s(text, sizeof(text),
+        "BO3 Shader Studio crash\r\n"
+        "Time: %04u-%02u-%02u %02u:%02u:%02u.%03u\r\n"
+        "Startup phase: %ld (%ls)\r\n"
+        "Exception code: 0x%08lX\r\n"
+        "Exception address: %p\r\n"
+        "Thread ID: %lu\r\n",
+        now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds,
+        phase, StudioStartupPhaseName(phase), code, address, GetCurrentThreadId());
+    if(length > 0)
+    {
+        DWORD written = 0;
+        WriteFile(file, text, static_cast<DWORD>(length), &written, nullptr);
+    }
+    CloseHandle(file);
+}
+
+void WriteStudioMiniDump(EXCEPTION_POINTERS* info)
+{
+    HMODULE dbgHelp = LoadLibraryW(L"dbghelp.dll");
+    if(!dbgHelp) return;
+    using MiniDumpWriteDumpFn = BOOL (WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                               PMINIDUMP_EXCEPTION_INFORMATION,
+                                               PMINIDUMP_USER_STREAM_INFORMATION,
+                                               PMINIDUMP_CALLBACK_INFORMATION);
+    const auto writeDump = reinterpret_cast<MiniDumpWriteDumpFn>(GetProcAddress(dbgHelp, "MiniDumpWriteDump"));
+    if(!writeDump)
+    {
+        FreeLibrary(dbgHelp);
+        return;
+    }
+
+    const std::wstring path = StudioExecutableDirectoryWin32() + L"\\studio_crash.dmp";
+    HANDLE dump = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if(dump != INVALID_HANDLE_VALUE)
+    {
+        MINIDUMP_EXCEPTION_INFORMATION exceptionInfo{};
+        exceptionInfo.ThreadId = GetCurrentThreadId();
+        exceptionInfo.ExceptionPointers = info;
+        exceptionInfo.ClientPointers = FALSE;
+        writeDump(GetCurrentProcess(), GetCurrentProcessId(), dump, MiniDumpNormal,
+                  info ? &exceptionInfo : nullptr, nullptr, nullptr);
+        CloseHandle(dump);
+    }
+    FreeLibrary(dbgHelp);
+}
+
+LONG WINAPI StudioUnhandledExceptionFilter(EXCEPTION_POINTERS* info)
+{
+    WriteStudioCrashText(info);
+    WriteStudioMiniDump(info);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+QString StudioStartupTracePath()
+{
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("studio_startup.log"));
+}
+
+void AppendStudioStartupTrace(const QString& message, bool truncate = false)
+{
+    QFile file(StudioStartupTracePath());
+    const QIODevice::OpenMode mode = QIODevice::WriteOnly | QIODevice::Text |
+        (truncate ? QIODevice::Truncate : QIODevice::Append);
+    if(!file.open(mode)) return;
+    const QString line = QStringLiteral("[%1] %2\n")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")), message);
+    file.write(line.toUtf8());
+    file.flush();
+}
 
 class BeginnerEffectBrowserDialog final : public QDialog
 {
@@ -358,8 +489,10 @@ bool WaitForQuickFrontendLoad(QQuickWidget* quickWidget, QStringList* errorsOut 
 
 QString WriteQmlFrontendStartupLog(const QStringList& errors)
 {
-    QString root = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    if(root.isEmpty()) root = QCoreApplication::applicationDirPath();
+    // Keep startup diagnostics beside the portable executable so a user can zip
+    // the Studio folder and the evidence comes with it. The updater installs to
+    // a user-writable location, so this is also easier to find than AppData.
+    QString root = QCoreApplication::applicationDirPath();
     QDir().mkpath(root);
     const QString path = QDir(root).filePath(QStringLiteral("qml_frontend_startup.log"));
     QSaveFile file(path);
@@ -981,6 +1114,10 @@ public:
     explicit D3DPreviewWidget(QWidget* parent = nullptr) : QWidget(parent)
     {
         setAttribute(Qt::WA_NativeWindow, true);
+        // This D3D child needs its own HWND, but forcing every ancestor native can
+        // destabilize QQuickWidget composition. Keep the native boundary local to
+        // the preview widget when it is hosted above the QML shell.
+        setAttribute(Qt::WA_DontCreateNativeAncestors, true);
         setAttribute(Qt::WA_PaintOnScreen, true);
         setAttribute(Qt::WA_NoSystemBackground, true);
         setAttribute(Qt::WA_OpaquePaintEvent, true);
@@ -1422,7 +1559,14 @@ public:
         // recover the classic front end if a machine-specific Qt Quick issue is
         // encountered while the migration is still being proven.
         if(!qEnvironmentVariableIsSet("BO3_STUDIO_LEGACY_UI"))
-            activateQmlFrontend();
+        {
+            SetStudioStartupPhase(4);
+            AppendStudioStartupTrace(QStringLiteral("Activating Qt Quick front end"));
+            const bool qmlActivated = activateQmlFrontend();
+            AppendStudioStartupTrace(qmlActivated
+                ? QStringLiteral("Qt Quick front end activated")
+                : QStringLiteral("Qt Quick front end failed; legacy recovery UI retained"));
+        }
         loadPreviewDefaults();
         updateGBufferUi();
         refreshMaterialTextureUi();
@@ -1457,13 +1601,24 @@ public:
             }
         });
 
-        QTimer::singleShot(0, this, [this]{
+        // QML and the native D3D11 preview both create graphics resources on the
+        // first visible event-loop turns. Starting both at exactly the same time
+        // made Windows exits possible before Qt could surface an error. Let the
+        // Qt Quick shell establish itself first, then initialize the proven D3D
+        // preview on a separate turn. Legacy UI keeps its original immediate path.
+        const int previewStartupDelayMs = qmlFrontendActive_ ? 500 : 0;
+        QTimer::singleShot(previewStartupDelayMs, this, [this]{
+            SetStudioStartupPhase(8);
+            AppendStudioStartupTrace(QStringLiteral("Initializing Direct3D preview"));
             QString error;
-            if (!preview_->ensureInitialized(error) && !error.isEmpty())
+            if (!preview_->ensureInitialized(error))
             {
-                QMessageBox::critical(this, "DirectX initialization failed", error);
+                AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialization FAILED: %1").arg(error));
+                if(!error.isEmpty()) QMessageBox::critical(this, "DirectX initialization failed", error);
                 return;
             }
+            SetStudioStartupPhase(9);
+            AppendStudioStartupTrace(QStringLiteral("Direct3D preview initialized"));
             if(beginnerUiMode_)
                 startBeginnerProject(beginner::Target::PostFx, false);
             else
@@ -17038,6 +17193,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             return false;
         }
 
+        SetStudioStartupPhase(5);
+        AppendStudioStartupTrace(QStringLiteral("Main.qml component reached Ready"));
+
         // Wire the QML shell to the existing, already-proven backend commands.
         connect(bridge, &StudioFrontendBridge::menuRequested, this, [this](const QString& name){ popupQmlMenu(name); });
         connect(bridge, &StudioFrontendBridge::openRequested, this, [this]{ openShaderDialog(); });
@@ -17186,13 +17344,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             connect(item, &QQuickItem::visibleChanged, this, queueGeometrySync);
         }
 
-        QTimer::singleShot(0, this, [this]
+        SetStudioStartupPhase(6);
+        AppendStudioStartupTrace(QStringLiteral("Hybrid QML host installed; deferring native preview attach"));
+        QTimer::singleShot(700, this, [this]
         {
             syncQmlFrontendUiState();
             syncQmlFrontendPalette();
             syncQmlFrontendProject();
             syncQmlNativeSurfaces();
-            if(preview_) preview_->renderNow();
+            SetStudioStartupPhase(10);
+            AppendStudioStartupTrace(QStringLiteral("Native preview/editor surfaces attached to QML slots"));
         });
         return true;
     }
@@ -22770,9 +22931,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
 
 int RunBo3ShaderStudio(int argc, char* argv[])
 {
+    SetUnhandledExceptionFilter(StudioUnhandledExceptionFilter);
+    SetStudioStartupPhase(1);
     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     QApplication app(argc, argv);
     app.setApplicationName("BO3 Shader Studio");
+    AppendStudioStartupTrace(QStringLiteral("Process started; crash handler installed"), true);
+    SetStudioStartupPhase(2);
+    AppendStudioStartupTrace(QStringLiteral("QApplication ready"));
+
+    // The shader preview owns an independent native D3D11 swap chain. During the
+    // frontend migration, default Qt Quick to its software scene graph so the UI
+    // compositor cannot contend with or invalidate the preview's D3D device. The
+    // visual shell uses rectangles/text/animations only, so this preserves its
+    // design while removing an entire GPU-interoperability variable. Developers
+    // can opt back into Qt Quick's GPU backend with BO3_STUDIO_QML_GPU=1.
+    if(!qEnvironmentVariableIsSet("BO3_STUDIO_QML_GPU"))
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+
     app.setOrganizationName("BO3 Shader Studio");
     ComboBoxWheelGuard comboBoxWheelGuard(&app);
     app.installEventFilter(&comboBoxWheelGuard);
@@ -22787,6 +22963,7 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     bool postFxExportRegressionAll = false;
     bool bo3PackageRegressionAll = false;
     bool qmlSmokeTest = false;
+    bool frontendSmokeTest = false;
     bool publicCorpus = false;
     int corpusCount = 250;
     int corpusSeed = 1337;
@@ -22845,6 +23022,10 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         {
             qmlSmokeTest = true;
         }
+        else if(arguments[i] == "--frontend-smoke-test")
+        {
+            frontendSmokeTest = true;
+        }
         else if (arguments[i] == "--regression-case")
         {
             if (i + 1 >= arguments.size())
@@ -22899,7 +23080,8 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         (shadertoyRegressionAll ? 1 : 0) +
         (postFxExportRegressionAll ? 1 : 0) +
         (bo3PackageRegressionAll ? 1 : 0) +
-        (qmlSmokeTest ? 1 : 0);
+        (qmlSmokeTest ? 1 : 0) +
+        (frontendSmokeTest ? 1 : 0);
     if(selectedCliModes > 1)
     {
         WriteCliOutput("FAIL: corpus and regression modes cannot be combined.\n");
@@ -22971,6 +23153,40 @@ int RunBo3ShaderStudio(int argc, char* argv[])
         }
 
         WriteCliOutput(QStringLiteral("QML startup smoke test: PASS\n"));
+        if(SUCCEEDED(com)) CoUninitialize();
+        return 0;
+    }
+
+    if(frontendSmokeTest)
+    {
+        // This is intentionally stronger than --qml-smoke-test: it constructs
+        // the real MainWindow, starts the QML shell, initializes the native D3D
+        // preview, and survives long enough to exercise their coexistence. This
+        // is the integration class that failed on the user's machine.
+        QSettings smokeSettings("OpenAI", "BO3HLSLPreviewer");
+        smokeSettings.setValue("ui/gettingStartedComplete", true);
+        smokeSettings.setValue("updates/automaticCheck", false);
+        AppendStudioStartupTrace(QStringLiteral("Frontend integration smoke test starting"), true);
+        SetStudioStartupPhase(3);
+        MainWindow smokeWindow;
+        smokeWindow.resize(1280, 720);
+        smokeWindow.show();
+        QElapsedTimer timer;
+        timer.start();
+        while(timer.elapsed() < 2400)
+        {
+            app.processEvents(QEventLoop::AllEvents, 30);
+            QThread::msleep(8);
+        }
+        if(!smokeWindow.isVisible())
+        {
+            WriteCliOutput(QStringLiteral("Frontend integration smoke test: FAIL (window not visible)\n"));
+            if(SUCCEEDED(com)) CoUninitialize();
+            return 1;
+        }
+        WriteCliOutput(QStringLiteral("Frontend integration smoke test: PASS\n"));
+        smokeWindow.close();
+        app.processEvents(QEventLoop::AllEvents, 50);
         if(SUCCEEDED(com)) CoUninitialize();
         return 0;
     }
@@ -23078,10 +23294,20 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     splash.show();
     app.processEvents();
 
+    SetStudioStartupPhase(3);
+    AppendStudioStartupTrace(QStringLiteral("Constructing MainWindow"));
     MainWindow window;
+    AppendStudioStartupTrace(QStringLiteral("MainWindow constructed"));
     splash.showMessage("Initializing preview…", Qt::AlignLeft | Qt::AlignBottom, splashAccent);
     app.processEvents();
     window.show();
+    SetStudioStartupPhase(7);
+    AppendStudioStartupTrace(QStringLiteral("Main window shown"));
+    QTimer::singleShot(1500, &window, []
+    {
+        SetStudioStartupPhase(11);
+        AppendStudioStartupTrace(QStringLiteral("Startup survived 1.5 seconds; event loop stable"));
+    });
 
     bool startupAnimations = startupSettings.value("ui/animationsEnabled", true).toBool();
 #ifdef _WIN32
