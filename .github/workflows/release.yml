@@ -290,12 +290,15 @@ jobs:
         if: env.BO3_FAST_TESTER != '1'
         uses: jurplel/install-qt-action@v4
         with:
-          # Preserve the conservative manual/stable release dependency path.
+          # Qt SVG is a Qt archive for this desktop kit, not an aqt --modules
+          # package. Using modules:qtsvg makes aqt 3.3 abort before the build.
+          # Keep the stable/manual install small but include the exact archives
+          # needed by the known-good portable distribution.
           version: '6.8.3'
           host: windows
           target: desktop
           arch: win64_msvc2022_64
-          modules: 'qtsvg'
+          archives: 'qtbase qtsvg'
           cache: true
 
       - name: Restore parallel make helper
