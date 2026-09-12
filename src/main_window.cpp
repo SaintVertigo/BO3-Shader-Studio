@@ -23397,7 +23397,15 @@ int RunBo3ShaderStudio(int argc, char* argv[])
     MainWindow window;
     AppendStudioStartupTrace(QStringLiteral("MainWindow constructed"));
     splash.showMessage("Initializing preview…", Qt::AlignLeft | Qt::AlignBottom, splashAccent);
-    app.processEvents();
+
+    // Do not pump the Qt event queue between constructing the hybrid QML host
+    // and showing the real top-level window.  With QQuickWidget this can run
+    // deferred scene-graph/native-child events while the parent QMainWindow is
+    // still hidden.  The frontend integration smoke test never used this extra
+    // processEvents() call, which is why CI could pass while the normal splash
+    // startup path disappeared immediately after construction on the user's PC.
+    // Let the normal event loop own the first QML frame instead.
+    AppendStudioStartupTrace(QStringLiteral("About to show main window (no pre-show processEvents)"));
     window.show();
     SetStudioStartupPhase(7);
     AppendStudioStartupTrace(QStringLiteral("Main window shown"));
