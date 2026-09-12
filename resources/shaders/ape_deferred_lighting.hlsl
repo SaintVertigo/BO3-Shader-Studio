@@ -274,18 +274,16 @@ float3 ReflectionProbeDirectionLod(float3 direction, float lod)
         clamp(lod, 0.0, max(0.0, previewApeSettings.y))).rgb;
 }
 
-float3 RecoverApeProbeDirectionalContrast(float3 probeSample)
+float3 RecoverApeProbeDirectionalContrast(float3 probeSample, float ndotv)
 {
-    // Phase 1y: after Phase 1x fixed the reference normal field, the remaining
-    // APE/Studio material mismatch is mostly the processed reflection probe.
-    // Measured normalized annuli show APE retaining ~1.5x more directional
-    // variation through the mid sphere and ~1.8x in the main grazing annulus,
-    // while mean brightness is already closely matched.
-    //
-    // Restore that lost structure around the reconstructed probe's own average
-    // rather than multiplying total reflection energy. This leaves the mean
-    // probe energy, direct-sun hotspot, and Phase 1s diffuse path untouched.
-    const float apeDirectionalContrast = 1.75;
+    // Phase 1ab: after 1z aligned the reflection pattern, the Reset A/B pair
+    // gives a clean amplitude measurement: Studio retained ~25.7 vs APE ~32.1
+    // luminance sigma through the mid/outer sphere, and ~35.0 vs ~47.8 in the
+    // outer grazing annulus. Preserve mean probe energy and restore only the
+    // missing directional range. The stronger grazing correction follows the
+    // measured radial error instead of globally boosting reflections.
+    float grazing = 1.0 - saturate(ndotv);
+    float apeDirectionalContrast = lerp(2.18, 2.38, grazing * grazing);
     float3 probeMean = max(previewEnvironmentAmbient.rgb, 0.0);
     return max(probeMean + (probeSample - probeMean) * apeDirectionalContrast, 0.0);
 }
@@ -708,7 +706,7 @@ float4 ps_main(VS_OUT i) : SV_Target0
             // mip 1 effectively sharp and making the result look unchanged.
             float lod = 5.0 * (1.0 - saturate(lightingGloss));
             float3 env = max(ReflectionProbeDirectionLod(R, lod), 0.0);
-            env = RecoverApeProbeDirectionalContrast(env);
+            env = RecoverApeProbeDirectionalContrast(env, NdotV);
             float2 dfg = SampleApeEnvBrdf(NdotV, lightingGloss);
             // Captured final material combine is 0.96 * branchA + 0.04 * branchB
             // for the stock dielectric (see the final 2f9c... instruction block).

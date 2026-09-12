@@ -803,7 +803,9 @@ public:
         setAttribute(Qt::WA_OpaquePaintEvent, true);
         // Keep the Direct3D pane genuinely collapsible. The old 320x240 hard
         // minimum was what prevented the lower compiler pane from being enlarged.
-        setMinimumSize(48, 16);
+        // Let the Qt dock separator follow the cursor essentially all the way,
+        // like APE. syncNativeSize() already clamps the D3D swapchain to >=1x1.
+        setMinimumSize(1, 1);
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
         setFocusPolicy(Qt::StrongFocus);
         setMouseTracking(true);
@@ -21228,7 +21230,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             // Day energy is capture-derived, not eyeballed:
             // sun.color * invExposure = 16384 / 7765.01172 = 2.1099775
             // globalProbeExposure * invExposure = 1941.25403 / 7765.01172 = 0.2500001
-            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 134.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
+            {"Day",     1.0f,      0.947151f, 0.887882f, 125.0f, 150.0f, 14.0f,       15.0f, 0.0f,   1.0f, 16.0f, 1.5f,  0.00f, 1.00f, 1.00f, 172.75f, 1.00f, 1.000f, 2.1099775f, 0.2500001f},
             {"Sunset",  1.0f,      0.768151f, 0.545725f, 158.0f, 300.0f, 11.0f,       12.5f, 0.0f,   8.0f, 12.5f, 1.5f,  0.20f, 0.95f, 0.52f, 120.0f, 1.50f, 0.125f, 3.2f, 0.98f},
             {"Night",   0.791298f, 1.0f,      1.0f,      130.0f, 140.0f, -2.2f,        6.0f, 2.5f,   3.0f,  3.5f, 1.5f,  2.40f, 0.90f, 0.60f, 120.0f, 1.25f, 0.105f, 2.2f, 0.62f}
         };
@@ -21249,13 +21251,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         {
             r.ResetCamera();
             r.RotateCamera(0.0f, 22.5f);
-            // Phase 1z: the resize-comparison video exposes the correct invariant:
-            // APE's sphere diameter is about 58.8% of the material viewport height
-            // at Reset and keeps that ratio as the preview splitter moves. With the
-            // captured 39.430488-degree lens this solves to ~4.85 sphere radii.
-            // Phase 1y's 5.25 value made Studio systematically too small in every
-            // viewport height even though one absolute-pixel screenshot looked close.
-            r.SetCameraDistance(4.85000f);
+            // Phase 1ab: calibrate the fixed APE camera from the two Reset shots
+            // after the exact 39.430488-degree lens was already locked. Studio's
+            // 1z sphere radius was ~158.76 px versus APE's ~176.74 px. Solving
+            // the perspective sphere silhouette (not a viewport-percentage fit)
+            // gives a fixed dolly of ~4.38 radii. Resizing only changes aspect/RT
+            // size; this distance remains invariant, matching APE's viewport model.
+            r.SetCameraDistance(4.38000f);
         }
 
         // Keep these angles in APE's authored Z-up SSI frame. The renderer now
@@ -21271,6 +21273,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         // A preset is an absolute reference state, so restore its authored
         // environment orientation *after* installing the SSI sun direction.
         r.SetEnvironmentRotationDegrees(p.environmentRotation);
+        // Phase 1ab separates the visible Day panorama from the baked material
+        // reflection probe. Screenshot fitting of the actual Reset viewport puts
+        // the visible Day sky at 172.75 degrees, while the captured t51 cube-face
+        // reconstruction remains 134.75 degrees. APE does not use one yaw for both.
+        if (index == 1) r.SetApeProbeRotationDegrees(134.75f);
+        else r.SetApeProbeRotationDegrees(p.environmentRotation);
         // ToolsGfx keeps sun and probe energy separate from display exposure.
         // Keep the ordinary light intensity at unity and apply the APE-specific
         // irradiance/probe calibration in the deferred compositor instead.
@@ -21301,7 +21309,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                 .arg(p.ssiPitch, 0, 'f', 1).arg(p.ssiYaw, 0, 'f', 1)
                 .arg(p.stops, 0, 'f', 2).arg(p.ev, 0, 'f', 2).arg(p.evComp, 0, 'f', 2)
                 .arg(p.evMin, 0, 'f', 1).arg(p.evMax, 0, 'f', 1) +
-                QString(" | %1 | Phase 1aa APE-like unconstrained preview resizing | Phase 1z environment frame + viewport scale | Phase 1y probe contrast | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
+                QString(" | %1 | Phase 1ab APE mesh/UV frame + fixed viewport camera | Phase 1aa unconstrained resize | Phase 1z environment frame | Phase 1x normal recovery | captured Gloss 13 + exact projection | shadow-tree pending")
                     .arg(nativeApeMesh ? "Native APE mesh" : "Studio fallback mesh");
             if (environmentLoaded)
             {
@@ -21317,7 +21325,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         if (!environmentLoaded)
             statusBar()->showMessage(QString("APE Match %1: exact SSI loaded; local HDR sky unavailable").arg(QString::fromLatin1(p.name)), 6000);
         else
-            statusBar()->showMessage(QString("APE Match %1: Phase 1x radial reference normal + preview front-face isolation active; captured Gloss 13/projection retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
+            statusBar()->showMessage(QString("APE Match %1: Phase 1ab mesh/UV frame + separate sky/probe orientation active; Phase 1x hotspot recovery retained; shadow-tree pending").arg(QString::fromLatin1(p.name)), 3500);
         syncSceneControlsFromRenderer();
         updateCameraUi();
     }

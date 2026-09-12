@@ -206,3 +206,11 @@ Phase 1x fixes the remaining rim-locked hotspot by repairing the normal field th
 ## Phase 1y
 
 See `PATCH_NOTES_PHASE1Y.md` for the capture-calibrated reflection-probe directional-contrast recovery and APE viewport-framing correction.
+
+
+## APE Match Phase 1ab
+- Native APE reference meshes now receive the verified APE->Studio coordinate conversion, including winding/tangent handedness, which aligns authored sphere UVs with APE.
+- Day visible sky and baked reflection probe now keep separate capture/screenshot-derived orientations (172.75 / 134.75 degrees).
+- Reset camera is fixed at 4.38 radii with the captured lens; preview resize changes viewport/aspect only.
+- Reflection directional range is recalibrated from the 1z A/B annulus measurements while preserving mean energy.
+- D3D preview minimum is reduced to 1x1 so dock resizing can follow the cursor essentially to collapse.

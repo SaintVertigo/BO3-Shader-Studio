@@ -7,3 +7,7 @@ APE Match now uses the full capture-derived world conversion for environment/pro
 ## Phase 1aa
 
 Studio Preview docks now use APE-like collapsible minimum hints so horizontal and vertical pane resizing follows the mouse through a much larger range instead of hitting hidden Qt layout clamps.
+
+
+## Phase 1ab
+APE Match now aligns the native APE preview-mesh frame/UV orientation, separates visible-sky and baked-probe Day yaw, uses a fixed 4.38-radius Reset camera, and retains APE-like unconstrained preview resizing.

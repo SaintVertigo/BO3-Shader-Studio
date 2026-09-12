@@ -1597,6 +1597,11 @@ public:
         apeProbeRotationDegrees_ = environmentRotationDegrees_;
     }
     float EnvironmentRotationDegrees() const { return environmentRotationDegrees_; }
+    void SetApeProbeRotationDegrees(float degrees)
+    {
+        apeProbeRotationDegrees_ = std::fmod(degrees, 360.0f);
+        if (apeProbeRotationDegrees_ < 0.0f) apeProbeRotationDegrees_ += 360.0f;
+    }
 
     bool LoadShadertoyChannelTexture(int channel, const fs::path& path, bool flipY, std::wstring& error)
     {
@@ -2692,6 +2697,36 @@ public:
         return true;
     }
 
+    static void TransformApeReferenceMeshToStudio(previewmodel::Mesh& imported)
+    {
+        // Phase 1ab: BO3/APE XMODEL_BIN vertices are authored in APE's Z-up
+        // world frame. Phase 1v recovered the exact APE -> Studio mapping used
+        // by the captured camera/sun data:
+        //
+        //   Studio X = -APE Y
+        //   Studio Y =  APE Z
+        //   Studio Z =  APE X
+        //
+        // A sphere remains spherical when this transform is omitted, which is
+        // why the mistake survived for so long; its authored UV seams/tiles do
+        // NOT remain in the same camera-relative orientation. Apply the same
+        // frame conversion to positions, normals, and tangents before upload so
+        // the stock checker UV pattern lands where APE puts it. The transform
+        // has determinant -1, so preserve tangent-space handedness and front-face
+        // winding explicitly as well.
+        for (auto& v : imported.vertices)
+        {
+            const auto p = v.position;
+            const auto n = v.normal;
+            const auto t = v.tangent;
+            v.position = {-p[1], p[2], p[0]};
+            v.normal = {-n[1], n[2], n[0]};
+            v.tangent = {-t[1], t[2], t[0], -t[3]};
+        }
+        for (size_t i = 0; i + 2 < imported.indices.size(); i += 3)
+            std::swap(imported.indices[i + 1], imported.indices[i + 2]);
+    }
+
     bool LoadApeReferenceMesh(PreviewMesh mesh, const fs::path& path, std::wstring& error)
     {
         PreviewMeshBuffers* target = nullptr;
@@ -2717,6 +2752,8 @@ public:
             error = L"APE reference meshes must be BO3 XMODEL_BIN assets.";
             return false;
         }
+
+        TransformApeReferenceMeshToStudio(imported);
 
         PreviewMeshBuffers gpu{};
         if (!UploadImportedPreviewMesh(imported, gpu, error)) return false;
@@ -4190,6 +4227,21 @@ private:
         XMMATRIX world = XMMatrixIdentity();
         if (previewMesh_ == PreviewMesh::Plane || previewMesh_ == PreviewMesh::Card)
             world = XMMatrixScaling(1.8f, 1.8f, 1.8f);
+        else if (materialPreviewProfile_ == MaterialPreviewProfile::ApeMatch &&
+                 previewMesh_ == PreviewMesh::Sphere &&
+                 !HasApeReferenceMesh(PreviewMesh::Sphere))
+        {
+            // Phase 1ab fallback parity: if the user's local Treyarch reference
+            // XMODEL is unavailable, rotate the procedural sphere through the
+            // same APE -> Studio frame. The sphere shape is unchanged, but its
+            // attached UV seam/latitude frame now matches the native APE asset
+            // orientation instead of silently reverting to Studio's Y-up UV rig.
+            world = XMMatrixSet(
+                 0.0f, 0.0f, 1.0f, 0.0f,
+                -1.0f, 0.0f, 0.0f, 0.0f,
+                 0.0f, 1.0f, 0.0f, 0.0f,
+                 0.0f, 0.0f, 0.0f, 1.0f);
+        }
         const XMMATRIX wvp = world * view * proj;
 
         struct MaterialCameraData
@@ -7255,6 +7307,11 @@ void PreviewRenderer::SetEnvironmentRotationDegrees(float degrees)
 float PreviewRenderer::EnvironmentRotationDegrees() const
 {
     return impl_->EnvironmentRotationDegrees();
+}
+
+void PreviewRenderer::SetApeProbeRotationDegrees(float degrees)
+{
+    impl_->SetApeProbeRotationDegrees(degrees);
 }
 
 bool PreviewRenderer::LoadShadertoyChannelTexture(int channel, const std::filesystem::path& path, bool flipY, std::wstring& error)

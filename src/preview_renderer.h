@@ -152,6 +152,7 @@ public:
     void ResetLightColorToEnvironment();
     void SetEnvironmentRotationDegrees(float degrees);
     float EnvironmentRotationDegrees() const;
+    void SetApeProbeRotationDegrees(float degrees);
     bool LoadShadertoyChannelTexture(int channel, const std::filesystem::path& path, bool flipY, std::wstring& error);
     void ClearShadertoyChannelTexture(int channel);
     void SetShadertoyChannelRepeat(int channel, bool repeat);
